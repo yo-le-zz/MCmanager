@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCManager</title>
+<link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+<link rel="icon" type="image/png" href="assets/icon-32.png">
+<link rel="apple-touch-icon" href="assets/icon-256.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="assets/icon-256.png" alt="MCManager" class="brand-icon-img">
+      <div>
+        <div class="brand-title">MCManager</div>
+        <div class="brand-version" id="app-version">v1.0.1</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <button class="nav-item active" data-view="dashboard">📊 Tableau de bord</button>
+      <button class="nav-item" data-view="servers">🖥 Serveurs</button>
+      <button class="nav-item" data-view="console" data-needs-server="1">📟 Console</button>
+      <button class="nav-item" data-view="files" data-needs-server="1">📁 Fichiers</button>
+      <button class="nav-item" data-view="addons" data-needs-server="1">🧩 Mods / Plugins</button>
+      <button class="nav-item" data-view="marketplace" data-needs-server="1">🛒 Marketplace</button>
+      <button class="nav-item" data-view="schematics" data-needs-server="1">🏗 Schematics</button>
+      <button class="nav-item" data-view="backups" data-needs-server="1">💾 Sauvegardes</button>
+      <button class="nav-item" data-view="network">🌐 Réseau (playit.gg)</button>
+      <button class="nav-item" data-view="docs">📚 Docs &amp; tutos</button>
+      <button class="nav-item" data-view="settings">⚙ Paramètres</button>
+    </nav>
+    <div class="server-picker">
+      <label>Serveur actif</label>
+      <select id="server-select"><option value="">— aucun —</option></select>
+    </div>
+    <div id="update-banner" class="update-banner hidden">
+      <span id="update-text"></span>
+      <button id="update-apply-btn">Mettre à jour</button>
+    </div>
+  </aside>
+  <main id="content"></main>
+</div>
+<div id="toast-container"></div>
+<script src="app.js"></script>
+</body>
+</html>

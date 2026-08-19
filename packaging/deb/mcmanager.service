@@ -1,0 +1,13 @@
+[Unit]
+Description=MCManager - gestionnaire de serveurs Minecraft
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mcmanager
+Restart=on-failure
+Environment=MCMANAGER_HOST=127.0.0.1
+Environment=MCMANAGER_PORT=7777
+
+[Install]
+WantedBy=default.target

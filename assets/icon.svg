@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#b7bdf8"/>
+      <stop offset="100%" stop-color="#8aadf4"/>
+    </linearGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5b6078"/>
+      <stop offset="100%" stop-color="#363a4f"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8087a2"/>
+      <stop offset="100%" stop-color="#494d64"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="48" fill="#181926"/>
+  <!-- isometric cube = "server block" -->
+  <g transform="translate(128,54)">
+    <polygon points="0,0 70,40 0,80 -70,40" fill="url(#top)"/>
+    <polygon points="0,80 70,40 70,120 0,160" fill="url(#right)"/>
+    <polygon points="0,80 -70,40 -70,120 0,160" fill="url(#left)"/>
+    <!-- little "signal" dots evoking a server / network -->
+    <circle cx="0" cy="40" r="7" fill="#a6da95"/>
+    <rect x="-34" y="88" width="16" height="6" rx="2" fill="#cad3f5" opacity="0.85"/>
+    <rect x="-34" y="100" width="24" height="6" rx="2" fill="#cad3f5" opacity="0.6"/>
+    <rect x="18" y="88" width="16" height="6" rx="2" fill="#cad3f5" opacity="0.85"/>
+    <rect x="18" y="100" width="24" height="6" rx="2" fill="#cad3f5" opacity="0.6"/>
+  </g>
+</svg>

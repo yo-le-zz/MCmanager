@@ -1,0 +1,8 @@
+/target
+/dist
+*.old
+*.new
+Cargo.lock.bak
+.DS_Store
+mcmanager-data/
+flake.lock

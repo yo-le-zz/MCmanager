@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+      - run: chmod +x build.sh && ./build.sh linux && ./build.sh installer
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+            dist/install-linux.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: |
+          mkdir dist
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches.Groups[1].Value
+          $out = "dist/mcmanager-$ver-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $out
+          Copy-Item target/release/mcmanager.exe $out/
+          Copy-Item -Recurse web $out/web
+          Copy-Item README.md,LICENSE,CHANGELOG.md $out/
+          Compress-Archive -Path $out -DestinationPath "dist/mcmanager-$ver-windows-x86_64.zip"
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: dist/*.zip
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+      - run: nix build .#default
+      - run: mkdir -p dist && tar czf dist/mcmanager-nix-x86_64-linux.tar.gz -C result .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nix-artifacts
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [linux, windows, nix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: artifacts/**/*

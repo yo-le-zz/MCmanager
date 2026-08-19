@@ -1,0 +1,12 @@
+Package: mcmanager
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: __ARCH__
+Maintainer: yolezz
+Depends: default-jre-headless | java17-runtime | java-runtime, libssl3 | libssl1.1
+Description: MCManager - gestionnaire de serveurs Minecraft
+ MCManager est un gestionnaire de serveurs Minecraft (Vanilla, Paper, Purpur,
+ Spigot, Fabric, Forge, NeoForge) avec interface web integree, marketplace
+ Modrinth, gestion des sauvegardes, des schematics WorldEdit/FAWE et
+ integration playit.gg.

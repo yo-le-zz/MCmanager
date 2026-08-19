@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+mkdir -p /usr/share/mcmanager
+chmod 755 /usr/bin/mcmanager || true
+echo ""
+echo "MCManager installe."
+echo "Lancez-le avec la commande : mcmanager"
+echo "Interface web par defaut  : http://127.0.0.1:7777"
+echo "Pour le lancer au demarrage : systemctl --user enable --now mcmanager"
+exit 0
