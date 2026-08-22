@@ -3,6 +3,50 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.0.3] - 2026-08-22 (fournisseur OmniRoute, corrections release/mise a jour)
+### Ajouts
+- **OmniRoute comme fournisseur pour l'assistant IA** ([omniroute.online](https://omniroute.online/),
+  [github.com/diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute)) :
+  passerelle auto-hébergée, compatible OpenAI, donnant accès à 300+
+  fournisseurs (Claude, GPT, Gemini, Kimi, DeepSeek...) derrière une seule
+  clé API. Champ d'URL dédié (par défaut `http://127.0.0.1:20128/v1`, le
+  port local par défaut d'OmniRoute), détection des modèles disponibles via
+  `GET /v1/models`, modèle par défaut `auto` (routage intelligent
+  zero-config d'OmniRoute). Comme pour les autres fournisseurs, la clé est
+  chiffrée sur disque (AES-256-GCM).
+### Corrections
+- **Le binaire Windows ne contenait ni le binaire CLI headless ni les
+  dernières fonctionnalités (assistant IA, etc.).** Deux causes distinctes,
+  toutes deux corrigées :
+  - Le job Windows du workflow de release compilait avec `cargo build
+    --release` (sans `--bins`) et ne copiait que `mcmanager.exe` dans
+    l'archive, jamais `mcmanager-headless.exe`. L'installateur Inno Setup
+    généré par `build.sh installer` avait le même trou. Les deux copient
+    maintenant les deux binaires.
+  - Le dépôt GitHub réel est `yo-le-zz/MCmanager`, mais le code (URL de
+    mise à jour, user-agent HTTP, liens `nix run`, README, docs, scripts de
+    build/installateur) pointait vers `yolezz/mcmanager` — un dépôt
+    différent qui n'existe pas. Toute vérification de mise à jour échouait
+    donc silencieusement (404 sur l'API GitHub), et le binaire semblait "ne
+    jamais se mettre à jour" quel que soit le tag publié. Corrigé partout :
+    `src/state.rs` (`update_repo`, user-agent), `src/updater.rs`,
+    `README.md`, `docs/BUILD.md`, `docs/TUTO_INSTALLATION_GLFOS.md`,
+    `flake.nix`, `packaging/nix/*.nix`, `build.sh`.
+- **La création de release GitHub échouait avec une erreur 403** ("Resource
+  not accessible by integration"). Le token `GITHUB_TOKEN` par défaut n'a
+  que les droits de lecture sur le contenu du dépôt tant qu'on ne déclare
+  pas explicitement `permissions: contents: write` dans le workflow —
+  ajouté au niveau du workflow et du job `publish`.
+- **Avertissement "Node.js 20 is being deprecated"** dans les logs du
+  workflow : les actions `actions/checkout`, `actions/upload-artifact`,
+  `actions/download-artifact` et `softprops/action-gh-release` étaient
+  épinglées sur des versions majeures qui tournent encore sur Node 20.
+  Mises à jour vers leurs dernières versions majeures (respectivement v6,
+  v7, v8, v3), qui tournent nativement sur Node 24.
+- Versions de paquet Nix (`flake.nix`, `packaging/nix/*.nix`) resynchronisées
+  avec la version réelle de l'application (elles étaient restées bloquées
+  sur d'anciennes valeurs sans rapport avec `Cargo.toml`).
+
 ## [1.0.2] - 2026-08-20 (i18n, UI/UX, mods/plugins avances, mode debug, CLI, assistant IA)
 ### Ajouts
 - **Support multilingue (FR / EN / ES)** : nouvelle infrastructure `web/i18n.js`
@@ -102,7 +146,7 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 - **Sauvegardes non compatibles Windows** : les chemins internes du zip
   utilisaient le séparateur natif de l'OS (`\` sous Windows) au lieu de `/`
   comme l'exige le format zip.
-- **`nix run github:yolezz/mcmanager` ne fonctionnait pas** : le flake.nix
+- **`nix run github:yo-le-zz/MCmanager` ne fonctionnait pas** : le flake.nix
   était dans `packaging/nix/` au lieu de la racine du dépôt. Déplacé à la
   racine - la commande standard fonctionne maintenant directement.
 - Détection de timeout du ping serveur plus tolérante (un serveur qui vient

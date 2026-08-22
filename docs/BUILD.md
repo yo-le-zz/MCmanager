@@ -22,7 +22,7 @@ Debian/Ubuntu). Le script construit une arborescence `usr/bin`,
 
 ### NixOS / GLF OS
 `flake.nix` (à la **racine** du dépôt — important pour que
-`nix run github:yolezz/mcmanager` fonctionne sans préciser de sous-dossier)
+`nix run github:yo-le-zz/MCmanager` fonctionne sans préciser de sous-dossier)
 fournit :
 - un paquet (`nix build`/`nix run`),
 - un module NixOS (`services.mcmanager.enable = true;`).

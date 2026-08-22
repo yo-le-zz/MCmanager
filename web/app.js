@@ -996,7 +996,7 @@ async function renderAssistant() {
   try {
     cfg = await api("/ai/config");
   } catch {
-    cfg = { provider: "anthropic", model: "", ollama_base_url: "", has_key: false, masked_key: "" };
+    cfg = { provider: "anthropic", model: "", ollama_base_url: "", omniroute_base_url: "", has_key: false, masked_key: "" };
   }
 
   content.innerHTML = `
@@ -1012,6 +1012,7 @@ async function renderAssistant() {
             <option value="openai" ${cfg.provider === "openai" ? "selected" : ""}>OpenAI (GPT)</option>
             <option value="gemini" ${cfg.provider === "gemini" ? "selected" : ""}>Google Gemini</option>
             <option value="ollama" ${cfg.provider === "ollama" ? "selected" : ""}>Ollama (local)</option>
+            <option value="omniroute" ${cfg.provider === "omniroute" ? "selected" : ""}>OmniRoute (passerelle multi-fournisseurs)</option>
           </select>
         </div>
         <div class="form-row" id="ai-key-row">
@@ -1021,6 +1022,15 @@ async function renderAssistant() {
         <div class="form-row" id="ai-ollama-row" style="${cfg.provider === "ollama" ? "" : "display:none"}">
           <label>URL Ollama local</label>
           <input id="ai-ollama-url" placeholder="http://127.0.0.1:11434" value="${escapeHtml(cfg.ollama_base_url || "")}">
+        </div>
+        <div class="form-row" id="ai-omniroute-row" style="${cfg.provider === "omniroute" ? "" : "display:none"}">
+          <label>URL OmniRoute</label>
+          <input id="ai-omniroute-url" placeholder="http://127.0.0.1:20128/v1" value="${escapeHtml(cfg.omniroute_base_url || "")}">
+          <p style="color:var(--overlay0);font-size:12px;margin-top:4px">
+            Auto-hébergé (<a href="https://github.com/diegosouzapw/OmniRoute" target="_blank" rel="noopener">github.com/diegosouzapw/OmniRoute</a>,
+            <a href="https://omniroute.online/" target="_blank" rel="noopener">omniroute.online</a>) — passerelle vers 300+ fournisseurs (Claude, GPT, Gemini, Kimi, DeepSeek...)
+            derrière une seule clé. Par défaut sur l'adresse locale du tableau de bord ; changez l'URL si vous faites tourner OmniRoute ailleurs. La clé API se récupère dans son Dashboard → Endpoints.
+          </p>
         </div>
         <div class="form-row">
           <label>Modèle</label>
@@ -1048,11 +1058,14 @@ async function renderAssistant() {
 
   $("#ai-provider").addEventListener("change", (e) => {
     $("#ai-ollama-row").style.display = e.target.value === "ollama" ? "" : "none";
+    $("#ai-omniroute-row").style.display = e.target.value === "omniroute" ? "" : "none";
     $("#ai-key-row").style.display = e.target.value === "ollama" ? "none" : "";
   });
 
   // Auto-detect provider from the shape of a pasted key (sk-ant-... /
   // sk-... / AIza...), mirroring the same heuristic the backend uses.
+  // OmniRoute keys have no fixed public prefix, so they aren't auto-detected
+  // this way - pick "OmniRoute" from the dropdown manually.
   $("#ai-key").addEventListener("input", (e) => {
     const k = e.target.value.trim();
     let detected = null;
@@ -1076,6 +1089,7 @@ async function renderAssistant() {
         api_key: $("#ai-key").value,
         model: $("#ai-model").value || "",
         ollama_base_url: $("#ai-ollama-url").value || "",
+        omniroute_base_url: $("#ai-omniroute-url").value || "",
       }) });
       const models = await api("/ai/models");
       const sel = $("#ai-model");
@@ -1099,6 +1113,7 @@ async function renderAssistant() {
         api_key: $("#ai-key").value,
         model: $("#ai-model").value || "",
         ollama_base_url: $("#ai-ollama-url").value || "",
+        omniroute_base_url: $("#ai-omniroute-url").value || "",
       }) });
       toast("Configuration de l'assistant enregistrée.", "success");
       renderAssistant();

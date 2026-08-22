@@ -845,6 +845,8 @@ struct SaveAiConfigBody {
     model: String,
     #[serde(default)]
     ollama_base_url: String,
+    #[serde(default)]
+    omniroute_base_url: String,
 }
 
 #[derive(Serialize)]
@@ -852,6 +854,7 @@ struct AiConfigView {
     provider: String,
     model: String,
     ollama_base_url: String,
+    omniroute_base_url: String,
     has_key: bool,
     masked_key: String,
 }
@@ -862,6 +865,7 @@ async fn get_ai_config(State(state): State<AppState>) -> AppResult<Json<AiConfig
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         ollama_base_url: cfg.ollama_base_url.clone(),
+        omniroute_base_url: cfg.omniroute_base_url.clone(),
         has_key: !cfg.api_key.is_empty(),
         masked_key: cfg.masked_key(),
     }))
@@ -875,11 +879,13 @@ async fn save_ai_config(State(state): State<AppState>, Json(body): Json<SaveAiCo
     }
     cfg.model = body.model;
     cfg.ollama_base_url = body.ollama_base_url;
+    cfg.omniroute_base_url = body.omniroute_base_url;
     ai::save_config(&state.data_dir, &cfg).await?;
     Ok(Json(AiConfigView {
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         ollama_base_url: cfg.ollama_base_url.clone(),
+        omniroute_base_url: cfg.omniroute_base_url.clone(),
         has_key: !cfg.api_key.is_empty(),
         masked_key: cfg.masked_key(),
     }))

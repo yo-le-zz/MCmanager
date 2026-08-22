@@ -7,7 +7,7 @@ Pas besoin de savoir coder, une seule commande suffit.
 Ouvre un terminal et tape :
 
 ```bash
-nix run github:yolezz/mcmanager
+nix run github:yo-le-zz/MCmanager
 ```
 
 La première fois, ça va télécharger et compiler des trucs (ça peut prendre
@@ -30,7 +30,7 @@ serveur"). Pour arrêter MCManager : retourne dans le terminal et fais
 Relance simplement la même commande :
 
 ```bash
-nix run github:yolezz/mcmanager
+nix run github:yo-le-zz/MCmanager
 ```
 
 Nix va automatiquement récupérer la dernière version du projet sur GitHub et
@@ -44,7 +44,7 @@ Si tu veux que MCManager tourne en permanence sans avoir à taper la commande
 à chaque fois, ajoute ceci dans ta config NixOS (`/etc/nixos/flake.nix`) :
 
 ```nix
-inputs.mcmanager.url = "github:yolezz/mcmanager";
+inputs.mcmanager.url = "github:yo-le-zz/MCmanager";
 # ...
 services.mcmanager.enable = true;
 ```
@@ -61,7 +61,7 @@ Ce n'est pas obligatoire pour juste essayer MCManager.
 - **"nix run" prend très longtemps** → c'est normal la première fois
   (compilation). Les fois suivantes seront beaucoup plus rapides.
 - **Erreur "flake.nix not found" ou du genre** → assure-toi de taper
-  exactement `nix run github:yolezz/mcmanager` (sans rien ajouter après) ;
+  exactement `nix run github:yo-le-zz/MCmanager` (sans rien ajouter après) ;
   versions antérieures à 1.0.1 de ce tuto pointaient vers un mauvais chemin,
   c'est corrigé depuis.
 - **Ça affiche une erreur bizarre** → fais une capture d'écran du terminal et

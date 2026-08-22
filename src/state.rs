@@ -116,7 +116,7 @@ pub async fn build_state() -> anyhow::Result<AppState> {
     };
 
     let http = reqwest::Client::builder()
-        .user_agent("mcmanager/1.0.0 (+https://github.com/yolezz/mcmanager)")
+        .user_agent("mcmanager/1.0.0 (+https://github.com/yo-le-zz/MCmanager)")
         .build()?;
 
     let (playit_tx, _rx) = broadcast::channel(512);
@@ -140,7 +140,7 @@ fn default_config(data_dir: &PathBuf) -> AppConfig {
     AppConfig {
         java_path: "java".to_string(),
         playit_path: None,
-        update_repo: "yolezz/mcmanager".to_string(),
+        update_repo: "yo-le-zz/MCmanager".to_string(),
         check_updates_on_start: true,
         data_dir: data_dir.to_string_lossy().to_string(),
     }

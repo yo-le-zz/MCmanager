@@ -1,114 +1,73 @@
-# MCManager v1.0.2 — Multilingue, paramètres serveur étendus, CLI headless, assistant IA
+# MCManager v1.0.3 — OmniRoute, et corrections de release/mise à jour importantes
 
-Grosse mise à jour : support multilingue complet, gestion avancée des
-mods/plugins, un vrai outil de diagnostic de crash, un binaire séparé pour
-gérer MCManager sans interface web sur un serveur distant, et un assistant
-IA intégré.
+Cette version ajoute **OmniRoute** comme fournisseur pour l'assistant IA, et
+corrige trois bugs qui empêchaient les releases précédentes de fonctionner
+correctement en pratique : le binaire Windows incomplet, la mise à jour
+automatique cassée, et la création de release GitHub qui échouait.
 
-## 🌍 Multilingue
+## 🤖 Nouveau fournisseur IA — OmniRoute
 
-- **Français / Anglais / Espagnol** dans toute l'interface, y compris la
-  page Docs & tutoriels. Détection automatique de la langue du navigateur,
-  sélecteur manuel dans Paramètres.
+[OmniRoute](https://omniroute.online/) ([GitHub](https://github.com/diegosouzapw/OmniRoute))
+est une passerelle IA auto-hébergée, compatible OpenAI, qui donne accès à
+300+ fournisseurs (Claude, GPT, Gemini, Kimi, DeepSeek...) derrière une
+seule clé API. Elle s'ajoute aux quatre fournisseurs existants
+(Anthropic, OpenAI, Gemini, Ollama) dans l'onglet Assistant IA :
 
-## 🖥 Interface
+- Champ d'URL dédié, par défaut `http://127.0.0.1:20128/v1` (le port local
+  standard d'OmniRoute) — modifiable si vous faites tourner OmniRoute
+  ailleurs.
+- Détection automatique des modèles disponibles.
+- Modèle par défaut `auto` (le routage intelligent zero-config d'OmniRoute).
+- Clé API chiffrée sur disque (AES-256-GCM), comme pour les autres
+  fournisseurs.
 
-- **Mise en page pleine hauteur** : la console (jeu et playit.gg) et
-  l'explorateur/éditeur de fichiers occupent tout l'espace vertical
-  disponible au lieu d'une hauteur fixe, quel que soit le format d'écran.
-- **Bouton "Ouvrir dans l'explorateur"** sur chaque serveur et dans
-  Fichiers : ouvre le dossier correspondant dans l'explorateur natif de
-  l'OS.
-- **Bouton "Config" par mod/plugin** : accès direct au dossier
-  `mods/`/`plugins/` du serveur depuis l'onglet Fichiers.
-- Suppression des préréglages recommandés dans Mods/Plugins (prenaient de
-  la place sans utilité avérée).
+## 🐛 Corrections importantes
 
-## ⚙️ Paramètres serveur étendus
+### Le binaire Windows était incomplet
+Le job Windows du workflow de release compilait sans `--bins` et ne
+copiait que `mcmanager.exe` — jamais `mcmanager-headless.exe`, ni les
+dernières fonctionnalités si le tag ne pointait pas sur le bon commit.
+L'installateur Inno Setup avait le même trou. **Corrigé** : les deux
+binaires sont maintenant inclus partout (archive portable, installateur,
+paquet .deb).
 
-- Délai de redémarrage après crash configurable (au lieu d'un délai fixe
-  de 5s).
-- Redémarrage programmé (toutes les N minutes).
-- Arrêt automatique si aucun joueur n'a rejoint depuis N minutes.
-- Tout est modifiable à tout moment depuis Paramètres, même après la
-  création du serveur, sans attendre un redémarrage manuel.
+### La mise à jour automatique ne détectait jamais rien
+Cause racine trouvée : le dépôt GitHub réel est `yo-le-zz/MCmanager`, mais
+le code de vérification de mise à jour (et le user-agent HTTP, les liens
+`nix run`, le README, la doc, les scripts de build) pointait vers
+`yolezz/mcmanager` — **un dépôt différent qui n'existe pas**. Chaque
+vérification échouait silencieusement (404), donc l'application ne
+détectait jamais de nouvelle version, quel que soit le tag publié.
+**Corrigé partout** dans le code et la documentation.
 
-## 🧩 Mods/plugins avancés
+### La création de release GitHub échouait (403)
+Le token `GITHUB_TOKEN` par défaut n'a que les droits de lecture sur le
+dépôt tant que `permissions: contents: write` n'est pas déclaré
+explicitement dans le workflow. **Ajouté** au niveau du workflow et du job
+`publish` — les releases se créent maintenant normalement.
 
-- **Bouton "Ajouter les mods/plugins de performance"** : installe en un
-  clic un trousseau curé (Chunky, Lithium, spark...) compatible avec le
-  loader du serveur.
-- **Mods/plugins "gérés"** : liste définie par l'utilisateur (par ID/slug
-  Modrinth) que MCManager garde dans la bonne version pour ce serveur.
-  Rien ne se télécharge automatiquement — un bouton "Synchroniser
-  maintenant" déclenche la mise à jour quand l'utilisateur le décide.
-  Ajoutable aussi directement depuis les résultats du Marketplace.
-
-## 🩺 Mode debug — diagnostic de crash
-
-Nouveau bouton dans la Console qui automatise la recherche d'un mod/plugin
-qui fait planter le serveur :
-
-1. Teste d'abord la configuration actuelle telle quelle (rien n'est
-   touché si elle démarre déjà).
-2. Sinon, désactive tout, confirme que le serveur démarre nu, puis
-   réactive chaque addon individuellement pour trouver celui qui plante
-   **à lui seul**.
-3. Si aucun coupable individuel n'est trouvé mais que l'ensemble complet
-   ne démarre pas, réactive les addons un par un de façon cumulative pour
-   repérer une **combinaison** problématique entre plusieurs d'entre eux.
-
-Tout est remis dans l'état d'origine à la fin, et la progression s'affiche
-en direct dans la console.
-
-## 🖧 Binaire CLI séparé — `mcmanager-headless`
-
-Gère les serveurs (création, démarrage/arrêt, mods/plugins, diagnostic...)
-entièrement en ligne de commande, **sans jamais démarrer de serveur
-web/API HTTP** — pensé pour un VPS/serveur Ubuntu sans navigateur. Partage
-le même code et le même format de données que `mcmanager` (web). Un
-verrou d'instance (`mcmanager.lock`) empêche de lancer les deux binaires
-en même temps sur le même dossier de données et de corrompre l'état des
-serveurs. Voir [docs/HEADLESS.md](./docs/HEADLESS.md).
-
-## 🤖 Assistant IA
-
-Nouvel onglet "Assistant IA" : chatbox qui donne des suggestions sur quoi
-ajouter/modifier/réparer, avec le contexte réel du serveur sélectionné
-(loader, version, mods/plugins installés, état).
-
-- Quatre fournisseurs au choix : **Anthropic (Claude), OpenAI, Google
-  Gemini, ou Ollama en local**.
-- Le fournisseur est détecté automatiquement à partir du format de la clé
-  collée, et la liste des modèles disponibles est récupérée directement
-  auprès du fournisseur.
-- **Clé API chiffrée sur disque (AES-256-GCM)**, avec une clé de
-  chiffrement générée localement et stockée séparément (accès restreint
-  au propriétaire du compte). Une vraie protection contre une
-  copie/sauvegarde accidentelle du seul fichier de config — mais pas
-  l'équivalent d'un trousseau système, puisque la clé de déchiffrement
-  reste sur la même machine (indiqué clairement dans l'interface).
-- Pour **Ollama en local uniquement**, l'assistant dispose d'outils de
-  recherche web et de lecture de page (pour compenser l'absence de
-  connaissances à jour d'un modèle local), avec repli automatique sur
-  Wikipedia si la recherche web échoue.
-
-## 🐛 Corrections
-
-- **playit.gg n'affichait rien au démarrage tant que le binaire était déjà
-  téléchargé** : la sortie de l'agent imprimée juste avant l'ouverture du
-  WebSocket de la console était perdue. Un tampon de rediffusion a été
-  ajouté (même principe que la console des serveurs) : les dernières
-  lignes sont maintenant rejouées à la connexion.
+### Nettoyage annexe
+- Mise à jour des actions GitHub (`checkout`, `upload-artifact`,
+  `download-artifact`, `action-gh-release`) vers leurs dernières versions
+  majeures (Node 24 natif), pour faire disparaître l'avertissement de
+  dépréciation Node 20 dans les logs.
+- Versions de paquet Nix resynchronisées avec la version réelle de
+  l'application.
 
 ## 📥 Téléchargements
 
 | Plateforme | Fichier |
 |---|---|
-| Linux (Debian/Ubuntu) | `mcmanager_1.0.2_amd64.deb` (inclut `mcmanager` et `mcmanager-headless`) |
-| Linux (portable) | `mcmanager-1.0.2-linux-x86_64.tar.gz` |
-| NixOS / GLF OS | `nix run github:yolezz/mcmanager` |
-| Windows (portable) | `mcmanager-1.0.2-windows-x86_64.zip` |
-| Windows (installeur) | `mcmanager-1.0.2-setup.exe` |
+| Linux (Debian/Ubuntu) | `mcmanager_1.0.3_amd64.deb` (inclut `mcmanager` et `mcmanager-headless`) |
+| Linux (portable) | `mcmanager-1.0.3-linux-x86_64.tar.gz` |
+| NixOS / GLF OS | `nix run github:yo-le-zz/MCmanager` |
+| Windows (portable) | `mcmanager-1.0.3-windows-x86_64.zip` |
+| Windows (installeur) | `mcmanager-1.0.3-setup.exe` |
 
 **Changelog complet :** voir [CHANGELOG.md](./CHANGELOG.md)
+
+> ⚠️ Si vous mettez à jour depuis une version antérieure à 1.0.2 ou 1.0.3
+> et que la mise à jour automatique ne détecte toujours rien après cette
+> release : vérifiez que le tag `v1.0.3` a bien été poussé **après** ces
+> correctifs (`git push origin v1.0.3` sur le dernier commit), pas avant —
+> un tag existant ne bouge pas tout seul.

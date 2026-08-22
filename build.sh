@@ -165,13 +165,13 @@ build_nix() {
 # MCManager - installation NixOS / Nix
 
 Le flake.nix canonique vit a la racine du depot (pas dans packaging/nix) afin
-que `nix run github:yolezz/mcmanager` fonctionne directement, sans avoir a
+que `nix run github:yo-le-zz/MCmanager` fonctionne directement, sans avoir a
 preciser un sous-dossier.
 
 ## Avec flakes (recommandé, ex: GLF OS)
-    nix run github:yolezz/mcmanager
+    nix run github:yo-le-zz/MCmanager
     # ou, dans /etc/nixos/flake.nix :
-    inputs.mcmanager.url = "github:yolezz/mcmanager";
+    inputs.mcmanager.url = "github:yo-le-zz/MCmanager";
     # puis importez `mcmanager.nixosModules.default` et activez :
     services.mcmanager.enable = true;
 
@@ -205,6 +205,10 @@ echo "Installation de MCManager ${VERSION}…"
 DEST="\${1:-/usr/local}"
 sudo mkdir -p "\$DEST/bin" "\$DEST/share/mcmanager"
 sudo cp "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager" "\$DEST/bin/mcmanager"
+if [ -f "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager-headless" ]; then
+  sudo cp "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager-headless" "\$DEST/bin/mcmanager-headless"
+  sudo chmod +x "\$DEST/bin/mcmanager-headless"
+fi
 sudo cp -r "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/web" "\$DEST/share/mcmanager/web"
 sudo chmod +x "\$DEST/bin/mcmanager"
 echo "Installé. Lancez avec: mcmanager"
@@ -236,6 +240,7 @@ LicenseFile=LICENSE
 
 [Files]
 Source: "${APP_NAME}-${VERSION}-windows-x86_64\\mcmanager.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "${APP_NAME}-${VERSION}-windows-x86_64\\mcmanager-headless.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "${APP_NAME}-${VERSION}-windows-x86_64\\web\\*"; DestDir: "{app}\\web"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

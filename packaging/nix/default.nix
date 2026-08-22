@@ -2,7 +2,7 @@
 
 pkgs.rustPlatform.buildRustPackage {
   pname = "mcmanager";
-  version = "1.0.1";
+  version = "1.0.3";
   src = ../..;
 
   cargoLock.lockFile = ../../Cargo.lock;
@@ -17,7 +17,7 @@ pkgs.rustPlatform.buildRustPackage {
 
   meta = with pkgs.lib; {
     description = "Gestionnaire de serveurs Minecraft (web UI, marketplace Modrinth, playit.gg)";
-    homepage = "https://github.com/yolezz/mcmanager";
+    homepage = "https://github.com/yo-le-zz/MCmanager";
     license = licenses.mit;
     mainProgram = "mcmanager";
   };

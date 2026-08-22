@@ -3,7 +3,7 @@
 **Gestionnaire de serveurs Minecraft** — rapide, tout-en-un, avec interface web.
 Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkinter.
 
-> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.1**
+> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.3**
 
 ---
 
@@ -25,14 +25,14 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Import de serveurs existants** : pointez MCManager vers un dossier de serveur déjà présent sur la machine.
 - **CLI headless** (`mcmanager cli list/status/start/stop/create`) pour gérer un serveur MCManager tournant sur une machine distante sans navigateur.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
-- **Multiplateforme** : Linux (.deb + script d'installation), NixOS/GLF OS (flake.nix à la racine + module NixOS — `nix run github:yolezz/mcmanager`), Windows (portable + installateur Inno Setup).
+- **Multiplateforme** : Linux (.deb + script d'installation), NixOS/GLF OS (flake.nix à la racine + module NixOS — `nix run github:yo-le-zz/MCmanager`), Windows (portable + installateur Inno Setup).
 
 ### Mise à jour automatique selon le type d'installation
 | Installation | Comportement |
 |---|---|
 | Portable (zip/tar.gz) | Mise à jour en un clic depuis l'UI |
 | `.deb` | Désactivée volontairement (ne casse pas dpkg/apt) — l'appli indique comment mettre à jour via un nouveau `.deb` |
-| Nix / `nix run` | Désactivée (store Nix en lecture seule) — relancez simplement `nix run github:yolezz/mcmanager`, Nix récupère la dernière version automatiquement |
+| Nix / `nix run` | Désactivée (store Nix en lecture seule) — relancez simplement `nix run github:yo-le-zz/MCmanager`, Nix récupère la dernière version automatiquement |
 
 
 ---
@@ -65,11 +65,11 @@ Ou via le script universel : `./install-linux.sh`.
 
 ### NixOS / GLF OS
 ```bash
-nix run github:yolezz/mcmanager
+nix run github:yo-le-zz/MCmanager
 ```
 Ou en tant que service système, dans votre `flake.nix` :
 ```nix
-inputs.mcmanager.url = "github:yolezz/mcmanager";
+inputs.mcmanager.url = "github:yo-le-zz/MCmanager";
 # ...
 services.mcmanager.enable = true;
 ```

@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AiConfig {
-    /// "anthropic" | "openai" | "gemini" | "ollama"
+    /// "anthropic" | "openai" | "gemini" | "ollama" | "omniroute"
     pub provider: String,
     /// Plaintext in memory only - see `StoredAiConfig` for the encrypted
     /// on-disk representation. Never (de)serialized directly to the config
@@ -51,6 +51,13 @@ pub struct AiConfig {
     /// Ollama port if left empty.
     #[serde(default)]
     pub ollama_base_url: String,
+    /// Only used for provider == "omniroute". OmniRoute (omniroute.online /
+    /// github.com/diegosouzapw/OmniRoute) is a self-hosted, OpenAI-compatible
+    /// AI gateway that fronts 300+ providers behind one endpoint - defaults
+    /// to its standard local dashboard port, but can point at a remote
+    /// instance the user runs elsewhere.
+    #[serde(default)]
+    pub omniroute_base_url: String,
 }
 
 /// What actually lands in `ai_config.json`: everything in plain JSON except
@@ -64,6 +71,8 @@ struct StoredAiConfig {
     provider: String,
     model: String,
     ollama_base_url: String,
+    #[serde(default)]
+    omniroute_base_url: String,
     encrypted_key: Option<EncryptedBlob>,
 }
 
@@ -79,6 +88,16 @@ impl AiConfig {
             "http://127.0.0.1:11434".to_string()
         } else {
             self.ollama_base_url.trim_end_matches('/').to_string()
+        }
+    }
+
+    /// OmniRoute's own docs use `http://localhost:20128/v1` as the default
+    /// local base URL (its dashboard runs on a different port, 20129).
+    fn omniroute_url(&self) -> String {
+        if self.omniroute_base_url.trim().is_empty() {
+            "http://127.0.0.1:20128/v1".to_string()
+        } else {
+            self.omniroute_base_url.trim_end_matches('/').to_string()
         }
     }
 
@@ -170,7 +189,7 @@ pub async fn load_config(data_dir: &Path) -> AiConfig {
         },
         None => String::new(),
     };
-    AiConfig { provider: stored.provider, api_key, model: stored.model, ollama_base_url: stored.ollama_base_url }
+    AiConfig { provider: stored.provider, api_key, model: stored.model, ollama_base_url: stored.ollama_base_url, omniroute_base_url: stored.omniroute_base_url }
 }
 
 pub async fn save_config(data_dir: &Path, cfg: &AiConfig) -> Result<()> {
@@ -184,6 +203,7 @@ pub async fn save_config(data_dir: &Path, cfg: &AiConfig) -> Result<()> {
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         ollama_base_url: cfg.ollama_base_url.clone(),
+        omniroute_base_url: cfg.omniroute_base_url.clone(),
         encrypted_key,
     };
     let path = config_path(data_dir);
@@ -281,6 +301,28 @@ pub async fn list_models(http: &reqwest::Client, cfg: &AiConfig) -> Result<Vec<S
                 _ => anyhow::bail!("impossible de contacter Ollama sur {} - est-il lance ? (`ollama serve`)", cfg.ollama_url()),
             }
         }
+        "omniroute" => {
+            // OpenAI-compatible: GET /v1/models with a Bearer token.
+            let url = format!("{}/models", cfg.omniroute_url());
+            let resp = http.get(&url).bearer_auth(&cfg.api_key).send().await;
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    let body: Value = r.json().await.unwrap_or_default();
+                    let mut ids: Vec<String> = body["data"].as_array().map(|a| {
+                        a.iter().filter_map(|m| m["id"].as_str().map(String::from)).collect()
+                    }).unwrap_or_default();
+                    ids.sort();
+                    if !ids.contains(&"auto".to_string()) {
+                        ids.insert(0, "auto".to_string());
+                    }
+                    Ok(ids)
+                }
+                _ => anyhow::bail!(
+                    "impossible de contacter OmniRoute sur {} - verifiez qu'il tourne et que la cle API (Dashboard -> Endpoints) est correcte",
+                    cfg.omniroute_url()
+                ),
+            }
+        }
         other => anyhow::bail!("provider inconnu : {other}"),
     }
 }
@@ -309,7 +351,7 @@ pub struct ChatMessage {
 /// the system prompt so suggestions are actually specific to what's
 /// installed, not generic Minecraft advice.
 pub async fn chat(http: &reqwest::Client, cfg: &AiConfig, context: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    if cfg.provider != "ollama" && cfg.api_key.trim().is_empty() {
+    if !matches!(cfg.provider.as_str(), "ollama") && cfg.api_key.trim().is_empty() {
         anyhow::bail!("aucune cle API configuree pour {}", cfg.provider);
     }
     let system_prompt = format!(
@@ -325,6 +367,7 @@ pub async fn chat(http: &reqwest::Client, cfg: &AiConfig, context: &str, history
         "openai" => chat_openai(http, cfg, &system_prompt, history, message).await,
         "gemini" => chat_gemini(http, cfg, &system_prompt, history, message).await,
         "ollama" => chat_ollama(http, cfg, &system_prompt, history, message).await,
+        "omniroute" => chat_omniroute(http, cfg, &system_prompt, history, message).await,
         other => anyhow::bail!("provider inconnu : {other}"),
     }
 }
@@ -362,6 +405,31 @@ async fn chat_openai(http: &reqwest::Client, cfg: &AiConfig, system: &str, histo
     let body: Value = resp.json().await.context("reponse OpenAI invalide")?;
     if !status.is_success() {
         anyhow::bail!("OpenAI a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
+    }
+    let text = body["choices"][0]["message"]["content"].as_str().unwrap_or("(reponse vide)");
+    Ok(text.to_string())
+}
+
+/// OmniRoute (https://omniroute.online/, https://github.com/diegosouzapw/OmniRoute)
+/// is a self-hosted AI gateway exposing an OpenAI-compatible
+/// `/v1/chat/completions` endpoint in front of 300+ upstream providers -
+/// same request/response shape as `chat_openai` above, just pointed at a
+/// configurable (usually local) base URL instead of api.openai.com. Model
+/// defaults to "auto", OmniRoute's own zero-config smart routing.
+async fn chat_omniroute(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
+    let mut messages = vec![json!({ "role": "system", "content": system })];
+    messages.extend(history.iter().map(|m| json!({ "role": m.role, "content": m.content })));
+    messages.push(json!({ "role": "user", "content": message }));
+    let model = if cfg.model.trim().is_empty() { "auto" } else { cfg.model.as_str() };
+    let url = format!("{}/chat/completions", cfg.omniroute_url());
+    let resp = http.post(&url)
+        .bearer_auth(&cfg.api_key)
+        .json(&json!({ "model": model, "messages": messages }))
+        .send().await.context("requete OmniRoute echouee - verifiez que l'instance tourne et que l'URL est correcte")?;
+    let status = resp.status();
+    let body: Value = resp.json().await.context("reponse OmniRoute invalide")?;
+    if !status.is_success() {
+        anyhow::bail!("OmniRoute a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
     }
     let text = body["choices"][0]["message"]["content"].as_str().unwrap_or("(reponse vide)");
     Ok(text.to_string())
@@ -620,9 +688,17 @@ mod tests {
 
     #[test]
     fn masked_key_shape() {
-        let cfg = AiConfig { provider: "anthropic".into(), api_key: "sk-ant-1234567890abcd".into(), model: String::new(), ollama_base_url: String::new() };
+        let cfg = AiConfig { provider: "anthropic".into(), api_key: "sk-ant-1234567890abcd".into(), model: String::new(), ollama_base_url: String::new(), omniroute_base_url: String::new() };
         let masked = cfg.masked_key();
         assert!(masked.contains('…'));
         assert!(!masked.contains("1234567890"));
+    }
+
+    #[test]
+    fn omniroute_url_defaults_to_local_dashboard_port() {
+        let cfg = AiConfig { provider: "omniroute".into(), api_key: String::new(), model: String::new(), ollama_base_url: String::new(), omniroute_base_url: String::new() };
+        assert_eq!(cfg.omniroute_url(), "http://127.0.0.1:20128/v1");
+        let cfg2 = AiConfig { omniroute_base_url: "https://my-omniroute.example.com/v1/".into(), ..cfg };
+        assert_eq!(cfg2.omniroute_url(), "https://my-omniroute.example.com/v1");
     }
 }

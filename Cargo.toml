@@ -1,11 +1,11 @@
 [package]
 name = "mcmanager"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 authors = ["yolezz"]
 license = "MIT"
 description = "MCManager - Minecraft server manager (web backend + web UI)"
-repository = "https://github.com/yolezz/mcmanager"
+repository = "https://github.com/yo-le-zz/MCmanager"
 
 [[bin]]
 name = "mcmanager"

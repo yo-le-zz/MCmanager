@@ -48,7 +48,7 @@ impl InstallKind {
                 "Installe via le paquet systeme (.deb) : la mise a jour automatique est desactivee pour ne pas casser dpkg/apt. Telechargez le nouveau .deb depuis GitHub Releases et lancez 'sudo dpkg -i mcmanager_X.Y.Z_amd64.deb', ou configurez un depot apt."
             ),
             InstallKind::NixStore => Some(
-                "Installe via Nix : le store Nix est en lecture seule par design, la mise a jour automatique est impossible depuis l'application. Mettez a jour avec 'nix flake update' (si vous utilisez un flake local) ou en relancant 'nix run github:yolezz/mcmanager' qui recuperera la derniere version taguee."
+                "Installe via Nix : le store Nix est en lecture seule par design, la mise a jour automatique est impossible depuis l'application. Mettez a jour avec 'nix flake update' (si vous utilisez un flake local) ou en relancant 'nix run github:yo-le-zz/MCmanager' qui recuperera la derniere version taguee."
             ),
         }
     }
