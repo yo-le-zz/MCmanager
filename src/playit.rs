@@ -75,6 +75,12 @@ pub async fn start_agent(state: &AppState) -> Result<()> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
+    // Fresh run: don't mix a previous session's output with this one.
+    {
+        let mut backlog = state.playit_backlog.write().await;
+        backlog.clear();
+    }
+
     {
         let mut guard = state.playit_child.write().await;
         *guard = Some(child);
@@ -82,24 +88,40 @@ pub async fn start_agent(state: &AppState) -> Result<()> {
 
     if let Some(out) = stdout {
         let tx = state.playit_tx.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                push_backlog(&state, &line).await;
                 let _ = tx.send(line);
             }
         });
     }
     if let Some(err) = stderr {
         let tx = state.playit_tx.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                push_backlog(&state, &line).await;
                 let _ = tx.send(line);
             }
         });
     }
 
     Ok(())
+}
+
+/// Cap kept in sync with `state::CONSOLE_BACKLOG` used for per-server consoles.
+const PLAYIT_BACKLOG_CAP: usize = 500;
+
+async fn push_backlog(state: &AppState, line: &str) {
+    let mut backlog = state.playit_backlog.write().await;
+    backlog.push(line.to_string());
+    if backlog.len() > PLAYIT_BACKLOG_CAP {
+        let excess = backlog.len() - PLAYIT_BACKLOG_CAP;
+        backlog.drain(0..excess);
+    }
 }
 
 pub async fn stop_agent(state: &AppState) -> Result<()> {

@@ -63,7 +63,7 @@ function setupNav() {
 async function refreshServerList(selectId) {
   state.servers = await api("/servers");
   const sel = $("#server-select");
-  sel.innerHTML = '<option value="">— aucun —</option>' +
+  sel.innerHTML = `<option value="">${t("nav.none")}</option>` +
     state.servers.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.mc_version})</option>`).join("");
   if (selectId) {
     state.currentServerId = selectId;
@@ -96,6 +96,7 @@ async function render() {
       case "backups": return renderBackups();
       case "network": return renderNetwork();
       case "docs": return renderDocs();
+      case "assistant": return renderAssistant();
       case "settings": return renderSettings();
       default: content.innerHTML = "";
     }
@@ -191,6 +192,7 @@ async function renderServers() {
         <div class="value" style="font-size:16px">${escapeHtml(s.name)}</div>
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
+          <button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>
           <button class="btn-red" data-del="${s.id}">Supprimer</button>
         </div>
       </div>
@@ -201,6 +203,13 @@ async function renderServers() {
       state.view = "console";
       $$(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.view === "console"));
       render();
+    }));
+    $$("[data-explorer]").forEach((b) => b.addEventListener("click", async () => {
+      try {
+        await api(`/servers/${b.dataset.explorer}/open-folder`, { method: "POST" });
+      } catch {
+        toast(t('files.explorerFailed'), "error");
+      }
     }));
     $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {
       if (!confirm("Supprimer définitivement ce serveur et tous ses fichiers (y compris les sauvegardes) ?")) return;
@@ -433,6 +442,7 @@ function renderConsole() {
       <button class="btn-red" id="c-stop">⏹ Arrêter</button>
       <button class="btn-ghost" id="c-kill">✕ Forcer l'arrêt</button>
       <button class="btn-ghost" id="c-clear">🧹 Effacer la console</button>
+      <button class="btn-ghost" id="c-debug">🩺 Diagnostiquer un crash</button>
     </div>
     <div class="console" id="console-out"></div>
     <div class="console-input-row">
@@ -484,6 +494,32 @@ function renderConsole() {
     try { await api(`/servers/${s.id}/stop`, { method: "POST" }); } catch {}
     setTimeout(async () => { try { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Redémarrage…", "success"); } catch {} }, 4000);
   });
+
+  // Automated crash triage: disables every mod/plugin, confirms a bare boot
+  // works, then re-enables them one at a time to isolate a culprit. Takes a
+  // while (one full boot attempt per addon) - progress streams live into
+  // this same console via the WebSocket above, the toast at the end just
+  // gives the final verdict.
+  $("#c-debug").addEventListener("click", async () => {
+    if (!confirm(
+      "Ce diagnostic va arrêter le serveur s'il tourne, désactiver temporairement tous les mods/plugins, " +
+      "puis les tester un par un en redémarrant le serveur à chaque fois (ça peut prendre plusieurs minutes). " +
+      "Tout sera remis dans l'état d'origine à la fin. Continuer ?"
+    )) return;
+    const btn = $("#c-debug");
+    btn.disabled = true;
+    btn.textContent = "Diagnostic en cours… (voir la console)";
+    try {
+      const report = await api(`/servers/${s.id}/debug/crash-diagnostic`, { method: "POST" });
+      const isProblem = report.culprits.length || !report.baseline_ok || report.combo_suspect;
+      toast(report.summary, isProblem ? "error" : "success");
+    } catch (e) {
+      toast(e.message || "Échec du diagnostic.", "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🩺 Diagnostiquer un crash";
+    }
+  });
   $("#c-clear").addEventListener("click", async () => {
     await api(`/servers/${s.id}/console/clear`, { method: "POST" });
     out.textContent = "";
@@ -503,6 +539,7 @@ async function renderFiles(path = "") {
     <div class="toolbar">
       ${path ? '<button class="btn-ghost" id="f-up">⬆ Dossier parent</button>' : ""}
       <label class="btn-ghost" style="cursor:pointer">📤 Envoyer un fichier<input type="file" id="f-upload" class="hidden"></label>
+      <button class="btn-ghost" id="f-explorer">🗂 ${t('files.openExplorer')}</button>
     </div>
     <div class="file-browser">
       <div class="file-list" id="file-list"></div>
@@ -536,6 +573,14 @@ async function renderFiles(path = "") {
   });
 
   if (path) $("#f-up").addEventListener("click", () => renderFiles(path.split("/").slice(0, -1).join("/")));
+
+  $("#f-explorer").addEventListener("click", async () => {
+    try {
+      await api(`/servers/${s.id}/open-folder?path=${encodeURIComponent(path)}`, { method: "POST" });
+    } catch {
+      toast(t('files.explorerFailed'), "error");
+    }
+  });
 
   $("#f-upload").addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -583,18 +628,31 @@ async function renderAddons() {
     <div class="subtitle">Activez, désactivez ou supprimez vos ${isModded ? "mods" : "plugins"} installés.</div>
     <div class="toolbar">
       <button class="btn-blue" id="check-updates">🔄 Vérifier les mises à jour</button>
+      <button class="btn-mauve" id="boost-perf">⚡ Ajouter les mods/plugins de performance</button>
       <span id="updates-result"></span>
-    </div>
-    <div class="card">
-      <h2>Préréglages recommandés</h2>
-      <div id="presets" class="preset-grid"><div class="empty-state">Chargement…</div></div>
     </div>
     <div class="card">
       <h2>Installés (${addons.length})</h2>
       <div class="mod-list" id="mod-list"></div>
     </div>
+    <div class="card">
+      <h2>Mods/plugins gérés automatiquement</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
+        Définissez ici des mods/plugins Modrinth (par ID ou slug de projet, ex. "lithium") à garder dans la bonne
+        version pour ce serveur. Rien ne se télécharge tout seul : cliquez sur "Synchroniser" quand vous le voulez.
+      </p>
+      <div class="form-row" style="display:flex;gap:8px;align-items:flex-end">
+        <div style="flex:1"><label>ID ou slug du projet Modrinth</label><input id="ma-project" placeholder="ex. lithium, fabric-api…"></div>
+        <div style="flex:1"><label>Nom (affichage)</label><input id="ma-label" placeholder="ex. Lithium"></div>
+        <button class="btn-green" id="ma-add">+ Ajouter à la liste</button>
+      </div>
+      <div id="managed-list" style="margin-top:12px"></div>
+      <button class="btn-blue" id="ma-sync" style="margin-top:10px">🔄 Synchroniser maintenant</button>
+      <div id="ma-sync-result" style="margin-top:8px;font-size:13px"></div>
+    </div>
   `;
 
+  const addonDir = isModded ? "mods" : "plugins";
   const modList = $("#mod-list");
   modList.innerHTML = addons.length ? addons.map((a) => `
     <div class="mod-row">
@@ -603,8 +661,9 @@ async function renderAddons() {
         <div class="meta">${humanSize(a.size_bytes)} · ${a.enabled ? "Activé" : "Désactivé"}</div>
       </div>
       <div class="mod-actions">
-        <button class="btn-ghost" data-toggle="${escapeHtml(a.file_name)}">${a.enabled ? "Désactiver" : "Activer"}</button>
-        <button class="btn-red" data-remove="${escapeHtml(a.file_name)}">Supprimer</button>
+        <button class="btn-ghost" data-config="${escapeHtml(a.file_name)}" title="${t('addons.configTip')}">${t('addons.config')}</button>
+        <button class="btn-ghost" data-toggle="${escapeHtml(a.file_name)}">${a.enabled ? t('addons.disable') : t('addons.enable')}</button>
+        <button class="btn-red" data-remove="${escapeHtml(a.file_name)}">${t('common.delete')}</button>
       </div>
     </div>
   `).join("") : `<div class="empty-state">Aucun ${isModded ? "mod" : "plugin"} installé. Utilisez le Marketplace pour en ajouter.</div>`;
@@ -618,35 +677,89 @@ async function renderAddons() {
     await api(`/servers/${s.id}/addons/${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
     renderAddons();
   }));
-
-  const presets = await api("/presets");
-  const compatible = presets.filter((p) => p.loaders.includes(s.loader));
-  $("#presets").innerHTML = compatible.length ? compatible.map((p) => `
-    <div class="preset-card">
-      <div class="cat">${escapeHtml(p.category)}</div>
-      <div class="name" style="font-weight:700">${escapeHtml(p.label)}</div>
-      <div class="meta" style="margin:6px 0">${escapeHtml(p.description)}</div>
-      <button class="btn-mauve" data-install-preset="${p.key}">+ Installer</button>
-    </div>
-  `).join("") : '<div class="empty-state">Aucun préréglage compatible avec ce type de serveur.</div>';
-
-  $$("[data-install-preset]").forEach((b) => b.addEventListener("click", async () => {
-    b.disabled = true;
-    b.textContent = "Installation…";
-    try {
-      await api(`/servers/${s.id}/presets/${b.dataset.installPreset}/install`, { method: "POST" });
-      toast("Installé avec succès.", "success");
-      renderAddons();
-    } catch {
-      b.disabled = false;
-      b.textContent = "+ Installer";
-    }
+  // "Config" jumps straight into the mods/plugins folder in the Files
+  // browser (rather than guessing a per-plugin config path, which varies
+  // wildly between plugins) so the user lands one click away from e.g.
+  // plugins/EssentialsX/config.yml.
+  $$("[data-config]", modList).forEach((b) => b.addEventListener("click", () => {
+    state.view = "files";
+    $$(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.view === "files"));
+    renderFiles(addonDir);
   }));
 
   $("#check-updates").addEventListener("click", async () => {
     $("#updates-result").textContent = "Vérification en cours…";
     const updates = await api(`/servers/${s.id}/marketplace/updates`);
     $("#updates-result").textContent = updates.length ? `${updates.length} mise(s) à jour disponible(s).` : "Tout est à jour.";
+  });
+
+  $("#boost-perf").addEventListener("click", async () => {
+    const btn = $("#boost-perf");
+    btn.disabled = true;
+    btn.textContent = "Installation en cours…";
+    try {
+      const results = await api(`/servers/${s.id}/presets/category/performance/install`, { method: "POST" });
+      const ok = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok);
+      toast(
+        failed.length
+          ? `${ok} installé(s), ${failed.length} échec(s) : ${failed.map((f) => f.label).join(", ")}`
+          : `${ok} mod(s)/plugin(s) de performance installés.`,
+        failed.length ? "error" : "success"
+      );
+      renderAddons();
+    } catch (e) {
+      toast(e.message || "Échec de l'installation.", "error");
+      btn.disabled = false;
+      btn.textContent = "⚡ Ajouter les mods/plugins de performance";
+    }
+  });
+
+  renderManagedAddons(s);
+}
+
+function renderManagedAddons(s) {
+  const list = $("#managed-list");
+  const managed = s.managed_addons || [];
+  list.innerHTML = managed.length ? managed.map((m) => `
+    <div class="mod-row">
+      <div class="name">${escapeHtml(m.label || m.project_id)} <span class="meta">(${escapeHtml(m.project_id)})</span></div>
+      <button class="btn-red" data-ma-remove="${escapeHtml(m.project_id)}">${t('common.delete')}</button>
+    </div>
+  `).join("") : `<div class="empty-state">Aucun mod/plugin géré pour l'instant.</div>`;
+
+  $$("[data-ma-remove]", list).forEach((b) => b.addEventListener("click", async () => {
+    const updated = await api(`/servers/${s.id}/managed-addons/${encodeURIComponent(b.dataset.maRemove)}`, { method: "DELETE" });
+    state.servers = state.servers.map((sv) => sv.id === updated.id ? updated : sv);
+    renderManagedAddons(updated);
+  }));
+
+  $("#ma-add").addEventListener("click", async () => {
+    const project_id = $("#ma-project").value.trim();
+    if (!project_id) return;
+    const label = $("#ma-label").value.trim() || project_id;
+    const updated = await api(`/servers/${s.id}/managed-addons`, { method: "POST", body: JSON.stringify({ project_id, label }) });
+    state.servers = state.servers.map((sv) => sv.id === updated.id ? updated : sv);
+    $("#ma-project").value = "";
+    $("#ma-label").value = "";
+    renderManagedAddons(updated);
+  });
+
+  $("#ma-sync").addEventListener("click", async () => {
+    const btn = $("#ma-sync");
+    btn.disabled = true;
+    btn.textContent = "Synchronisation…";
+    try {
+      const results = await api(`/servers/${s.id}/managed-addons/sync`, { method: "POST" });
+      const ok = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok);
+      $("#ma-sync-result").innerHTML = results.length
+        ? `${ok} synchronisé(s)${failed.length ? `, ${failed.length} échec(s) : ` + failed.map((f) => `${escapeHtml(f.label)} (${escapeHtml(f.error)})`).join(", ") : "."}`
+        : "Rien à synchroniser.";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🔄 Synchroniser maintenant";
+    }
   });
 }
 
@@ -680,6 +793,7 @@ async function renderMarketplace() {
         <div class="desc">${escapeHtml(h.description)}</div>
         <div class="meta" style="font-size:11px;color:var(--overlay0)">${h.downloads.toLocaleString()} téléchargements</div>
         <button class="btn-green" data-install="${h.project_id}">+ Installer</button>
+        <button class="btn-ghost" data-track="${h.project_id}" data-label="${escapeHtml(h.title)}">➕ Suivi auto</button>
       </div>
     `).join("") : '<div class="empty-state">Aucun résultat.</div>';
 
@@ -694,6 +808,18 @@ async function renderMarketplace() {
         b.disabled = false;
         b.textContent = "+ Installer";
       }
+    }));
+    // "Suivi auto" adds the project to this server's managed-addons list
+    // (see the Addons tab) so it can be kept up to date with one click
+    // later, without re-searching for it.
+    $$("[data-track]", results).forEach((b) => b.addEventListener("click", async () => {
+      const updated = await api(`/servers/${s.id}/managed-addons`, {
+        method: "POST",
+        body: JSON.stringify({ project_id: b.dataset.track, label: b.dataset.label }),
+      });
+      state.servers = state.servers.map((sv) => sv.id === updated.id ? updated : sv);
+      b.textContent = "✓ Suivi";
+      b.disabled = true;
     }));
   }
   $("#mk-search").addEventListener("click", search);
@@ -859,23 +985,174 @@ async function renderNetwork() {
 
 // ───────────────────────── docs ─────────────────────────
 
+// ───────────────────────── assistant IA ─────────────────────────
+
+state.aiChatHistory = state.aiChatHistory || [];
+
+async function renderAssistant() {
+  const content = $("#content");
+  const s = currentServer();
+  let cfg;
+  try {
+    cfg = await api("/ai/config");
+  } catch {
+    cfg = { provider: "anthropic", model: "", ollama_base_url: "", has_key: false, masked_key: "" };
+  }
+
+  content.innerHTML = `
+    <h1>🤖 Assistant IA</h1>
+    <p class="subtitle">Suggestions personnalisées sur quoi ajouter, modifier ou réparer sur votre serveur. Votre clé API reste stockée localement et est envoyée uniquement au fournisseur choisi — jamais à un serveur MCManager.</p>
+    <div class="card">
+      <h2>Fournisseur</h2>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Fournisseur</label>
+          <select id="ai-provider">
+            <option value="anthropic" ${cfg.provider === "anthropic" ? "selected" : ""}>Anthropic (Claude)</option>
+            <option value="openai" ${cfg.provider === "openai" ? "selected" : ""}>OpenAI (GPT)</option>
+            <option value="gemini" ${cfg.provider === "gemini" ? "selected" : ""}>Google Gemini</option>
+            <option value="ollama" ${cfg.provider === "ollama" ? "selected" : ""}>Ollama (local)</option>
+          </select>
+        </div>
+        <div class="form-row" id="ai-key-row">
+          <label>Clé API ${cfg.has_key ? `<span class="meta">(actuelle : ${escapeHtml(cfg.masked_key)})</span>` : ""}</label>
+          <input id="ai-key" type="password" placeholder="${cfg.has_key ? "Laisser vide pour conserver la clé actuelle" : "Collez votre clé API ici"}">
+        </div>
+        <div class="form-row" id="ai-ollama-row" style="${cfg.provider === "ollama" ? "" : "display:none"}">
+          <label>URL Ollama local</label>
+          <input id="ai-ollama-url" placeholder="http://127.0.0.1:11434" value="${escapeHtml(cfg.ollama_base_url || "")}">
+        </div>
+        <div class="form-row">
+          <label>Modèle</label>
+          <div style="display:flex;gap:8px">
+            <select id="ai-model" style="flex:1"><option value="${escapeHtml(cfg.model || "")}">${escapeHtml(cfg.model || "(par défaut)")}</option></select>
+            <button class="btn-ghost" id="ai-load-models" type="button">🔄 Détecter les modèles</button>
+          </div>
+        </div>
+      </div>
+      <button class="btn-green" id="ai-save">Enregistrer</button>
+      <p style="color:var(--overlay0);font-size:12px;margin-top:8px">
+        La clé est chiffrée sur disque (AES-256-GCM) avec une clé de chiffrement générée localement et stockée séparément, accès restreint au propriétaire du compte. C'est une vraie protection contre une copie/sauvegarde accidentelle du seul fichier de config, mais pas l'équivalent d'un trousseau système : la clé de déchiffrement reste sur la même machine.
+        Pour Ollama local, aucune clé n'est nécessaire ; l'assistant peut alors chercher sur le web (DuckDuckGo) et lire des pages pour vous répondre.
+      </p>
+    </div>
+    <div class="card" style="display:flex;flex-direction:column;flex:1;min-height:360px">
+      <h2>Discussion ${s ? `— <span class="meta">${escapeHtml(s.name)}</span>` : '<span class="meta">(aucun serveur sélectionné — conseils génériques)</span>'}</h2>
+      <div id="ai-chat-log" class="console" style="flex:1"></div>
+      <div class="console-input-row">
+        <input id="ai-chat-input" placeholder="Ex : Comment réduire le lag ? Quel plugin pour la protection anti-grief ?">
+        <button class="btn-blue" id="ai-chat-send">Envoyer</button>
+      </div>
+    </div>
+  `;
+
+  $("#ai-provider").addEventListener("change", (e) => {
+    $("#ai-ollama-row").style.display = e.target.value === "ollama" ? "" : "none";
+    $("#ai-key-row").style.display = e.target.value === "ollama" ? "none" : "";
+  });
+
+  // Auto-detect provider from the shape of a pasted key (sk-ant-... /
+  // sk-... / AIza...), mirroring the same heuristic the backend uses.
+  $("#ai-key").addEventListener("input", (e) => {
+    const k = e.target.value.trim();
+    let detected = null;
+    if (k.startsWith("sk-ant-")) detected = "anthropic";
+    else if (k.startsWith("sk-")) detected = "openai";
+    else if (k.startsWith("AIza")) detected = "gemini";
+    if (detected) {
+      $("#ai-provider").value = detected;
+      $("#ai-provider").dispatchEvent(new Event("change"));
+    }
+  });
+
+  $("#ai-load-models").addEventListener("click", async () => {
+    const btn = $("#ai-load-models");
+    btn.disabled = true;
+    btn.textContent = "Détection…";
+    try {
+      // Save current provider/key/url first so the backend can use them to query models.
+      await api("/ai/config", { method: "POST", body: JSON.stringify({
+        provider: $("#ai-provider").value,
+        api_key: $("#ai-key").value,
+        model: $("#ai-model").value || "",
+        ollama_base_url: $("#ai-ollama-url").value || "",
+      }) });
+      const models = await api("/ai/models");
+      const sel = $("#ai-model");
+      const current = sel.value;
+      sel.innerHTML = models.length
+        ? models.map((m) => `<option value="${escapeHtml(m)}" ${m === current ? "selected" : ""}>${escapeHtml(m)}</option>`).join("")
+        : `<option value="">(aucun modèle détecté)</option>`;
+      toast(models.length ? `${models.length} modèle(s) trouvé(s).` : "Aucun modèle détecté.", models.length ? "success" : "error");
+    } catch (e) {
+      toast(e.message || "Échec de la détection des modèles.", "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🔄 Détecter les modèles";
+    }
+  });
+
+  $("#ai-save").addEventListener("click", async () => {
+    try {
+      await api("/ai/config", { method: "POST", body: JSON.stringify({
+        provider: $("#ai-provider").value,
+        api_key: $("#ai-key").value,
+        model: $("#ai-model").value || "",
+        ollama_base_url: $("#ai-ollama-url").value || "",
+      }) });
+      toast("Configuration de l'assistant enregistrée.", "success");
+      renderAssistant();
+    } catch (e) {
+      toast(e.message || "Échec de l'enregistrement.", "error");
+    }
+  });
+
+  renderAiChatLog();
+  $("#ai-chat-send").addEventListener("click", sendAiChat);
+  $("#ai-chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendAiChat(); });
+}
+
+function renderAiChatLog() {
+  const log = $("#ai-chat-log");
+  if (!log) return;
+  log.innerHTML = state.aiChatHistory.length
+    ? state.aiChatHistory.map((m) => `<div style="margin-bottom:10px"><b>${m.role === "user" ? "Vous" : "Assistant"} :</b> ${escapeHtml(m.content).replace(/\n/g, "<br>")}</div>`).join("")
+    : `<div class="empty-state">Posez une question sur votre serveur — mods à installer, réglages de perf, pourquoi ça lag...</div>`;
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendAiChat() {
+  const input = $("#ai-chat-input");
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = "";
+  state.aiChatHistory.push({ role: "user", content: message });
+  renderAiChatLog();
+  const log = $("#ai-chat-log");
+  log.innerHTML += `<div class="empty-state" id="ai-typing">L'assistant réfléchit…</div>`;
+  log.scrollTop = log.scrollHeight;
+  try {
+    const s = currentServer();
+    const res = await api("/ai/chat", { method: "POST", body: JSON.stringify({
+      message,
+      history: state.aiChatHistory.slice(0, -1),
+      server_id: s ? s.id : null,
+    }) });
+    state.aiChatHistory.push({ role: "assistant", content: res.reply });
+  } catch (e) {
+    state.aiChatHistory.push({ role: "assistant", content: `⚠ ${e.message || "Erreur lors de la requête à l'assistant."}` });
+  }
+  renderAiChatLog();
+}
+
 function renderDocs() {
   const content = $("#content");
+  const sections = [1, 2, 3, 4, 5, 6].map((n) => `
+      <h3>${t(`docs.s${n}_h`)}</h3>
+      <p>${t(`docs.s${n}_p`)}</p>`).join("");
   content.innerHTML = `
-    <h1>Documentation &amp; tutoriels</h1>
-    <div class="card doc-block">
-      <h3>Créer un serveur</h3>
-      <p>Allez dans <b>Serveurs → Nouveau serveur</b>, choisissez un type (Paper est recommandé pour les plugins, Fabric pour les mods légers), une version, acceptez l'EULA et cliquez sur Créer. MCManager télécharge et configure tout automatiquement.</p>
-      <h3>Installer des mods/plugins</h3>
-      <p>Depuis l'onglet <b>Marketplace</b>, recherchez un mod/plugin et cliquez sur Installer — MCManager choisit automatiquement la bonne version pour votre loader et votre version de Minecraft. Redémarrez le serveur pour l'activer.</p>
-      <h3>WorldEdit / FastAsyncWorldEdit</h3>
-      <p>Installez WorldEdit ou FAWE depuis les préréglages de l'onglet Mods/Plugins, puis déposez vos fichiers <code>.schem</code> depuis l'onglet <b>Schematics</b>. Chargez-les en jeu avec <code>//schem load nom_du_fichier</code> puis <code>//paste</code>.</p>
-      <h3>Rendre le serveur accessible depuis Internet</h3>
-      <p>Deux options : ouvrez le port du serveur (par défaut 25565) sur votre routeur (redirection de port / NAT), ou utilisez <b>Réseau → playit.gg</b> qui ne nécessite aucune configuration réseau.</p>
-      <h3>Sauvegardes automatiques</h3>
-      <p>Réglez un intervalle de sauvegarde automatique par serveur depuis les Paramètres du serveur — une sauvegarde .zip est créée automatiquement pendant que le serveur tourne.</p>
-      <h3>Mise à jour de MCManager</h3>
-      <p>MCManager vérifie automatiquement les nouvelles versions au démarrage (releases GitHub). Une bannière apparaît si une mise à jour est disponible ; cliquez sur Mettre à jour pour l'appliquer, puis redémarrez l'application.</p>
+    <h1>${t('docs.title')}</h1>
+    <div class="card doc-block">${sections}
     </div>
   `;
 }
@@ -888,6 +1165,19 @@ async function renderSettings() {
   const s = currentServer();
   content.innerHTML = `
     <h1>Paramètres</h1>
+    <div class="card">
+      <h2>${t('common.language')}</h2>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>${t('settings.language')}</label>
+          <select id="st-lang">
+            <option value="fr" ${state.lang === "fr" ? "selected" : ""}>Français</option>
+            <option value="en" ${state.lang === "en" ? "selected" : ""}>English</option>
+            <option value="es" ${state.lang === "es" ? "selected" : ""}>Español</option>
+          </select>
+        </div>
+      </div>
+    </div>
     <div class="card">
       <h2>Général</h2>
       <div class="form-grid">
@@ -909,9 +1199,15 @@ async function renderSettings() {
         <div class="form-row"><label>Arguments JVM additionnels</label><input id="ss-extraargs" value="${escapeHtml((s.extra_args || []).join(' '))}"></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-aikar" style="width:auto" ${s.aikar_flags ? "checked" : ""}> Flags de performance (Aikar)</label></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-autorestart" style="width:auto" ${s.auto_restart ? "checked" : ""}> Redémarrage automatique en cas de crash</label></div>
+        <div class="form-row"><label>Délai avant redémarrage auto (secondes)</label><input id="ss-restartdelay" type="number" min="0" value="${s.auto_restart_delay_secs ?? 5}"></div>
+        <div class="form-row"><label>Redémarrage programmé (minutes, 0 = désactivé)</label><input id="ss-schedrestart" type="number" min="0" value="${s.scheduled_restart_minutes || 0}"></div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-stopempty" style="width:auto" ${s.stop_when_empty_minutes ? "checked" : ""}> Couper le serveur si personne ne rejoint</label>
+        </div>
+        <div class="form-row"><label>… après combien de minutes sans joueur</label><input id="ss-stopempty-min" type="number" min="1" value="${s.stop_when_empty_minutes || 20}" ${s.stop_when_empty_minutes ? "" : "disabled"}></div>
       </div>
       <button class="btn-green" id="ss-save">Enregistrer</button>
-      <p style="color:var(--overlay0);font-size:12px;margin-top:8px">Ces réglages seront appliqués au prochain démarrage du serveur. Modification directe du fichier server.properties disponible dans l'onglet Fichiers.</p>
+      <p style="color:var(--overlay0);font-size:12px;margin-top:8px">RAM/port/args JVM/flags Aikar s'appliquent au prochain démarrage. Le redémarrage programmé, le délai de redémarrage auto et l'arrêt sur inactivité prennent effet immédiatement, même sans redémarrer manuellement.</p>
     </div>` : ""}
     <div class="card">
       <h2>À propos</h2>
@@ -923,9 +1219,15 @@ async function renderSettings() {
   `;
   $("#about-version").textContent = window.APP_VERSION || "1.0.0";
 
+  $("#st-lang").addEventListener("change", (e) => setLang(e.target.value));
+
   if (s) {
+    $("#ss-stopempty").addEventListener("change", (e) => {
+      $("#ss-stopempty-min").disabled = !e.target.checked;
+    });
     $("#ss-save").addEventListener("click", async () => {
       const extraArgs = $("#ss-extraargs").value.trim();
+      const schedRestart = parseInt($("#ss-schedrestart").value, 10) || 0;
       const body = {
         name: $("#ss-name").value,
         xms_mb: parseInt($("#ss-xms").value, 10),
@@ -935,6 +1237,9 @@ async function renderSettings() {
         extra_args: extraArgs ? extraArgs.split(/\s+/) : [],
         aikar_flags: $("#ss-aikar").checked,
         auto_restart: $("#ss-autorestart").checked,
+        auto_restart_delay_secs: parseInt($("#ss-restartdelay").value, 10) || 0,
+        scheduled_restart_minutes: schedRestart > 0 ? schedRestart : null,
+        stop_when_empty_minutes: $("#ss-stopempty").checked ? (parseInt($("#ss-stopempty-min").value, 10) || 20) : null,
       };
       await api(`/servers/${s.id}`, { method: "PUT", body: JSON.stringify(body) });
       toast("Paramètres du serveur enregistrés.", "success");

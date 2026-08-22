@@ -81,9 +81,36 @@ pub struct ServerEntry {
     pub auto_backup_minutes: Option<u32>,
     #[serde(default)]
     pub auto_restart: bool,
+    /// Delay before an automatic crash-restart, in seconds. Configurable
+    /// (rather than the previous hardcoded 5s) and editable after creation
+    /// via `UpdateServerRequest`.
+    #[serde(default = "default_restart_delay")]
+    pub auto_restart_delay_secs: u32,
+    /// If set, gracefully restart the server every N minutes regardless of
+    /// crashes (memory-leak hygiene). `None` = disabled.
+    #[serde(default)]
+    pub scheduled_restart_minutes: Option<u32>,
+    /// If set, gracefully stop the server after it has had zero players
+    /// online for N consecutive minutes. `None` = never auto-stop from
+    /// inactivity (the previous, only, behavior).
+    #[serde(default)]
+    pub stop_when_empty_minutes: Option<u32>,
     #[serde(default)]
     pub aikar_flags: bool,
+    /// Mods/plugins the user wants MCManager to keep on the correct
+    /// loader+MC-version build. Populated via the Marketplace ("suivre")
+    /// or Addons tab; actually downloading/updating them happens on demand
+    /// via `POST /servers/:id/managed-addons/sync`, not automatically on
+    /// every boot (the user asked to control *when* this runs).
+    #[serde(default)]
+    pub managed_addons: Vec<ManagedAddon>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedAddon {
+    pub project_id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +133,10 @@ pub struct CreateServerRequest {
     pub aikar_flags: bool,
     #[serde(default)]
     pub auto_restart: bool,
+    #[serde(default = "default_restart_delay")]
+    pub auto_restart_delay_secs: u32,
+    pub scheduled_restart_minutes: Option<u32>,
+    pub stop_when_empty_minutes: Option<u32>,
     pub auto_backup_minutes: Option<u32>,
 }
 
@@ -118,6 +149,9 @@ pub struct UpdateServerRequest {
     pub extra_args: Option<Vec<String>>,
     pub aikar_flags: Option<bool>,
     pub auto_restart: Option<bool>,
+    pub auto_restart_delay_secs: Option<u32>,
+    pub scheduled_restart_minutes: Option<Option<u32>>,
+    pub stop_when_empty_minutes: Option<Option<u32>>,
     pub auto_backup_minutes: Option<u32>,
     pub java_path: Option<String>,
 }
@@ -136,6 +170,7 @@ pub struct ImportServerRequest {
 fn default_xms() -> u32 { 1024 }
 fn default_xmx() -> u32 { 2048 }
 fn default_port() -> u16 { 25565 }
+fn default_restart_delay() -> u32 { 5 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {

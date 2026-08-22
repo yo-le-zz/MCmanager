@@ -5,14 +5,14 @@ use std::sync::Arc;
 use axum::extract::{Multipart, Path as AxPath, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{backup, downloader, files, modrinth, playit, presets, process, stats, updater, ws};
+use crate::{ai, backup, debug, downloader, files, modrinth, playit, presets, process, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers/:id/files", get(list_files).delete(delete_file))
         .route("/api/servers/:id/files/content", get(read_file).put(write_file))
         .route("/api/servers/:id/files/upload", post(upload_file))
+        .route("/api/servers/:id/open-folder", post(open_in_explorer))
         .route("/api/servers/:id/addons", get(list_addons))
         .route("/api/servers/:id/addons/:file/toggle", post(toggle_addon))
         .route("/api/servers/:id/addons/:file", delete(delete_addon))
@@ -46,6 +47,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers/:id/backups/:name/restore", post(restore_backup))
         .route("/api/servers/:id/backups/:name", delete(delete_backup))
         .route("/api/servers/:id/presets/:key/install", post(install_preset))
+        .route("/api/servers/:id/presets/category/:category/install", post(install_preset_category))
+        .route("/api/servers/:id/managed-addons", post(add_managed_addon))
+        .route("/api/servers/:id/managed-addons/:project_id", delete(remove_managed_addon))
+        .route("/api/servers/:id/managed-addons/sync", post(sync_managed_addons))
+        .route("/api/servers/:id/debug/crash-diagnostic", post(run_crash_diagnostic))
+        .route("/api/ai/config", get(get_ai_config).post(save_ai_config))
+        .route("/api/ai/models", get(list_ai_models))
+        .route("/api/ai/chat", post(ai_chat))
         .route("/api/servers/:id/marketplace/updates", get(check_addon_updates))
         .route("/api/marketplace/search", get(marketplace_search))
         .route("/api/marketplace/project/:id/versions", get(marketplace_versions))
@@ -170,7 +179,11 @@ async fn create_server(State(state): State<AppState>, Json(req): Json<CreateServ
         eula_accepted: req.eula_accepted,
         auto_backup_minutes: req.auto_backup_minutes,
         auto_restart: req.auto_restart,
+        auto_restart_delay_secs: req.auto_restart_delay_secs,
+        scheduled_restart_minutes: req.scheduled_restart_minutes,
+        stop_when_empty_minutes: req.stop_when_empty_minutes,
         aikar_flags: req.aikar_flags,
+        managed_addons: vec![],
         created_at: chrono::Utc::now(),
     };
 
@@ -259,7 +272,11 @@ async fn import_server(State(state): State<AppState>, Json(req): Json<ImportServ
         eula_accepted,
         auto_backup_minutes: None,
         auto_restart: req.auto_restart,
+        auto_restart_delay_secs: 5,
+        scheduled_restart_minutes: None,
+        stop_when_empty_minutes: None,
         aikar_flags: false,
+        managed_addons: vec![],
         created_at: chrono::Utc::now(),
     };
 
@@ -281,6 +298,9 @@ async fn update_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, 
     if let Some(v) = req.extra_args { entry.extra_args = v; }
     if let Some(v) = req.aikar_flags { entry.aikar_flags = v; }
     if let Some(v) = req.auto_restart { entry.auto_restart = v; }
+    if let Some(v) = req.auto_restart_delay_secs { entry.auto_restart_delay_secs = v; }
+    if let Some(v) = req.scheduled_restart_minutes { entry.scheduled_restart_minutes = v; }
+    if let Some(v) = req.stop_when_empty_minutes { entry.stop_when_empty_minutes = v; }
     if req.auto_backup_minutes.is_some() { entry.auto_backup_minutes = req.auto_backup_minutes; }
     if let Some(v) = req.java_path { entry.java_path = v; }
     let updated = entry.clone();
@@ -424,6 +444,33 @@ struct WriteFileBody {
 async fn write_file(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(body): Json<WriteFileBody>) -> AppResult<Json<serde_json::Value>> {
     let root = server_folder(&state, id).await?;
     files::write_text_file(&root, &body.path, &body.content)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Opens a folder inside the server's own directory in the host OS's native
+/// file explorer (Explorer/Finder/the desktop's file manager). Only useful
+/// when MCManager is being driven from a browser on the same machine as the
+/// server (its normal desktop use case) - on a headless remote Ubuntu box
+/// there is no desktop to open, and the underlying command will simply fail,
+/// which we report back rather than silently ignore.
+async fn open_in_explorer(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Query(q): Query<PathQuery>) -> AppResult<Json<serde_json::Value>> {
+    let root = server_folder(&state, id).await?;
+    let target = match q.path.as_deref() {
+        Some(p) if !p.is_empty() => files::safe_join(&root, p)?,
+        _ => root,
+    };
+    if !target.exists() {
+        return Err(AppError(anyhow::anyhow!("dossier introuvable")));
+    }
+
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer").arg(&target).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&target).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(&target).spawn();
+
+    result.map_err(|e| anyhow::anyhow!("impossible d'ouvrir l'explorateur de fichiers (pas d'environnement de bureau ?) : {e}"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -664,6 +711,224 @@ async fn install_preset(State(state): State<AppState>, AxPath((id, key)): AxPath
     let dest = PathBuf::from(&entry.folder).join(entry.loader.addon_dir());
     let filename = modrinth::download_version_file(&state.http, &version, &dest).await?;
     Ok(Json(json!({ "ok": true, "file": filename })))
+}
+
+/// Powers the "add all performance mods/plugins" button: installs every
+/// curated preset in the given category (currently just "Performance",
+/// e.g. Chunky/Lithium/spark) that's compatible with this server's loader,
+/// in one click. Installs are independent - one failing (e.g. no build for
+/// this MC version yet) doesn't stop the rest, and each result is reported
+/// back individually so the UI can show exactly what happened.
+async fn install_preset_category(State(state): State<AppState>, AxPath((id, category)): AxPath<(Uuid, String)>) -> AppResult<Json<Vec<serde_json::Value>>> {
+    let entry = {
+        let servers = state.servers.read().await;
+        servers.get(&id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?
+    };
+    let matching: Vec<_> = presets::all().into_iter()
+        .filter(|p| p.category.eq_ignore_ascii_case(&category) && p.loaders.contains(&entry.loader.as_str().to_string()))
+        .collect();
+    if matching.is_empty() {
+        return Err(AppError(anyhow::anyhow!("aucun preset '{category}' compatible avec ce type de serveur")));
+    }
+    let dest = PathBuf::from(&entry.folder).join(entry.loader.addon_dir());
+    let mut results = Vec::new();
+    for preset in matching {
+        let outcome = async {
+            let version = modrinth::latest_matching_version(&state.http, &preset.modrinth_slug, entry.loader.modrinth_loader(), &entry.mc_version).await?
+                .ok_or_else(|| anyhow::anyhow!("aucune version compatible"))?;
+            modrinth::download_version_file(&state.http, &version, &dest).await
+        }.await;
+        match outcome {
+            Ok(filename) => results.push(json!({ "key": preset.key, "label": preset.label, "ok": true, "file": filename })),
+            Err(e) => results.push(json!({ "key": preset.key, "label": preset.label, "ok": false, "error": e.to_string() })),
+        }
+    }
+    Ok(Json(results))
+}
+
+#[derive(Deserialize)]
+struct AddManagedAddonBody {
+    project_id: String,
+    label: String,
+}
+
+async fn add_managed_addon(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(body): Json<AddManagedAddonBody>) -> AppResult<Json<ServerEntry>> {
+    let mut servers = state.servers.write().await;
+    let entry = servers.get_mut(&id).ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    if !entry.managed_addons.iter().any(|m| m.project_id == body.project_id) {
+        entry.managed_addons.push(crate::models::ManagedAddon { project_id: body.project_id, label: body.label });
+    }
+    let updated = entry.clone();
+    drop(servers);
+    save_servers(&state).await?;
+    Ok(Json(updated))
+}
+
+async fn remove_managed_addon(State(state): State<AppState>, AxPath((id, project_id)): AxPath<(Uuid, String)>) -> AppResult<Json<ServerEntry>> {
+    let mut servers = state.servers.write().await;
+    let entry = servers.get_mut(&id).ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    entry.managed_addons.retain(|m| m.project_id != project_id);
+    let updated = entry.clone();
+    drop(servers);
+    save_servers(&state).await?;
+    Ok(Json(updated))
+}
+
+/// Downloads the latest loader+MC-version-compatible build of every
+/// user-defined "managed" mod/plugin, replacing any older build of the same
+/// project already installed (identified via Modrinth's file-hash lookup,
+/// same mechanism as `check_addon_updates`) so re-syncing never leaves
+/// duplicate jars of the same plugin behind.
+async fn sync_managed_addons(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<Vec<serde_json::Value>>> {
+    let entry = {
+        let servers = state.servers.read().await;
+        servers.get(&id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?
+    };
+    if entry.managed_addons.is_empty() {
+        return Ok(Json(vec![]));
+    }
+    let dir = PathBuf::from(&entry.folder).join(entry.loader.addon_dir());
+    tokio::fs::create_dir_all(&dir).await.ok();
+
+    let mut results = Vec::new();
+    for managed in &entry.managed_addons {
+        let outcome = async {
+            let version = modrinth::latest_matching_version(&state.http, &managed.project_id, entry.loader.modrinth_loader(), &entry.mc_version).await?
+                .ok_or_else(|| anyhow::anyhow!("aucune version compatible pour {}/{}", entry.loader.as_str(), entry.mc_version))?;
+
+            // Remove any existing file(s) belonging to the same project
+            // before writing the fresh one.
+            if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
+                while let Ok(Some(f)) = rd.next_entry().await {
+                    let Ok(bytes) = tokio::fs::read(f.path()).await else { continue };
+                    let hash = sha512_hex(&bytes);
+                    if let Ok(Some(info)) = modrinth::identify_by_hash(&state.http, &hash).await {
+                        if info["project_id"].as_str() == Some(managed.project_id.as_str()) {
+                            tokio::fs::remove_file(f.path()).await.ok();
+                        }
+                    }
+                }
+            }
+
+            modrinth::download_version_file(&state.http, &version, &dir).await
+        }.await;
+        match outcome {
+            Ok(filename) => results.push(json!({ "project_id": managed.project_id, "label": managed.label, "ok": true, "file": filename })),
+            Err(e) => results.push(json!({ "project_id": managed.project_id, "label": managed.label, "ok": false, "error": e.to_string() })),
+        }
+    }
+    Ok(Json(results))
+}
+
+#[derive(Deserialize)]
+struct DiagnosticQuery {
+    timeout_secs: Option<u64>,
+}
+
+/// Runs the automated crash-cause isolation pass (see `debug.rs`). Blocks
+/// until finished - for a server with many addons at the default 45s/addon
+/// timeout this can take several minutes, so the frontend also watches the
+/// normal console WebSocket for live "[Debug] ..." progress lines rather
+/// than only waiting on this response.
+async fn run_crash_diagnostic(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Query(q): Query<DiagnosticQuery>) -> AppResult<Json<debug::DiagnosticReport>> {
+    let timeout_secs = q.timeout_secs.unwrap_or(45).clamp(5, 120);
+    let report = debug::run_crash_diagnostic(state, id, timeout_secs).await?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct SaveAiConfigBody {
+    provider: String,
+    /// Empty string = "keep the currently saved key" (so changing just the
+    /// model or base URL doesn't force re-pasting the API key every time).
+    api_key: String,
+    model: String,
+    #[serde(default)]
+    ollama_base_url: String,
+}
+
+#[derive(Serialize)]
+struct AiConfigView {
+    provider: String,
+    model: String,
+    ollama_base_url: String,
+    has_key: bool,
+    masked_key: String,
+}
+
+async fn get_ai_config(State(state): State<AppState>) -> AppResult<Json<AiConfigView>> {
+    let cfg = ai::load_config(&state.data_dir).await;
+    Ok(Json(AiConfigView {
+        provider: cfg.provider.clone(),
+        model: cfg.model.clone(),
+        ollama_base_url: cfg.ollama_base_url.clone(),
+        has_key: !cfg.api_key.is_empty(),
+        masked_key: cfg.masked_key(),
+    }))
+}
+
+async fn save_ai_config(State(state): State<AppState>, Json(body): Json<SaveAiConfigBody>) -> AppResult<Json<AiConfigView>> {
+    let mut cfg = ai::load_config(&state.data_dir).await;
+    cfg.provider = body.provider;
+    if !body.api_key.trim().is_empty() {
+        cfg.api_key = body.api_key.trim().to_string();
+    }
+    cfg.model = body.model;
+    cfg.ollama_base_url = body.ollama_base_url;
+    ai::save_config(&state.data_dir, &cfg).await?;
+    Ok(Json(AiConfigView {
+        provider: cfg.provider.clone(),
+        model: cfg.model.clone(),
+        ollama_base_url: cfg.ollama_base_url.clone(),
+        has_key: !cfg.api_key.is_empty(),
+        masked_key: cfg.masked_key(),
+    }))
+}
+
+async fn list_ai_models(State(state): State<AppState>) -> AppResult<Json<Vec<String>>> {
+    let cfg = ai::load_config(&state.data_dir).await;
+    let models = ai::list_models(&state.http, &cfg).await?;
+    Ok(Json(models))
+}
+
+#[derive(Deserialize)]
+struct AiChatBody {
+    message: String,
+    #[serde(default)]
+    history: Vec<ai::ChatMessage>,
+    /// Optional: which server this conversation is about, so the assistant
+    /// gets real context (loader/version/addons/status) instead of guessing.
+    server_id: Option<Uuid>,
+}
+
+async fn ai_chat(State(state): State<AppState>, Json(body): Json<AiChatBody>) -> AppResult<Json<serde_json::Value>> {
+    let cfg = ai::load_config(&state.data_dir).await;
+    let context = match body.server_id {
+        Some(id) => {
+            let servers = state.servers.read().await;
+            match servers.get(&id) {
+                Some(entry) => {
+                    let running = state.runtime.read().await.get(&id).map(|rt| rt.running).unwrap_or(false);
+                    let addons = files::list_addons(&PathBuf::from(&entry.folder), entry.loader).unwrap_or_default();
+                    let addon_list = if addons.is_empty() {
+                        "aucun".to_string()
+                    } else {
+                        addons.iter().map(|a| format!("{} ({})", a.file_name, if a.enabled { "actif" } else { "desactive" })).collect::<Vec<_>>().join(", ")
+                    };
+                    format!(
+                        "Serveur \"{}\" - {} {} - {} - mods/plugins installes : {}",
+                        entry.name, entry.loader.as_str(), entry.mc_version,
+                        if running { "en cours d'execution" } else { "arrete" },
+                        addon_list
+                    )
+                }
+                None => "aucun serveur selectionne".to_string(),
+            }
+        }
+        None => "aucun serveur selectionne".to_string(),
+    };
+    let reply = ai::chat(&state.http, &cfg, &context, &body.history, &body.message).await?;
+    Ok(Json(json!({ "reply": reply })))
 }
 
 async fn check_addon_updates(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<Vec<serde_json::Value>>> {

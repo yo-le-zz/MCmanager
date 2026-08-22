@@ -35,29 +35,37 @@ TASK="${1:-all}"
 # ------------------------------------------------------------------------------
 build_linux() {
   log "Compilation du binaire Linux (release)…"
-  cargo build --release
+  cargo build --release --bins
   local bin="target/release/${APP_NAME}"
+  local bin_headless="target/release/${APP_NAME}-headless"
   if [ ! -f "$bin" ]; then
     err "binaire introuvable après compilation"; exit 1
   fi
   ok "binaire compilé: $bin"
+  if [ ! -f "$bin_headless" ]; then
+    warn "binaire ${APP_NAME}-headless introuvable, non inclus dans le paquet (verifiez la compilation)"
+  else
+    ok "binaire compilé: $bin_headless"
+  fi
 
   # ---- archive portable .tar.gz ----
   local portable_dir="$DIST_DIR/${APP_NAME}-${VERSION}-linux-x86_64"
   rm -rf "$portable_dir"
   mkdir -p "$portable_dir"
   cp "$bin" "$portable_dir/"
+  [ -f "$bin_headless" ] && cp "$bin_headless" "$portable_dir/"
   cp -r web "$portable_dir/"
   cp README.md LICENSE CHANGELOG.md "$portable_dir/" 2>/dev/null || true
   (cd "$DIST_DIR" && tar czf "${APP_NAME}-${VERSION}-linux-x86_64.tar.gz" "$(basename "$portable_dir")")
   ok "archive portable: dist/${APP_NAME}-${VERSION}-linux-x86_64.tar.gz"
 
-  build_deb "$bin"
+  build_deb "$bin" "$bin_headless"
 }
 
 # ------------------------------------------------------------------------------
 build_deb() {
   local bin="$1"
+  local bin_headless="${2:-}"
   if ! command -v dpkg-deb >/dev/null 2>&1; then
     warn "dpkg-deb introuvable, paquet .deb ignoré (installez dpkg-dev)."
     return
@@ -75,6 +83,10 @@ build_deb() {
 
   cp "$bin" "$pkg_dir/usr/bin/mcmanager"
   chmod 755 "$pkg_dir/usr/bin/mcmanager"
+  if [ -n "$bin_headless" ] && [ -f "$bin_headless" ]; then
+    cp "$bin_headless" "$pkg_dir/usr/bin/mcmanager-headless"
+    chmod 755 "$pkg_dir/usr/bin/mcmanager-headless"
+  fi
   cp -r web "$pkg_dir/usr/share/mcmanager/web"
   cp packaging/deb/mcmanager.service "$pkg_dir/usr/lib/systemd/user/mcmanager.service"
   cp README.md LICENSE CHANGELOG.md "$pkg_dir/usr/share/doc/mcmanager/" 2>/dev/null || true
@@ -122,17 +134,19 @@ build_windows() {
   fi
 
   if ! CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
-      cargo build --release --target "$TARGET_WINDOWS" 2>"$DIST_DIR/windows-build.log"; then
+      cargo build --release --bins --target "$TARGET_WINDOWS" 2>"$DIST_DIR/windows-build.log"; then
     warn "Cross-compilation Windows échouée (voir dist/windows-build.log)."
     warn "Alternative fiable : builder nativement sur Windows (cargo build --release) ou via GitHub Actions (windows-latest, deja fourni dans .github/workflows/release.yml)."
     return
   fi
 
   local bin="target/${TARGET_WINDOWS}/release/${APP_NAME}.exe"
+  local bin_headless="target/${TARGET_WINDOWS}/release/${APP_NAME}-headless.exe"
   local portable_dir="$DIST_DIR/${APP_NAME}-${VERSION}-windows-x86_64"
   rm -rf "$portable_dir"
   mkdir -p "$portable_dir"
   cp "$bin" "$portable_dir/"
+  [ -f "$bin_headless" ] && cp "$bin_headless" "$portable_dir/"
   cp -r web "$portable_dir/"
   cp README.md LICENSE CHANGELOG.md "$portable_dir/" 2>/dev/null || true
   (cd "$DIST_DIR" && zip -rq "${APP_NAME}-${VERSION}-windows-x86_64.zip" "$(basename "$portable_dir")")

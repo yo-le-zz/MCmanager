@@ -100,6 +100,7 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 - [docs/BUILD.md](docs/BUILD.md) — compiler et empaqueter pour chaque plateforme
 - [docs/API.md](docs/API.md) — toutes les routes de l'API REST/WebSocket
 - [docs/CLI.md](docs/CLI.md) — gérer MCManager en ligne de commande (serveurs distants)
+- [docs/HEADLESS.md](docs/HEADLESS.md) — `mcmanager-headless`, binaire séparé sans aucun serveur web (VPS/Ubuntu)
 - [docs/PLAYIT.md](docs/PLAYIT.md) — tutoriel détaillé playit.gg
 - [docs/TUTO_INSTALLATION_GLFOS.md](docs/TUTO_INSTALLATION_GLFOS.md) — tuto d'installation simple pour NixOS/GLF OS
 - L'onglet **Docs & tutos** de l'application contient aussi un guide intégré.
@@ -108,10 +109,12 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 
 ```
 src/
-  main.rs        point d'entrée, routing HTTP, tâches de fond
+  lib.rs         racine de la bibliotheque partagee (tous les modules ci-dessous)
+  main.rs        binaire "mcmanager" : point d'entrée web, routing HTTP, tâches de fond
+  bin/headless.rs binaire "mcmanager-headless" : shell CLI sans serveur web (voir docs/HEADLESS.md)
   api.rs         toutes les routes REST
   ws.rs          WebSocket console + logs playit.gg
-  state.rs       état applicatif partagé + persistance JSON
+  state.rs       état applicatif partagé + persistance JSON + verrou d'instance
   models.rs      structures de données
   downloader.rs  téléchargement/installation des jars serveur
   modrinth.rs    client API Modrinth (marketplace)
@@ -119,12 +122,18 @@ src/
   backup.rs      sauvegardes zip
   files.rs       navigateur/éditeur de fichiers, gestion mods/plugins
   playit.rs      intégration playit.gg
-  presets.rs     préréglages "un clic"
+  presets.rs     préréglages "un clic" (dont le trousseau performance)
+  debug.rs       diagnostic automatique de crash (test des addons un par un)
   stats.rs       CPU/RAM + ping Minecraft (joueurs en ligne)
   updater.rs     auto-mise à jour via GitHub releases
 web/             interface web statique (HTML/CSS/JS, aucune étape de build)
 packaging/       fichiers .deb, Nix, Windows (Inno Setup)
 ```
+
+`mcmanager` (web) et `mcmanager-headless` (CLI pure, voir
+[docs/HEADLESS.md](docs/HEADLESS.md)) sont deux binaires distincts qui
+partagent tout leur code via la bibliothèque `src/lib.rs` — aucune logique
+métier n'est dupliquée entre les deux.
 
 Le code est volontairement modulaire pour être facilement étendu : chaque
 fonctionnalité (marketplace, presets, playit...) vit dans son propre module et

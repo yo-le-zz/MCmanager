@@ -1,21 +1,6 @@
-mod api;
-mod backup;
-mod cli;
-mod downloader;
-mod error;
-mod files;
-mod models;
-mod modrinth;
-mod playit;
-mod presets;
-mod process;
-mod state;
-mod stats;
-mod updater;
-mod ws;
-
 use std::net::SocketAddr;
 
+use mcmanager::{api, backup, cli, state, updater};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -56,8 +41,33 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(app_state.data_dir.clone()))
+        .await?;
     Ok(())
+}
+
+/// Waits for Ctrl+C (or SIGTERM under systemd) and clears the instance lock
+/// on the way out, so a normal restart doesn't require manually deleting
+/// `mcmanager.lock` every time (see `state::acquire_instance_lock`) - only
+/// an unclean crash (`kill -9`, power loss) still leaves it behind.
+async fn shutdown_signal(data_dir: std::path::PathBuf) {
+    let ctrl_c = async { tokio::signal::ctrl_c().await.ok(); };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("Arret demande, fermeture propre...");
+    let _ = tokio::fs::remove_file(data_dir.join("mcmanager.lock")).await;
 }
 
 /// Looks for the bundled `web/` assets next to the executable, in the current

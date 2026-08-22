@@ -69,5 +69,13 @@ pub fn all() -> Vec<PresetItem> {
             modrinth_slug: "lithium".into(),
             loaders: vec!["fabric".into(), "quilt".into(), "forge".into(), "neoforge".into()],
         },
+        PresetItem {
+            key: "spark".into(),
+            label: "spark".into(),
+            description: "Profileur de performance (CPU/TPS/memoire) pour diagnostiquer le lag.".into(),
+            category: "Performance".into(),
+            modrinth_slug: "spark".into(),
+            loaders: vec!["paper".into(), "purpur".into(), "spigot".into(), "fabric".into(), "quilt".into(), "forge".into(), "neoforge".into()],
+        },
     ]
 }

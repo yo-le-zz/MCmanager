@@ -71,6 +71,13 @@ pub struct AppStateInner {
     pub config: RwLock<AppConfig>,
     pub playit_child: RwLock<Option<Child>>,
     pub playit_tx: broadcast::Sender<String>,
+    /// Replayed to every new `/api/playit/ws` subscriber on connect, same
+    /// pattern as `ServerRuntime::backlog`. Without this, output printed by
+    /// the agent between `start_agent()` returning and the frontend opening
+    /// its WebSocket (which always happens - the UI awaits the REST call
+    /// first) was silently dropped, even when the binary was already
+    /// downloaded and started instantly.
+    pub playit_backlog: RwLock<Vec<String>>,
     pub backup_progress: RwLock<HashMap<Uuid, BackupProgress>>,
 }
 
@@ -96,6 +103,7 @@ pub async fn build_state() -> anyhow::Result<AppState> {
     let data_dir = resolve_data_dir();
     tokio::fs::create_dir_all(&data_dir).await.ok();
     tokio::fs::create_dir_all(data_dir.join("servers")).await.ok();
+    acquire_instance_lock(&data_dir)?;
 
     let servers: HashMap<Uuid, ServerEntry> = match tokio::fs::read_to_string(registry_path(&data_dir)).await {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
@@ -121,6 +129,7 @@ pub async fn build_state() -> anyhow::Result<AppState> {
         config: RwLock::new(config),
         playit_child: RwLock::new(None),
         playit_tx,
+        playit_backlog: RwLock::new(Vec::new()),
         backup_progress: RwLock::new(HashMap::new()),
     });
 
@@ -145,6 +154,40 @@ fn resolve_data_dir() -> PathBuf {
         return dir.join("mcmanager");
     }
     PathBuf::from("./mcmanager-data")
+}
+
+/// Both binaries (`mcmanager`, the web app, and `mcmanager-headless`, the
+/// CLI-only one) supervise server processes purely in-memory - nothing about
+/// which PIDs belong to which server is shared between OS processes. Running
+/// two instances against the same data directory at once is a real risk of
+/// double-starting a server or corrupting `servers.json`, not just a
+/// theoretical one, since it's now easy to end up with one of each running
+/// (GUI on a desktop, headless on a server, both pointed at a synced/shared
+/// data dir). A simple exclusive lock file catches the common case.
+///
+/// Not a full liveness check (no cross-platform PID-alive probe here) - if
+/// a previous instance crashed hard enough to leave the file behind, the
+/// error message explains how to clear it manually rather than silently
+/// overwriting a lock that might still be valid.
+fn acquire_instance_lock(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let lock_path = data_dir.join("mcmanager.lock");
+    if lock_path.exists() {
+        let prev_pid = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        anyhow::bail!(
+            "Un verrou d'instance existe deja : {}\n\
+             Cela signifie qu'une autre instance de MCManager (web ou headless, pid note : {}) \
+             tourne peut-etre deja sur ce dossier de donnees. Lancer deux instances en meme temps \
+             sur le meme dossier peut corrompre l'etat des serveurs (demarrages en double, fichier \
+             servers.json ecrase par l'une pendant que l'autre le lit...).\n\
+             Si vous etes sur qu'aucune autre instance ne tourne (ex: arret brutal precedent), \
+             supprimez ce fichier puis relancez.",
+            lock_path.display(),
+            prev_pid.trim()
+        );
+    }
+    std::fs::write(&lock_path, std::process::id().to_string())
+        .map_err(|e| anyhow::anyhow!("impossible de creer le verrou d'instance {} : {e}", lock_path.display()))?;
+    Ok(())
 }
 
 pub async fn save_servers(state: &AppState) -> anyhow::Result<()> {

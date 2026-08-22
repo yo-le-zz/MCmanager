@@ -72,6 +72,7 @@ pub async fn start_server(state: &AppState, id: Uuid) -> Result<()> {
     }
 
     spawn_watcher(state.clone(), id);
+    spawn_idle_watcher(state.clone(), id);
 
     Ok(())
 }
@@ -145,16 +146,20 @@ fn spawn_watcher(state: AppState, id: Uuid) {
             }
 
             // Unexpected exit (crash, OOM-killed, `kill -9` from outside...).
-            // Auto-restart only if the user opted in for this server.
-            let auto_restart = state.servers.read().await.get(&id).map(|e| e.auto_restart).unwrap_or(false);
+            // Auto-restart only if the user opted in for this server, after
+            // a configurable delay (editable any time from Settings, even
+            // after the server was created - not a fixed 5s anymore).
+            let (auto_restart, delay_secs) = state.servers.read().await.get(&id)
+                .map(|e| (e.auto_restart, e.auto_restart_delay_secs))
+                .unwrap_or((false, 5));
             if auto_restart {
                 {
                     let mut runtime = state.runtime.write().await;
                     if let Some(rt) = runtime.get_mut(&id) {
-                        rt.push_line("[MCManager] Redemarrage automatique dans 5s (crash detecte)...".to_string());
+                        rt.push_line(format!("[MCManager] Redemarrage automatique dans {delay_secs}s (crash detecte)..."));
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(delay_secs as u64)).await;
                 if let Err(e) = start_server(&state, id).await {
                     let mut runtime = state.runtime.write().await;
                     if let Some(rt) = runtime.get_mut(&id) {
@@ -163,6 +168,102 @@ fn spawn_watcher(state: AppState, id: Uuid) {
                 }
             }
             break;
+        }
+    });
+}
+
+/// Handles the two "hands-off maintenance" settings that run alongside a
+/// live server: periodic scheduled restarts (memory-leak hygiene) and
+/// auto-stop after a configurable stretch with zero players online. Both
+/// are opt-in per server and editable from Settings at any time, including
+/// after the server already exists.
+///
+/// Exits as soon as this start's session ends (server stopped, or a newer
+/// start superseded it) - identified by comparing `started_at`, since a
+/// fresh `start_server()` call always sets a new timestamp.
+fn spawn_idle_watcher(state: AppState, id: Uuid) {
+    tokio::spawn(async move {
+        let session_started_at = {
+            let runtime = state.runtime.read().await;
+            match runtime.get(&id).and_then(|rt| rt.started_at) {
+                Some(t) => t,
+                None => return,
+            }
+        };
+        let mut empty_since: Option<chrono::DateTime<chrono::Utc>> = None;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            let (still_this_session, entry) = {
+                let runtime = state.runtime.read().await;
+                let Some(rt) = runtime.get(&id) else { break };
+                if !rt.running || rt.started_at != Some(session_started_at) {
+                    (false, None)
+                } else {
+                    (true, state.servers.read().await.get(&id).cloned())
+                }
+            };
+            if !still_this_session {
+                break;
+            }
+            let Some(entry) = entry else { break };
+
+            // Scheduled restart: give players a heads-up, then a graceful
+            // `stop` (the crash-restart path in spawn_watcher picks it back
+            // up automatically since this is a clean, non-"stopping" exit
+            // only if auto_restart is also on - otherwise we restart it
+            // ourselves directly here).
+            if let Some(minutes) = entry.scheduled_restart_minutes {
+                let elapsed = chrono::Utc::now().signed_duration_since(session_started_at);
+                if elapsed.num_minutes() >= minutes as i64 {
+                    {
+                        let mut runtime = state.runtime.write().await;
+                        if let Some(rt) = runtime.get_mut(&id) {
+                            rt.push_line("[MCManager] Redemarrage programme du serveur...".to_string());
+                        }
+                    }
+                    let _ = stop_server(&state, id, false).await;
+                    // Wait for the clean shutdown to finish, then start a
+                    // fresh session (bounded wait so a stuck shutdown can't
+                    // hang this task forever).
+                    for _ in 0..60 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        let running = state.runtime.read().await.get(&id).map(|rt| rt.running).unwrap_or(false);
+                        if !running {
+                            break;
+                        }
+                    }
+                    let _ = start_server(&state, id).await;
+                    break; // the new start_server() call spawns its own idle watcher
+                }
+            }
+
+            // Auto-stop when empty.
+            if let Some(minutes) = entry.stop_when_empty_minutes {
+                match crate::stats::ping_server(entry.port).await {
+                    Ok((Some(0), _, _)) => {
+                        let since = *empty_since.get_or_insert_with(chrono::Utc::now);
+                        let idle_minutes = chrono::Utc::now().signed_duration_since(since).num_minutes();
+                        if idle_minutes >= minutes as i64 {
+                            {
+                                let mut runtime = state.runtime.write().await;
+                                if let Some(rt) = runtime.get_mut(&id) {
+                                    rt.push_line(format!("[MCManager] Aucun joueur depuis {minutes} min - arret automatique."));
+                                }
+                            }
+                            let _ = stop_server(&state, id, false).await;
+                            break;
+                        }
+                    }
+                    _ => {
+                        // Players present, or we couldn't reach the status
+                        // port (server still booting) - reset the timer
+                        // either way, we only want *confirmed* emptiness.
+                        empty_since = None;
+                    }
+                }
+            }
         }
     });
 }

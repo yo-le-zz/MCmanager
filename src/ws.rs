@@ -65,7 +65,17 @@ pub async fn playit_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> i
 }
 
 async fn handle_playit_socket(state: AppState, mut socket: WebSocket) {
+    // Subscribe first, then replay the backlog: this ordering (matching
+    // console_ws above) avoids a gap where a line printed between the
+    // backlog snapshot and the subscribe call would be missed entirely.
     let mut rx = state.playit_tx.subscribe();
+    let backlog = state.playit_backlog.read().await.clone();
+    for line in backlog {
+        if socket.send(Message::Text(line)).await.is_err() {
+            return;
+        }
+    }
+
     while let Ok(line) = rx.recv().await {
         if socket.send(Message::Text(line)).await.is_err() {
             break;
