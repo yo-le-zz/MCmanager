@@ -1,73 +1,102 @@
-# MCManager v1.0.3 — OmniRoute, et corrections de release/mise à jour importantes
+# MCManager v1.0.4 — Notifications, statistiques, liste blanche, console améliorée, et correctifs importants
 
-Cette version ajoute **OmniRoute** comme fournisseur pour l'assistant IA, et
-corrige trois bugs qui empêchaient les releases précédentes de fonctionner
-correctement en pratique : le binaire Windows incomplet, la mise à jour
-automatique cassée, et la création de release GitHub qui échouait.
+Cette version ajoute plusieurs nouveaux outils de gestion au quotidien
+(notifications, statistiques, liste blanche, propriétés serveur, import/export
+de fichiers), améliore nettement la console, et corrige trois bugs qui
+empêchaient la v1.0.3 de fonctionner correctement en pratique.
 
-## 🤖 Nouveau fournisseur IA — OmniRoute
+## 🔔 Notifications ntfy (au lieu d'un bot Discord)
 
-[OmniRoute](https://omniroute.online/) ([GitHub](https://github.com/diegosouzapw/OmniRoute))
-est une passerelle IA auto-hébergée, compatible OpenAI, qui donne accès à
-300+ fournisseurs (Claude, GPT, Gemini, Kimi, DeepSeek...) derrière une
-seule clé API. Elle s'ajoute aux quatre fournisseurs existants
-(Anthropic, OpenAI, Gemini, Ollama) dans l'onglet Assistant IA :
+Plus simple qu'un bot Discord : pas de compte d'application à créer, juste
+un "topic" [ntfy.sh](https://ntfy.sh) (public ou auto-hébergé) auquel
+s'abonner depuis l'appli mobile. Alertes disponibles, activables une par
+une : crash, sauvegarde terminée, redémarrage programmé, arrêt automatique,
+connexion/déconnexion d'un joueur. Jeton d'authentification optionnel,
+chiffré sur disque comme les clés IA.
 
-- Champ d'URL dédié, par défaut `http://127.0.0.1:20128/v1` (le port local
-  standard d'OmniRoute) — modifiable si vous faites tourner OmniRoute
-  ailleurs.
-- Détection automatique des modèles disponibles.
-- Modèle par défaut `auto` (le routage intelligent zero-config d'OmniRoute).
-- Clé API chiffrée sur disque (AES-256-GCM), comme pour les autres
-  fournisseurs.
+## 📈 Statistiques
 
-## 🐛 Corrections importantes
+Nouvel onglet par serveur : nombre de démarrages, temps de fonctionnement
+total, nombre de crashs détectés, et journal des sessions récentes (début,
+fin, durée, propre ou crash).
 
-### Le binaire Windows était incomplet
-Le job Windows du workflow de release compilait sans `--bins` et ne
-copiait que `mcmanager.exe` — jamais `mcmanager-headless.exe`, ni les
-dernières fonctionnalités si le tag ne pointait pas sur le bon commit.
-L'installateur Inno Setup avait le même trou. **Corrigé** : les deux
-binaires sont maintenant inclus partout (archive portable, installateur,
-paquet .deb).
+## 🛡 Liste blanche & 📝 Propriétés serveur
 
-### La mise à jour automatique ne détectait jamais rien
-Cause racine trouvée : le dépôt GitHub réel est `yo-le-zz/MCmanager`, mais
-le code de vérification de mise à jour (et le user-agent HTTP, les liens
-`nix run`, le README, la doc, les scripts de build) pointait vers
-`yolezz/mcmanager` — **un dépôt différent qui n'existe pas**. Chaque
-vérification échouait silencieusement (404), donc l'application ne
-détectait jamais de nouvelle version, quel que soit le tag publié.
-**Corrigé partout** dans le code et la documentation.
-
-### La création de release GitHub échouait (403)
-Le token `GITHUB_TOKEN` par défaut n'a que les droits de lecture sur le
-dépôt tant que `permissions: contents: write` n'est pas déclaré
-explicitement dans le workflow. **Ajouté** au niveau du workflow et du job
-`publish` — les releases se créent maintenant normalement.
-
-### Nettoyage annexe
-- Mise à jour des actions GitHub (`checkout`, `upload-artifact`,
-  `download-artifact`, `action-gh-release`) vers leurs dernières versions
-  majeures (Node 24 natif), pour faire disparaître l'avertissement de
-  dépréciation Node 20 dans les logs.
-- Versions de paquet Nix resynchronisées avec la version réelle de
+Deux nouveaux onglets dédiés :
+- **Liste blanche** : ajouter/retirer des joueurs, activer/désactiver
   l'application.
+- **Propriétés serveur** : formulaire convivial pour les réglages courants
+  de `server.properties` (difficulté, mode de jeu, PvP, max-players,
+  distance de vue, mode en ligne...) avec les bons contrôles au lieu de
+  texte brut à éditer à la main. Un éditeur "fichier complet" reste
+  disponible pour les clés avancées.
+
+## 📟 Console repensée
+
+- **Zone de saisie multi-ligne et redimensionnable** : une commande par
+  ligne, bouton "▶ Exécuter" (ou Ctrl+Entrée) pour tout envoyer d'affilée —
+  fini le champ trop étroit pour une commande `give` avec NBT custom.
+- **Couleurs dans le terminal** : les codes ANSI (Paper/Spigot) et les
+  codes couleur Minecraft (`§`) s'affichent maintenant en couleur.
+- **Apparence personnalisable** (taille de police, police) dans
+  Paramètres, appliquée à toutes les consoles.
+
+## 📦 Import/export de fichiers
+
+Dans l'onglet Fichiers : export d'un dossier (ou de tout le serveur) en
+`.zip` téléchargeable, import d'une archive `.zip` avec extraction
+protégée contre les chemins malveillants ("zip-slip").
+
+## 🎨 Animations & 🤖 OmniRoute
+
+- Transitions sur la navigation, les cartes, les boutons et les
+  notifications toast.
+- **OmniRoute** ajouté comme fournisseur pour l'assistant IA — passerelle
+  auto-hébergée compatible OpenAI donnant accès à 300+ fournisseurs
+  derrière une seule clé.
+
+## 🔒 Verrou d'instance plus intelligent
+
+Au lieu de refuser systématiquement de démarrer si `mcmanager.lock`
+existe, MCManager vérifie maintenant si le PID qu'il référence appartient
+toujours à un processus vivant, et si c'est bien MCManager. Un verrou
+laissé par un arrêt brutal, ou par un PID réutilisé par un autre
+programme, est proposé à la suppression de façon interactive (avec refus
+automatique en contexte non-interactif, comme un service systemd).
+
+## 🐛 Corrections importantes (suite aux retours sur la v1.0.3)
+
+- **L'installateur Windows n'était jamais généré.** Le workflow le
+  compilait sur le job Linux, où Inno Setup n'existe jamais. Déplacé sur
+  le job Windows.
+- **La mise à jour automatique ne détectait jamais rien.** Le code
+  pointait vers un dépôt GitHub qui n'existe pas (`yolezz/mcmanager` au
+  lieu de `yo-le-zz/MCmanager`) — chaque vérification échouait
+  silencieusement. Corrigé partout.
+- **La création de release échouait (403).** Permissions manquantes dans
+  le workflow — ajoutées.
 
 ## 📥 Téléchargements
 
 | Plateforme | Fichier |
 |---|---|
-| Linux (Debian/Ubuntu) | `mcmanager_1.0.3_amd64.deb` (inclut `mcmanager` et `mcmanager-headless`) |
-| Linux (portable) | `mcmanager-1.0.3-linux-x86_64.tar.gz` |
+| Linux (Debian/Ubuntu) | `mcmanager_1.0.4_amd64.deb` (inclut `mcmanager` et `mcmanager-headless`) |
+| Linux (portable) | `mcmanager-1.0.4-linux-x86_64.tar.gz` |
 | NixOS / GLF OS | `nix run github:yo-le-zz/MCmanager` |
-| Windows (portable) | `mcmanager-1.0.3-windows-x86_64.zip` |
-| Windows (installeur) | `mcmanager-1.0.3-setup.exe` |
+| Windows (portable) | `mcmanager-1.0.4-windows-x86_64.zip` |
+| Windows (installeur) | `mcmanager-1.0.4-setup.exe` |
 
 **Changelog complet :** voir [CHANGELOG.md](./CHANGELOG.md)
 
-> ⚠️ Si vous mettez à jour depuis une version antérieure à 1.0.2 ou 1.0.3
-> et que la mise à jour automatique ne détecte toujours rien après cette
-> release : vérifiez que le tag `v1.0.3` a bien été poussé **après** ces
-> correctifs (`git push origin v1.0.3` sur le dernier commit), pas avant —
-> un tag existant ne bouge pas tout seul.
+> ⚠️ Comme pour la v1.0.3 : assurez-vous que le tag `v1.0.4` pointe bien
+> sur le dernier commit après avoir appliqué ces changements
+> (`git push origin v1.0.4`, en recréant le tag s'il existait déjà) pour
+> que la release CI compile bien ce code et pas une version antérieure.
+
+## ⏭ Pas encore fait (reporté à une prochaine version)
+
+Pour rester honnête sur le périmètre de cette release : l'authentification
+par mot de passe sur l'interface web, le suivi TPS/RCON, la liste des
+joueurs en direct avec kick/ban en un clic, et les actions "agissantes" de
+l'assistant IA (installer un mod directement depuis une suggestion, etc.)
+ne sont pas dans cette version.

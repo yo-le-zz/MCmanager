@@ -64,6 +64,8 @@ pub async fn start_server(state: &AppState, id: Uuid) -> Result<()> {
         rt.push_line("[MCManager] Demarrage du serveur...".to_string());
     }
 
+    crate::history::record_boot_start(&state.data_dir, id).await;
+
     if let Some(stdout) = stdout {
         spawn_reader(state.clone(), id, stdout);
     }
@@ -106,12 +108,43 @@ fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(state: AppStat
     tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if let Some((player, joined)) = parse_join_leave(&line) {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
+                    let verb = if joined { "a rejoint" } else { "a quitte" };
+                    crate::ntfy::notify(
+                        &state.http, &state.data_dir, crate::ntfy::Event::PlayerJoinLeave,
+                        &format!("{name} : joueur {}", if joined { "connecte" } else { "deconnecte" }),
+                        &format!("{player} {verb} {name}."),
+                    ).await;
+                });
+            }
             let mut runtime = state.runtime.write().await;
             if let Some(rt) = runtime.get_mut(&id) {
                 rt.push_line(line);
             }
         }
     });
+}
+
+/// Heuristic match on vanilla/Paper/Spigot/Purpur's standard log line
+/// (`[HH:MM:SS] [Server thread/INFO]: PlayerName joined the game`) - good
+/// enough for a notification, not meant to be a strict parser. Returns
+/// `(player_name, true)` for a join, `(player_name, false)` for a leave.
+fn parse_join_leave(line: &str) -> Option<(String, bool)> {
+    let after_prefix = line.rsplit_once("]: ").map(|(_, rest)| rest).unwrap_or(line);
+    if let Some(name) = after_prefix.strip_suffix(" joined the game") {
+        if !name.is_empty() && !name.contains(' ') {
+            return Some((name.to_string(), true));
+        }
+    }
+    if let Some(name) = after_prefix.strip_suffix(" left the game") {
+        if !name.is_empty() && !name.contains(' ') {
+            return Some((name.to_string(), false));
+        }
+    }
+    None
 }
 
 fn spawn_watcher(state: AppState, id: Uuid) {
@@ -141,9 +174,18 @@ fn spawn_watcher(state: AppState, id: Uuid) {
             };
 
             let Some(intentional) = exited else { continue };
+            crate::history::record_boot_end(&state.data_dir, id, !intentional).await;
+
             if intentional {
                 break;
             }
+
+            let server_name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
+            crate::ntfy::notify(
+                &state.http, &state.data_dir, crate::ntfy::Event::Crash,
+                &format!("🔴 {server_name} s'est arrete de facon inattendue"),
+                "Le processus s'est termine sans demande d'arret (crash, OOM, kill externe...). Utilisez le diagnostic de crash dans la Console pour identifier la cause.",
+            ).await;
 
             // Unexpected exit (crash, OOM-killed, `kill -9` from outside...).
             // Auto-restart only if the user opted in for this server, after
@@ -191,6 +233,10 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
             }
         };
         let mut empty_since: Option<chrono::DateTime<chrono::Utc>> = None;
+        // Tracks which warning thresholds (in minutes-remaining) we've
+        // already broadcast for this session, so the 30s poll loop doesn't
+        // spam "5 minutes remaining" a dozen times in a row.
+        let mut warned_marks: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -216,6 +262,17 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
             // ourselves directly here).
             if let Some(minutes) = entry.scheduled_restart_minutes {
                 let elapsed = chrono::Utc::now().signed_duration_since(session_started_at);
+                let remaining = minutes as i64 - elapsed.num_minutes();
+
+                for mark in [5i64, 1] {
+                    if remaining == mark && warned_marks.insert(mark) {
+                        let _ = send_command(&state, id, &format!(
+                            "say [MCManager] Redemarrage programme du serveur dans {mark} minute{}.",
+                            if mark > 1 { "s" } else { "" }
+                        )).await;
+                    }
+                }
+
                 if elapsed.num_minutes() >= minutes as i64 {
                     {
                         let mut runtime = state.runtime.write().await;
@@ -223,6 +280,11 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
                             rt.push_line("[MCManager] Redemarrage programme du serveur...".to_string());
                         }
                     }
+                    crate::ntfy::notify(
+                        &state.http, &state.data_dir, crate::ntfy::Event::ScheduledRestart,
+                        &format!("🔄 {} : redemarrage programme", entry.name),
+                        "Redemarrage programme en cours (maintenance reguliere configuree dans Parametres).",
+                    ).await;
                     let _ = stop_server(&state, id, false).await;
                     // Wait for the clean shutdown to finish, then start a
                     // fresh session (bounded wait so a stuck shutdown can't
@@ -252,6 +314,11 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
                                     rt.push_line(format!("[MCManager] Aucun joueur depuis {minutes} min - arret automatique."));
                                 }
                             }
+                            crate::ntfy::notify(
+                                &state.http, &state.data_dir, crate::ntfy::Event::AutoStop,
+                                &format!("⏸ {} : arret automatique", entry.name),
+                                &format!("Aucun joueur connecte depuis {minutes} minutes - serveur arrete automatiquement."),
+                            ).await;
                             let _ = stop_server(&state, id, false).await;
                             break;
                         }

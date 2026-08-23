@@ -79,6 +79,96 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ───────────────────────── couleurs console (ANSI + codes §) ─────────────────────────
+
+const ANSI_COLOR_MAP = {
+  30: "#45475a", 31: "#f38ba8", 32: "#a6e3a1", 33: "#f9e2af", 34: "#89b4fa", 35: "#f5c2e7", 36: "#94e2d5", 37: "#bac2de",
+  90: "#585b70", 91: "#f38ba8", 92: "#a6e3a1", 93: "#f9e2af", 94: "#89b4fa", 95: "#f5c2e7", 96: "#94e2d5", 97: "#a6adc8",
+};
+const MC_COLOR_MAP = {
+  "0": "#000000", "1": "#0000aa", "2": "#00aa00", "3": "#00aaaa", "4": "#aa0000", "5": "#aa00aa", "6": "#ffaa00", "7": "#aaaaaa",
+  "8": "#555555", "9": "#5555ff", a: "#55ff55", b: "#55ffff", c: "#ff5555", d: "#ff55ff", e: "#ffff55", f: "#ffffff",
+};
+
+/// Converts one raw console line to safe, colorized HTML: escapes the text
+/// first (so nothing in server/plugin output can inject markup), then
+/// turns ANSI SGR sequences (`\x1b[NNm`, what Paper/Spigot/log4j2 print
+/// when color is enabled) and literal Minecraft `§x` codes into `<span>`s.
+/// Unrecognized/unsupported codes are just dropped rather than shown as
+/// garbage control characters.
+function consoleLineToHtml(line) {
+  let html = escapeHtml(line);
+
+  // ANSI: \x1b[<codes>m - split on the escape sequences, track open spans.
+  const ansiRe = /\x1b\[([0-9;]*)m/g;
+  let openSpans = 0;
+  html = html.replace(ansiRe, (_, codes) => {
+    const parts = codes.split(";").filter(Boolean).map(Number);
+    if (parts.length === 0 || parts.includes(0)) {
+      const closing = "</span>".repeat(openSpans);
+      openSpans = 0;
+      return closing;
+    }
+    let style = "";
+    for (const code of parts) {
+      if (ANSI_COLOR_MAP[code]) style += `color:${ANSI_COLOR_MAP[code]};`;
+      if (code === 1) style += "font-weight:700;";
+      if (code === 4) style += "text-decoration:underline;";
+      if (code === 3) style += "font-style:italic;";
+    }
+    if (!style) return "";
+    openSpans++;
+    return `<span style="${style}">`;
+  });
+  html += "</span>".repeat(openSpans);
+
+  // Minecraft §-codes (appear literally when a plugin logs colored chat
+  // without ANSI translation). escapeHtml doesn't touch §, so this still
+  // matches post-escape.
+  const mcRe = /§([0-9a-fk-or])/gi;
+  let mcOpen = 0;
+  html = html.replace(mcRe, (_, code) => {
+    const c = code.toLowerCase();
+    if (c === "r") {
+      const closing = "</span>".repeat(mcOpen);
+      mcOpen = 0;
+      return closing;
+    }
+    if (MC_COLOR_MAP[c]) {
+      mcOpen++;
+      return `<span style="color:${MC_COLOR_MAP[c]}">`;
+    }
+    return ""; // formatting codes (k,l,m,n,o) other than color: drop, not worth the complexity
+  });
+  html += "</span>".repeat(mcOpen);
+
+  return html;
+}
+
+// ───────────────────────── apparence de la console (police, taille) ─────────────────────────
+
+const CONSOLE_APPEARANCE_DEFAULTS = { fontSize: 12.5, fontFamily: "Consolas, 'Courier New', monospace" };
+
+function getConsoleAppearance() {
+  try {
+    return { ...CONSOLE_APPEARANCE_DEFAULTS, ...JSON.parse(localStorage.getItem("mcmanager-console-appearance") || "{}") };
+  } catch {
+    return { ...CONSOLE_APPEARANCE_DEFAULTS };
+  }
+}
+
+function setConsoleAppearance(partial) {
+  const merged = { ...getConsoleAppearance(), ...partial };
+  localStorage.setItem("mcmanager-console-appearance", JSON.stringify(merged));
+  applyConsoleAppearance();
+}
+
+function applyConsoleAppearance() {
+  const a = getConsoleAppearance();
+  document.documentElement.style.setProperty("--console-font-size", `${a.fontSize}px`);
+  document.documentElement.style.setProperty("--console-font-family", a.fontFamily);
+}
+
 // ───────────────────────── render dispatcher ─────────────────────────
 
 async function render() {
@@ -93,7 +183,10 @@ async function render() {
       case "addons": return renderAddons();
       case "marketplace": return renderMarketplace();
       case "schematics": return renderSchematics();
+      case "whitelist": return renderWhitelist();
+      case "properties": return renderProperties();
       case "backups": return renderBackups();
+      case "stats": return renderStats();
       case "network": return renderNetwork();
       case "docs": return renderDocs();
       case "assistant": return renderAssistant();
@@ -445,16 +538,22 @@ function renderConsole() {
       <button class="btn-ghost" id="c-debug">🩺 Diagnostiquer un crash</button>
     </div>
     <div class="console" id="console-out"></div>
-    <div class="console-input-row">
-      <input id="console-cmd" placeholder="Tapez une commande serveur (ex: say bonjour) puis Entrée">
-      <button class="btn-blue" id="console-send">Envoyer</button>
+    <div class="console-input-row console-input-row-multiline">
+      <textarea id="console-cmd" rows="3" placeholder="Une commande par ligne (ex: give Steve diamond_sword{...} 1). Entrée = nouvelle ligne, Ctrl+Entrée ou le bouton = tout exécuter."></textarea>
+      <div class="console-input-actions">
+        <button class="btn-blue" id="console-send">▶ Exécuter</button>
+        <span class="meta" id="console-line-count"></span>
+      </div>
     </div>
   `;
+  applyConsoleAppearance();
 
   const out = $("#console-out");
   function appendLine(line) {
     const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 30;
-    out.textContent += line + "\n";
+    const row = document.createElement("div");
+    row.innerHTML = consoleLineToHtml(line);
+    out.appendChild(row);
     if (atBottom) out.scrollTop = out.scrollHeight;
   }
 
@@ -470,18 +569,45 @@ function renderConsole() {
   // whole session) - confirm before actually sending them.
   const DANGEROUS_COMMANDS = ["stop", "end", "shutdown", "restart", "reload", "reload confirm"];
 
-  function send() {
-    const input = $("#console-cmd");
-    const cmd = input.value.trim();
-    if (!cmd) return;
+  async function sendOne(cmd) {
     if (DANGEROUS_COMMANDS.includes(cmd.toLowerCase())) {
-      if (!confirm(`Cette commande ("${cmd}") va arrêter ou recharger le serveur. Confirmer ?`)) return;
+      if (!confirm(`Cette commande ("${cmd}") va arrêter ou recharger le serveur. Confirmer ?`)) return false;
     }
-    ws.readyState === 1 ? ws.send(cmd) : api(`/servers/${s.id}/command`, { method: "POST", body: JSON.stringify({ cmd }) });
-    input.value = "";
+    if (ws.readyState === 1) ws.send(cmd);
+    else await api(`/servers/${s.id}/command`, { method: "POST", body: JSON.stringify({ cmd }) });
+    return true;
   }
-  $("#console-send").addEventListener("click", send);
-  $("#console-cmd").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+
+  // Runs every non-empty line as its own command, in order. A small delay
+  // between each keeps them in the right sequence on the server side
+  // (console commands are processed one at a time; firing them all at once
+  // with no gap risks them arriving out of order over the stdin pipe).
+  async function sendAll() {
+    const input = $("#console-cmd");
+    const lines = input.value.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return;
+    for (const line of lines) {
+      const ok = await sendOne(line);
+      if (!ok) continue; // a dangerous command the user declined - skip it, keep going with the rest
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    input.value = "";
+    updateLineCount();
+  }
+
+  function updateLineCount() {
+    const n = $("#console-cmd").value.split("\n").map((l) => l.trim()).filter(Boolean).length;
+    $("#console-line-count").textContent = n > 1 ? `${n} commandes` : "";
+  }
+
+  $("#console-send").addEventListener("click", sendAll);
+  $("#console-cmd").addEventListener("input", updateLineCount);
+  $("#console-cmd").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      sendAll();
+    }
+  });
 
   $("#c-start").addEventListener("click", async () => { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Démarrage…", "success"); });
   $("#c-stop").addEventListener("click", async () => {
@@ -539,6 +665,8 @@ async function renderFiles(path = "") {
     <div class="toolbar">
       ${path ? '<button class="btn-ghost" id="f-up">⬆ Dossier parent</button>' : ""}
       <label class="btn-ghost" style="cursor:pointer">📤 Envoyer un fichier<input type="file" id="f-upload" class="hidden"></label>
+      <label class="btn-ghost" style="cursor:pointer">📦 Importer une archive .zip<input type="file" id="f-import" accept=".zip" class="hidden"></label>
+      <button class="btn-ghost" id="f-export">📥 Exporter ${path ? "ce dossier" : "tout le serveur"} (.zip)</button>
       <button class="btn-ghost" id="f-explorer">🗂 ${t('files.openExplorer')}</button>
     </div>
     <div class="file-browser">
@@ -591,6 +719,34 @@ async function renderFiles(path = "") {
     await fetch(`/api/servers/${s.id}/files/upload`, { method: "POST", body: fd });
     toast("Fichier envoyé.", "success");
     renderFiles(path);
+  });
+
+  $("#f-export").addEventListener("click", () => {
+    // Direct navigation (not fetch()) so the browser handles the download
+    // and Content-Disposition filename itself, same as any normal file
+    // download link.
+    window.location.href = `/api/servers/${s.id}/files/export?path=${encodeURIComponent(path)}`;
+  });
+
+  $("#f-import").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm(`Extraire "${file.name}" dans ${path ? "/" + path : "le dossier racine du serveur"} ? Les fichiers de même nom seront écrasés.`)) {
+      e.target.value = "";
+      return;
+    }
+    const fd = new FormData();
+    fd.append("path", path);
+    fd.append("file", file);
+    try {
+      const res = await fetch(`/api/servers/${s.id}/files/import`, { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Échec de l'import");
+      toast(`${data.extracted} fichier(s) extrait(s).`, "success");
+      renderFiles(path);
+    } catch (err) {
+      toast(err.message || "Échec de l'import.", "error");
+    }
   });
 
   async function openEditor(filePath) {
@@ -927,6 +1083,258 @@ async function renderBackups() {
   }));
 }
 
+// ───────────────────────── statistiques ─────────────────────────
+
+function formatDuration(totalSeconds) {
+  const d = Math.floor(totalSeconds / 86400);
+  const h = Math.floor((totalSeconds % 86400) / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const parts = [];
+  if (d) parts.push(`${d} j`);
+  if (h) parts.push(`${h} h`);
+  if (!d && m) parts.push(`${m} min`);
+  return parts.length ? parts.join(" ") : "< 1 min";
+}
+
+async function renderStats() {
+  const s = currentServer();
+  const content = $("#content");
+  const hist = await api(`/servers/${s.id}/history`);
+  content.innerHTML = `
+    <h1>📈 Statistiques — ${escapeHtml(s.name)}</h1>
+    <div class="subtitle">Historique de fonctionnement de ce serveur (conservé localement par MCManager).</div>
+    <div class="grid">
+      <div class="stat-card"><div class="label">Démarrages</div><div class="value">${hist.total_boots}</div></div>
+      <div class="stat-card"><div class="label">Temps de fonctionnement total</div><div class="value">${formatDuration(hist.total_uptime_secs)}</div></div>
+      <div class="stat-card"><div class="label">Crashs détectés</div><div class="value" style="${hist.total_crashes ? 'color:var(--red)' : ''}">${hist.total_crashes}</div></div>
+    </div>
+    <div class="card">
+      <h2>Sessions récentes</h2>
+      <table>
+        <thead><tr><th>Démarré</th><th>Arrêté</th><th>Durée</th><th>État</th></tr></thead>
+        <tbody>
+          ${hist.records.length ? hist.records.map((r) => {
+            const start = new Date(r.started_at);
+            const end = r.stopped_at ? new Date(r.stopped_at) : null;
+            const durationSecs = end ? Math.max(0, Math.round((end - start) / 1000)) : null;
+            return `<tr>
+              <td>${start.toLocaleString("fr-FR")}</td>
+              <td>${end ? end.toLocaleString("fr-FR") : '<span class="meta">en cours</span>'}</td>
+              <td>${durationSecs !== null ? formatDuration(durationSecs) : "—"}</td>
+              <td>${r.crashed ? '<span class="badge badge-red">Crash</span>' : (end ? '<span class="badge badge-green">Arrêt propre</span>' : '<span class="badge badge-green">Actif</span>')}</td>
+            </tr>`;
+          }).join("") : '<tr><td colspan="4" class="empty-state">Aucune session enregistrée pour l\'instant.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ───────────────────────── liste blanche (whitelist) ─────────────────────────
+
+async function renderWhitelist() {
+  const s = currentServer();
+  const content = $("#content");
+  const status = await api(`/servers/${s.id}/status`);
+
+  let whitelistNames = [];
+  try {
+    const raw = await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("whitelist.json")}`);
+    whitelistNames = JSON.parse(raw.content || "[]").map((e) => e.name).filter(Boolean);
+  } catch { /* fichier absent = liste vide, tant pis */ }
+
+  let enforced = false;
+  let propsContent = "";
+  try {
+    const raw = await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("server.properties")}`);
+    propsContent = raw.content || "";
+    enforced = /^white-list=true/m.test(propsContent);
+  } catch { /* pas encore de server.properties */ }
+
+  content.innerHTML = `
+    <h1>🛡 Liste blanche — ${escapeHtml(s.name)}</h1>
+    <div class="subtitle">Seuls les joueurs listés ici pourront rejoindre si la liste blanche est activée.</div>
+    <div class="card">
+      <label style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="wl-enforce" style="width:auto" ${enforced ? "checked" : ""}>
+        Activer la liste blanche sur ce serveur
+      </label>
+      <p style="color:var(--overlay0);font-size:12px;margin-top:6px">${status.running ? "Le serveur est en cours d'exécution : le changement est appliqué immédiatement." : "Le serveur est arrêté : le changement sera actif au prochain démarrage."}</p>
+    </div>
+    <div class="card">
+      <h2>Ajouter un joueur</h2>
+      <div style="display:flex;gap:8px">
+        <input id="wl-add-name" placeholder="Pseudo Minecraft" ${status.running ? "" : "disabled"}>
+        <button class="btn-green" id="wl-add" ${status.running ? "" : "disabled"}>+ Ajouter</button>
+      </div>
+      ${status.running ? "" : '<p style="color:var(--overlay0);font-size:12px;margin-top:6px">Démarrez le serveur pour ajouter un joueur (la résolution du pseudo en UUID se fait via le serveur lui-même).</p>'}
+    </div>
+    <div class="card">
+      <h2>Joueurs autorisés (${whitelistNames.length})</h2>
+      <div id="wl-list">
+        ${whitelistNames.length ? whitelistNames.map((n) => `
+          <div class="mod-row">
+            <div class="name">${escapeHtml(n)}</div>
+            <button class="btn-red" data-wl-remove="${escapeHtml(n)}">${t('common.delete')}</button>
+          </div>
+        `).join("") : '<div class="empty-state">Aucun joueur dans la liste blanche.</div>'}
+      </div>
+    </div>
+  `;
+
+  $("#wl-enforce").addEventListener("change", async (e) => {
+    const on = e.target.checked;
+    if (status.running) {
+      await api(`/servers/${s.id}/command`, { method: "POST", body: JSON.stringify({ cmd: `whitelist ${on ? "on" : "off"}` }) });
+    } else {
+      const lines = propsContent.split("\n").filter((l) => !l.startsWith("white-list="));
+      lines.push(`white-list=${on}`);
+      await api(`/servers/${s.id}/files/content`, { method: "PUT", body: JSON.stringify({ path: "server.properties", content: lines.join("\n") }) });
+    }
+    toast(on ? "Liste blanche activée." : "Liste blanche désactivée.", "success");
+  });
+
+  $("#wl-add").addEventListener("click", async () => {
+    const name = $("#wl-add-name").value.trim();
+    if (!name) return;
+    await api(`/servers/${s.id}/command`, { method: "POST", body: JSON.stringify({ cmd: `whitelist add ${name}` }) });
+    toast(`${name} ajouté à la liste blanche.`, "success");
+    setTimeout(renderWhitelist, 500); // laisse le serveur écrire whitelist.json avant de relire
+  });
+
+  $$("[data-wl-remove]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.wlRemove;
+    if (status.running) {
+      await api(`/servers/${s.id}/command`, { method: "POST", body: JSON.stringify({ cmd: `whitelist remove ${name}` }) });
+      setTimeout(renderWhitelist, 500);
+    } else {
+      try {
+        const raw = await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("whitelist.json")}`);
+        const list = JSON.parse(raw.content || "[]").filter((e) => e.name !== name);
+        await api(`/servers/${s.id}/files/content`, { method: "PUT", body: JSON.stringify({ path: "whitelist.json", content: JSON.stringify(list, null, 2) }) });
+        renderWhitelist();
+      } catch {
+        toast("Impossible de modifier whitelist.json.", "error");
+      }
+    }
+  }));
+}
+
+// ───────────────────────── propriétés du serveur (server.properties) ─────────────────────────
+
+// Champs connus avec un contrôle adapté ; tout le reste du fichier
+// (commentaires, clés non listées ici) est préservé tel quel à l'enregistrement.
+const KNOWN_PROPERTIES = [
+  { key: "motd", label: "Message d'accueil (MOTD)", type: "text" },
+  { key: "difficulty", label: "Difficulté", type: "select", options: ["peaceful", "easy", "normal", "hard"] },
+  { key: "gamemode", label: "Mode de jeu", type: "select", options: ["survival", "creative", "adventure", "spectator"] },
+  { key: "max-players", label: "Joueurs maximum", type: "number" },
+  { key: "view-distance", label: "Distance de vue (chunks)", type: "number" },
+  { key: "simulation-distance", label: "Distance de simulation (chunks)", type: "number" },
+  { key: "spawn-protection", label: "Rayon de protection du spawn", type: "number" },
+  { key: "pvp", label: "PvP activé", type: "bool" },
+  { key: "hardcore", label: "Mode hardcore", type: "bool" },
+  { key: "online-mode", label: "Mode en ligne (vérification Mojang)", type: "bool" },
+  { key: "allow-flight", label: "Autoriser le vol", type: "bool" },
+  { key: "enable-command-block", label: "Activer les blocs de commande", type: "bool" },
+  { key: "allow-nether", label: "Autoriser le Nether", type: "bool" },
+  { key: "spawn-monsters", label: "Faire apparaître des monstres", type: "bool" },
+  { key: "level-seed", label: "Seed du monde (à la création uniquement)", type: "text" },
+];
+
+function parseProperties(content) {
+  const map = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const idx = trimmed.indexOf("=");
+    if (idx === -1) continue;
+    map[trimmed.slice(0, idx)] = trimmed.slice(idx + 1);
+  }
+  return map;
+}
+
+function applyPropertiesChanges(content, changes) {
+  const lines = content.split("\n");
+  const seen = new Set();
+  const updated = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return line;
+    const idx = trimmed.indexOf("=");
+    if (idx === -1) return line;
+    const key = trimmed.slice(0, idx);
+    if (Object.prototype.hasOwnProperty.call(changes, key)) {
+      seen.add(key);
+      return `${key}=${changes[key]}`;
+    }
+    return line;
+  });
+  for (const [key, value] of Object.entries(changes)) {
+    if (!seen.has(key)) updated.push(`${key}=${value}`);
+  }
+  return updated.join("\n");
+}
+
+async function renderProperties() {
+  const s = currentServer();
+  const content = $("#content");
+  let raw = "";
+  try {
+    const res = await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("server.properties")}`);
+    raw = res.content || "";
+  } catch {
+    content.innerHTML = `<h1>📝 Propriétés serveur — ${escapeHtml(s.name)}</h1><div class="empty-state">server.properties introuvable (le serveur n'a peut-être jamais été démarré).</div>`;
+    return;
+  }
+  const props = parseProperties(raw);
+  const status = await api(`/servers/${s.id}/status`);
+
+  content.innerHTML = `
+    <h1>📝 Propriétés serveur — ${escapeHtml(s.name)}</h1>
+    <div class="subtitle">Réglages les plus courants de server.properties, avec des contrôles adaptés plutôt que du texte brut. ${status.running ? "Un redémarrage est nécessaire pour appliquer les changements." : ""}</div>
+    <div class="card">
+      <div class="form-grid">
+        ${KNOWN_PROPERTIES.map((p) => {
+          const val = props[p.key] ?? "";
+          if (p.type === "bool") {
+            return `<div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" class="prop-field" data-key="${p.key}" data-type="bool" style="width:auto" ${val === "true" ? "checked" : ""}> ${p.label}</label></div>`;
+          }
+          if (p.type === "select") {
+            return `<div class="form-row"><label>${p.label}</label><select class="prop-field" data-key="${p.key}" data-type="select">${p.options.map((o) => `<option value="${o}" ${val === o ? "selected" : ""}>${o}</option>`).join("")}</select></div>`;
+          }
+          return `<div class="form-row"><label>${p.label}</label><input class="prop-field" data-key="${p.key}" data-type="${p.type}" type="${p.type === "number" ? "number" : "text"}" value="${escapeHtml(val)}"></div>`;
+        }).join("")}
+      </div>
+      <button class="btn-green" id="props-save">Enregistrer</button>
+    </div>
+    <div class="card">
+      <h2>Fichier complet (avancé)</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px">Pour les clés non listées ci-dessus. Modifier ici écrase les valeurs saisies plus haut si elles se chevauchent — préférez le formulaire pour les réglages courants.</p>
+      <textarea id="props-raw" style="width:100%;min-height:260px;font-family:Consolas,monospace;font-size:12.5px">${escapeHtml(raw)}</textarea>
+      <button class="btn-blue" id="props-save-raw" style="margin-top:8px">Enregistrer le fichier complet</button>
+    </div>
+  `;
+
+  $("#props-save").addEventListener("click", async () => {
+    const changes = {};
+    $$(".prop-field").forEach((el) => {
+      const key = el.dataset.key;
+      if (el.dataset.type === "bool") changes[key] = el.checked ? "true" : "false";
+      else changes[key] = el.value;
+    });
+    const updated = applyPropertiesChanges(raw, changes);
+    await api(`/servers/${s.id}/files/content`, { method: "PUT", body: JSON.stringify({ path: "server.properties", content: updated }) });
+    toast("Propriétés enregistrées.", "success");
+    renderProperties();
+  });
+
+  $("#props-save-raw").addEventListener("click", async () => {
+    await api(`/servers/${s.id}/files/content`, { method: "PUT", body: JSON.stringify({ path: "server.properties", content: $("#props-raw").value }) });
+    toast("Fichier server.properties enregistré.", "success");
+    renderProperties();
+  });
+}
+
 // ───────────────────────── network (playit.gg) ─────────────────────────
 
 async function renderNetwork() {
@@ -1178,6 +1586,9 @@ async function renderSettings() {
   const content = $("#content");
   const cfg = await api("/settings");
   const s = currentServer();
+  const appearance = getConsoleAppearance();
+  let ntfyCfg;
+  try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   content.innerHTML = `
     <h1>Paramètres</h1>
     <div class="card">
@@ -1191,6 +1602,49 @@ async function renderSettings() {
             <option value="es" ${state.lang === "es" ? "selected" : ""}>Español</option>
           </select>
         </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Apparence de la console</h2>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Taille de police (${appearance.fontSize}px)</label>
+          <input id="ap-fontsize" type="range" min="10" max="20" step="0.5" value="${appearance.fontSize}">
+        </div>
+        <div class="form-row">
+          <label>Police</label>
+          <select id="ap-fontfamily">
+            <option value="Consolas, 'Courier New', monospace" ${appearance.fontFamily.startsWith("Consolas") ? "selected" : ""}>Consolas</option>
+            <option value="'Courier New', monospace" ${appearance.fontFamily.startsWith("'Courier New'") ? "selected" : ""}>Courier New</option>
+            <option value="'Cascadia Code', Consolas, monospace" ${appearance.fontFamily.startsWith("'Cascadia") ? "selected" : ""}>Cascadia Code</option>
+            <option value="'JetBrains Mono', Consolas, monospace" ${appearance.fontFamily.startsWith("'JetBrains") ? "selected" : ""}>JetBrains Mono</option>
+            <option value="monospace" ${appearance.fontFamily === "monospace" ? "selected" : ""}>Monospace système</option>
+          </select>
+        </div>
+      </div>
+      <p style="color:var(--overlay0);font-size:12px">S'applique immédiatement, à toutes les consoles (jeu et playit.gg). Enregistré sur cet appareil uniquement.</p>
+    </div>
+    <div class="card">
+      <h2>🔔 Notifications (ntfy)</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
+        Pousse des notifications vers <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy.sh</a> (ou une instance auto-hébergée) — pas besoin de bot, juste un nom de "topic" à vous. Installez l'appli ntfy et abonnez-vous au même topic pour recevoir les alertes sur votre téléphone.
+      </p>
+      <div class="form-grid">
+        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="nt-enabled" style="width:auto" ${ntfyCfg.enabled ? "checked" : ""}> Activer les notifications</label></div>
+        <div class="form-row"><label>Serveur ntfy</label><input id="nt-server" placeholder="https://ntfy.sh" value="${escapeHtml(ntfyCfg.server_url)}"></div>
+        <div class="form-row"><label>Topic</label><input id="nt-topic" placeholder="mon-mcmanager-abc123" value="${escapeHtml(ntfyCfg.topic)}"></div>
+        <div class="form-row"><label>Jeton d'authentification ${ntfyCfg.has_token ? '<span class="meta">(configuré)</span>' : '<span class="meta">(optionnel, pour un serveur protégé)</span>'}</label><input id="nt-token" type="password" placeholder="${ntfyCfg.has_token ? "Laisser vide pour conserver" : "Laisser vide si non protégé"}"></div>
+      </div>
+      <div class="form-grid" style="margin-top:6px">
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-crash" style="width:auto" ${ntfyCfg.notify_crash ? "checked" : ""}> Crash</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-backup" style="width:auto" ${ntfyCfg.notify_backup ? "checked" : ""}> Sauvegarde terminée</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-restart" style="width:auto" ${ntfyCfg.notify_scheduled_restart ? "checked" : ""}> Redémarrage programmé</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-autostop" style="width:auto" ${ntfyCfg.notify_auto_stop ? "checked" : ""}> Arrêt automatique</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-players" style="width:auto" ${ntfyCfg.notify_player_join_leave ? "checked" : ""}> Connexion/déconnexion joueur</label>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="btn-green" id="nt-save">Enregistrer</button>
+        <button class="btn-ghost" id="nt-test">📨 Envoyer un test</button>
       </div>
     </div>
     <div class="card">
@@ -1211,6 +1665,7 @@ async function renderSettings() {
         <div class="form-row"><label>RAM max (Mo)</label><input id="ss-xmx" type="number" value="${s.xmx_mb}"></div>
         <div class="form-row"><label>Port</label><input id="ss-port" type="number" value="${s.port}"></div>
         <div class="form-row"><label>Sauvegarde auto (minutes, 0 = désactivé)</label><input id="ss-autobk" type="number" value="${s.auto_backup_minutes || 0}"></div>
+        <div class="form-row"><label>Sauvegardes à conserver (vide = illimité)</label><input id="ss-bkretention" type="number" min="1" value="${s.backup_retention ?? ""}"></div>
         <div class="form-row"><label>Arguments JVM additionnels</label><input id="ss-extraargs" value="${escapeHtml((s.extra_args || []).join(' '))}"></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-aikar" style="width:auto" ${s.aikar_flags ? "checked" : ""}> Flags de performance (Aikar)</label></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-autorestart" style="width:auto" ${s.auto_restart ? "checked" : ""}> Redémarrage automatique en cas de crash</label></div>
@@ -1222,7 +1677,7 @@ async function renderSettings() {
         <div class="form-row"><label>… après combien de minutes sans joueur</label><input id="ss-stopempty-min" type="number" min="1" value="${s.stop_when_empty_minutes || 20}" ${s.stop_when_empty_minutes ? "" : "disabled"}></div>
       </div>
       <button class="btn-green" id="ss-save">Enregistrer</button>
-      <p style="color:var(--overlay0);font-size:12px;margin-top:8px">RAM/port/args JVM/flags Aikar s'appliquent au prochain démarrage. Le redémarrage programmé, le délai de redémarrage auto et l'arrêt sur inactivité prennent effet immédiatement, même sans redémarrer manuellement.</p>
+      <p style="color:var(--overlay0);font-size:12px;margin-top:8px">RAM/port/args JVM/flags Aikar s'appliquent au prochain démarrage. Le redémarrage programmé, le délai de redémarrage auto, la rétention des sauvegardes et l'arrêt sur inactivité prennent effet immédiatement, même sans redémarrer manuellement.</p>
     </div>` : ""}
     <div class="card">
       <h2>À propos</h2>
@@ -1236,6 +1691,42 @@ async function renderSettings() {
 
   $("#st-lang").addEventListener("change", (e) => setLang(e.target.value));
 
+  $("#ap-fontsize").addEventListener("input", (e) => {
+    setConsoleAppearance({ fontSize: parseFloat(e.target.value) });
+    e.target.previousElementSibling?.remove?.(); // no-op guard; label text updated below
+    const label = e.target.closest(".form-row").querySelector("label");
+    if (label) label.textContent = `Taille de police (${e.target.value}px)`;
+  });
+  $("#ap-fontfamily").addEventListener("change", (e) => setConsoleAppearance({ fontFamily: e.target.value }));
+
+  $("#nt-save").addEventListener("click", async () => {
+    try {
+      await api("/ntfy/config", { method: "POST", body: JSON.stringify({
+        enabled: $("#nt-enabled").checked,
+        server_url: $("#nt-server").value,
+        topic: $("#nt-topic").value,
+        auth_token: $("#nt-token").value,
+        notify_crash: $("#nt-crash").checked,
+        notify_backup: $("#nt-backup").checked,
+        notify_scheduled_restart: $("#nt-restart").checked,
+        notify_auto_stop: $("#nt-autostop").checked,
+        notify_player_join_leave: $("#nt-players").checked,
+      }) });
+      toast("Configuration des notifications enregistrée.", "success");
+      renderSettings();
+    } catch (e) {
+      toast(e.message || "Échec de l'enregistrement.", "error");
+    }
+  });
+  $("#nt-test").addEventListener("click", async () => {
+    try {
+      await api("/ntfy/test", { method: "POST" });
+      toast("Notification de test envoyée.", "success");
+    } catch (e) {
+      toast(e.message || "Échec de l'envoi (enregistrez la config d'abord).", "error");
+    }
+  });
+
   if (s) {
     $("#ss-stopempty").addEventListener("change", (e) => {
       $("#ss-stopempty-min").disabled = !e.target.checked;
@@ -1243,12 +1734,14 @@ async function renderSettings() {
     $("#ss-save").addEventListener("click", async () => {
       const extraArgs = $("#ss-extraargs").value.trim();
       const schedRestart = parseInt($("#ss-schedrestart").value, 10) || 0;
+      const retention = parseInt($("#ss-bkretention").value, 10);
       const body = {
         name: $("#ss-name").value,
         xms_mb: parseInt($("#ss-xms").value, 10),
         xmx_mb: parseInt($("#ss-xmx").value, 10),
         port: parseInt($("#ss-port").value, 10),
         auto_backup_minutes: parseInt($("#ss-autobk").value, 10) || 0,
+        backup_retention: retention > 0 ? retention : null,
         extra_args: extraArgs ? extraArgs.split(/\s+/) : [],
         aikar_flags: $("#ss-aikar").checked,
         auto_restart: $("#ss-autorestart").checked,
@@ -1301,6 +1794,7 @@ async function checkUpdateBanner() {
 
 // ───────────────────────── boot ─────────────────────────
 
+applyConsoleAppearance();
 setupNav();
 refreshServerList().then(render);
 checkUpdateBanner();

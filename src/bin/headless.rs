@@ -287,6 +287,7 @@ async fn cmd_create(state: &state::AppState, args: &[&str]) -> anyhow::Result<()
         extra_args: vec![],
         eula_accepted: true,
         auto_backup_minutes: None,
+        backup_retention: None,
         auto_restart: false,
         auto_restart_delay_secs: 5,
         scheduled_restart_minutes: None,

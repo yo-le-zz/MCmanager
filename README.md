@@ -3,7 +3,7 @@
 **Gestionnaire de serveurs Minecraft** — rapide, tout-en-un, avec interface web.
 Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkinter.
 
-> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.3**
+> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.4**
 
 ---
 
@@ -18,12 +18,18 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Gestion des mods/plugins installés** : activer / désactiver / supprimer.
 - **Éditeur de fichiers** intégré (server.properties, configs de plugins/mods…) avec navigateur de fichiers sécurisé (anti path-traversal).
 - **Sauvegardes** : création/restauration/suppression en `.zip`, sauvegarde automatique programmable par serveur.
-- **Statistiques par serveur** : CPU, RAM, joueurs en ligne (via ping du protocole Minecraft, sans plugin).
+- **Statistiques par serveur** : CPU, RAM, joueurs en ligne (via ping du protocole Minecraft, sans plugin) — et un historique persistant (démarrages, temps de fonctionnement total, crashs) dans l'onglet Statistiques.
+- **Console multi-ligne avec couleurs** : zone de saisie redimensionnable pour exécuter plusieurs commandes d'affilée, rendu des codes couleur ANSI/Minecraft, police et taille personnalisables.
+- **Liste blanche** et **propriétés serveur** : onglets dédiés, pas besoin d'éditer les fichiers à la main.
+- **Import/export de fichiers** en `.zip` (un dossier ou tout le serveur) depuis l'onglet Fichiers.
+- **Notifications ntfy** (crash, sauvegarde, redémarrage programmé, arrêt automatique, connexion/déconnexion joueur) — pas de bot à configurer, juste un topic [ntfy.sh](https://ntfy.sh).
+- **Assistant IA** intégré (Anthropic, OpenAI, Gemini, Ollama local, OmniRoute) avec chatbox de suggestions contextuelles.
 - **playit.gg intégré** : téléchargement de l'agent, démarrage/arrêt, mini-tutoriel intégré pour exposer un serveur sur Internet sans configurer son routeur — ou utilisez directement une installation locale de `playit` déjà présente sur la machine.
 - **Auto-mise à jour** : vérifie les tags GitHub au démarrage, propose et applique la mise à jour du binaire lui-même (comportement adapté selon `.deb`/Nix/portable — voir ci-dessous).
-- **Redémarrage automatique en cas de crash**, activable par serveur, avec détection arrêt volontaire vs arrêt inattendu.
+- **Redémarrage automatique en cas de crash**, redémarrage programmé, et arrêt automatique si le serveur reste vide — tous configurables et modifiables à tout moment, même après la création du serveur.
+- **Diagnostic de crash automatique** : isole le mod/plugin fautif (ou une combinaison problématique) en testant les configurations une par une.
 - **Import de serveurs existants** : pointez MCManager vers un dossier de serveur déjà présent sur la machine.
-- **CLI headless** (`mcmanager cli list/status/start/stop/create`) pour gérer un serveur MCManager tournant sur une machine distante sans navigateur.
+- **Deux binaires** : `mcmanager` (interface web) et **`mcmanager-headless`** (gestion 100% en ligne de commande, aucun serveur web, pensé pour un VPS sans navigateur — voir [docs/HEADLESS.md](docs/HEADLESS.md)). `mcmanager cli` reste disponible comme télécommande HTTP vers une instance `mcmanager` déjà lancée (voir [docs/CLI.md](docs/CLI.md)).
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
 - **Multiplateforme** : Linux (.deb + script d'installation), NixOS/GLF OS (flake.nix à la racine + module NixOS — `nix run github:yo-le-zz/MCmanager`), Windows (portable + installateur Inno Setup).
 

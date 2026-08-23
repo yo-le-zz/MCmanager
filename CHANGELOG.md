@@ -3,6 +3,84 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.0.4] - 2026-08-23 (notifications, statistiques, liste blanche, propriétés serveur, console améliorée, import/export)
+### Ajouts
+- **Notifications ntfy** (au lieu d'un bot Discord — plus simple, pas de compte
+  d'application à créer) : alertes crash, sauvegarde terminée, redémarrage
+  programmé, arrêt automatique, connexion/déconnexion joueur. Un topic
+  suffit (public [ntfy.sh](https://ntfy.sh) ou instance auto-hébergée), avec
+  jeton d'authentification optionnel chiffré sur disque. Bascule par type
+  d'événement et bouton "Envoyer un test" dans Paramètres.
+- **Onglet Statistiques** : nombre de démarrages, temps de fonctionnement
+  total, nombre de crashs détectés, et journal des sessions récentes (début,
+  fin, durée, propre ou crash) par serveur.
+- **Onglet Liste blanche** : ajouter/retirer des joueurs (via commande
+  console si le serveur tourne, ou édition directe de `whitelist.json` à
+  l'arrêt), activer/désactiver l'application de la liste blanche.
+- **Onglet Propriétés serveur** : formulaire convivial pour les réglages
+  courants de `server.properties` (difficulté, mode de jeu, PvP,
+  max-players, distance de vue, mode en ligne...) avec les bons types de
+  contrôle (case à cocher, liste déroulante, nombre) au lieu de texte brut.
+  Un éditeur "fichier complet" reste disponible pour les clés non listées.
+- **Console repensée** : zone de saisie multi-ligne et redimensionnable
+  (une commande par ligne, bouton "▶ Exécuter" ou Ctrl+Entrée pour tout
+  envoyer d'affilée) — fini le champ trop étroit pour une commande `give`
+  avec NBT custom. **Couleurs dans le terminal** : les codes ANSI
+  (Paper/Spigot) et les codes couleur Minecraft (`§`) sont maintenant
+  rendus en couleur au lieu de s'afficher en brut. **Apparence
+  personnalisable** (taille de police, police) dans Paramètres, appliquée
+  à toutes les consoles.
+- **Import/export de fichiers** dans l'onglet Fichiers : export d'un
+  dossier (ou de tout le serveur) en `.zip` téléchargeable, import d'une
+  archive `.zip` avec extraction protégée contre le "zip-slip"
+  (chemins `../` malveillants dans l'archive rejetés un par un).
+- **Rétention des sauvegardes** : réglage optionnel par serveur ("garder
+  les N dernières"), appliqué automatiquement après chaque nouvelle
+  sauvegarde (manuelle ou automatique).
+- **Animations d'interface** : transitions sur la navigation, les cartes,
+  les boutons (retour visuel au clic) et les notifications toast, léger
+  fondu à l'affichage de chaque page.
+- **Fournisseur OmniRoute** pour l'assistant IA
+  ([omniroute.online](https://omniroute.online/),
+  [github.com/diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute)) :
+  passerelle auto-hébergée compatible OpenAI donnant accès à 300+
+  fournisseurs derrière une seule clé, détection des modèles disponibles,
+  modèle par défaut `auto`.
+### Changements
+- **`.lock` d'instance plus intelligent** : au lieu de refuser
+  systématiquement de démarrer si un fichier de verrou existe, MCManager
+  vérifie maintenant (via `sysinfo`) si le PID qu'il référence appartient
+  toujours à un processus vivant, et si c'est bien MCManager. Un verrou
+  laissé par un arrêt brutal (processus mort) ou par un PID réutilisé par
+  un autre programme est désormais proposé à la suppression de façon
+  interactive, avec repli sûr (refus) en contexte non-interactif
+  (service systemd, stdin fermé) plutôt que de bloquer indéfiniment ou de
+  supprimer un verrou potentiellement encore valide.
+- Clé de chiffrement locale mutualisée (`secrets.rs`) entre l'assistant IA
+  et les notifications ntfy, avec migration automatique de l'ancienne clé
+  pour ne pas invalider les configurations IA déjà enregistrées.
+### Corrections
+- **L'installateur Windows (`mcmanager-*-setup.exe`) n'était jamais généré
+  ni inclus dans les releases.** Le workflow de CI le compilait sur le job
+  **Linux**, où Inno Setup n'est jamais disponible : l'étape échouait
+  silencieusement. Déplacée sur le job Windows, avec installation d'Inno
+  Setup via Chocolatey.
+- **La mise à jour automatique ne détectait jamais rien.** Cause racine :
+  le code (vérification de mise à jour, user-agent HTTP, liens `nix run`,
+  README, documentation, scripts de build) pointait vers
+  `github.com/yolezz/mcmanager`, un dépôt qui n'existe pas — le vrai dépôt
+  est `yo-le-zz/MCmanager`. Chaque vérification échouait silencieusement
+  (404), donc aucune mise à jour n'était jamais détectée, quel que soit le
+  tag publié. Corrigé partout.
+- **La création de release GitHub échouait avec une erreur 403** (le
+  `GITHUB_TOKEN` par défaut n'a que les droits de lecture tant que
+  `permissions: contents: write` n'est pas déclaré explicitement) —
+  ajouté au workflow.
+- Mise à jour des actions GitHub (`checkout`, `upload-artifact`,
+  `download-artifact`, `action-gh-release`) vers leurs dernières versions
+  majeures (Node 24 natif), pour faire disparaître l'avertissement de
+  dépréciation Node 20 dans les logs.
+
 ## [1.0.3] - 2026-08-22 (fournisseur OmniRoute, corrections release/mise a jour)
 ### Ajouts
 - **OmniRoute comme fournisseur pour l'assistant IA** ([omniroute.online](https://omniroute.online/),

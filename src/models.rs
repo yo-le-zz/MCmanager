@@ -79,6 +79,12 @@ pub struct ServerEntry {
     pub extra_args: Vec<String>,
     pub eula_accepted: bool,
     pub auto_backup_minutes: Option<u32>,
+    /// How many backups to keep for this server; older ones are deleted
+    /// right after a new one finishes. `None` = unlimited (the previous,
+    /// only, behavior) - this stays opt-in so existing backup sets are
+    /// never touched unless the user explicitly sets a limit.
+    #[serde(default)]
+    pub backup_retention: Option<u32>,
     #[serde(default)]
     pub auto_restart: bool,
     /// Delay before an automatic crash-restart, in seconds. Configurable
@@ -138,6 +144,8 @@ pub struct CreateServerRequest {
     pub scheduled_restart_minutes: Option<u32>,
     pub stop_when_empty_minutes: Option<u32>,
     pub auto_backup_minutes: Option<u32>,
+    #[serde(default)]
+    pub backup_retention: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +161,7 @@ pub struct UpdateServerRequest {
     pub scheduled_restart_minutes: Option<Option<u32>>,
     pub stop_when_empty_minutes: Option<Option<u32>>,
     pub auto_backup_minutes: Option<u32>,
+    pub backup_retention: Option<Option<u32>>,
     pub java_path: Option<String>,
 }
 

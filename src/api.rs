@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Multipart, Path as AxPath, Query, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -12,7 +15,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, backup, debug, downloader, files, modrinth, playit, presets, process, stats, updater, ws};
+use crate::{ai, backup, debug, downloader, files, history, modrinth, ntfy, playit, presets, process, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -36,6 +39,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers/:id/files", get(list_files).delete(delete_file))
         .route("/api/servers/:id/files/content", get(read_file).put(write_file))
         .route("/api/servers/:id/files/upload", post(upload_file))
+        .route("/api/servers/:id/files/export", get(export_files))
+        .route("/api/servers/:id/files/import", post(import_files))
         .route("/api/servers/:id/open-folder", post(open_in_explorer))
         .route("/api/servers/:id/addons", get(list_addons))
         .route("/api/servers/:id/addons/:file/toggle", post(toggle_addon))
@@ -52,9 +57,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers/:id/managed-addons/:project_id", delete(remove_managed_addon))
         .route("/api/servers/:id/managed-addons/sync", post(sync_managed_addons))
         .route("/api/servers/:id/debug/crash-diagnostic", post(run_crash_diagnostic))
+        .route("/api/servers/:id/history", get(get_server_history))
         .route("/api/ai/config", get(get_ai_config).post(save_ai_config))
         .route("/api/ai/models", get(list_ai_models))
         .route("/api/ai/chat", post(ai_chat))
+        .route("/api/ntfy/config", get(get_ntfy_config).post(save_ntfy_config))
+        .route("/api/ntfy/test", post(test_ntfy))
         .route("/api/servers/:id/marketplace/updates", get(check_addon_updates))
         .route("/api/marketplace/search", get(marketplace_search))
         .route("/api/marketplace/project/:id/versions", get(marketplace_versions))
@@ -178,6 +186,7 @@ async fn create_server(State(state): State<AppState>, Json(req): Json<CreateServ
         extra_args: req.extra_args,
         eula_accepted: req.eula_accepted,
         auto_backup_minutes: req.auto_backup_minutes,
+        backup_retention: req.backup_retention,
         auto_restart: req.auto_restart,
         auto_restart_delay_secs: req.auto_restart_delay_secs,
         scheduled_restart_minutes: req.scheduled_restart_minutes,
@@ -271,6 +280,7 @@ async fn import_server(State(state): State<AppState>, Json(req): Json<ImportServ
         extra_args: vec![],
         eula_accepted,
         auto_backup_minutes: None,
+        backup_retention: None,
         auto_restart: req.auto_restart,
         auto_restart_delay_secs: 5,
         scheduled_restart_minutes: None,
@@ -302,6 +312,7 @@ async fn update_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, 
     if let Some(v) = req.scheduled_restart_minutes { entry.scheduled_restart_minutes = v; }
     if let Some(v) = req.stop_when_empty_minutes { entry.stop_when_empty_minutes = v; }
     if req.auto_backup_minutes.is_some() { entry.auto_backup_minutes = req.auto_backup_minutes; }
+    if let Some(v) = req.backup_retention { entry.backup_retention = v; }
     if let Some(v) = req.java_path { entry.java_path = v; }
     let updated = entry.clone();
     drop(servers);
@@ -492,6 +503,69 @@ async fn upload_file(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, mu
     Ok(Json(json!({ "ok": true, "saved": saved })))
 }
 
+/// Downloads a zip of `path` (a file or folder inside the server's own
+/// directory; empty/missing `path` = the whole server folder). Streams
+/// from a temp file rather than buffering the whole archive in memory -
+/// world folders can be large - and cleans the temp file up once the
+/// response body has been fully sent.
+async fn export_files(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Query(q): Query<PathQuery>) -> AppResult<impl IntoResponse> {
+    let root = server_folder(&state, id).await?;
+    let rel = q.path.unwrap_or_default();
+    let root2 = root.clone();
+    let rel2 = rel.clone();
+    let zip_path = tokio::task::spawn_blocking(move || files::export_zip(&root2, &rel2)).await
+        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+
+    let download_name = if rel.trim_matches('/').is_empty() {
+        "server".to_string()
+    } else {
+        rel.trim_matches('/').replace('/', "-")
+    };
+
+    let file = tokio::fs::File::open(&zip_path).await?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    // Best-effort cleanup: the temp file is removed once the response has
+    // been read. If the client disconnects mid-download this can leave a
+    // stray file in the OS temp dir - acceptable (the OS cleans its temp
+    // dir periodically, and this is bounded by how often exports happen).
+    let cleanup_path = zip_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        let _ = tokio::fs::remove_file(&cleanup_path).await;
+    });
+
+    let headers = [
+        (header::CONTENT_TYPE, "application/zip".to_string()),
+        (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{download_name}.zip\"")),
+    ];
+    Ok((headers, body))
+}
+
+/// Uploads a `.zip` (multipart field `file`) and extracts it into `path`
+/// (multipart field `path`, optional - defaults to the server root).
+/// Extraction is zip-slip safe: see `files::import_zip`.
+async fn import_files(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, mut multipart: Multipart) -> AppResult<Json<serde_json::Value>> {
+    let root = server_folder(&state, id).await?;
+    let mut dest_dir = String::new();
+    let mut zip_bytes: Option<bytes::Bytes> = None;
+    while let Some(field) = multipart.next_field().await.map_err(|e| anyhow::anyhow!(e))? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "path" {
+            dest_dir = String::from_utf8_lossy(&field.bytes().await.map_err(|e| anyhow::anyhow!(e))?).to_string();
+            continue;
+        }
+        if name == "file" {
+            zip_bytes = Some(field.bytes().await.map_err(|e| anyhow::anyhow!(e))?);
+        }
+    }
+    let zip_bytes = zip_bytes.ok_or_else(|| anyhow::anyhow!("aucun fichier .zip recu"))?;
+    let count = tokio::task::spawn_blocking(move || files::import_zip(&root, &dest_dir, &zip_bytes)).await
+        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    Ok(Json(json!({ "ok": true, "extracted": count })))
+}
+
 // ───────────────────────── addons (mods/plugins) ─────────────────────────
 
 async fn list_addons(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<Vec<AddonInfo>>> {
@@ -604,7 +678,10 @@ async fn create_backup(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) 
         let result = tokio::task::spawn_blocking(move || backup::create_backup_tracked(&data_dir, &id, &folder2, done2)).await;
         state2.backup_progress.write().await.remove(&id);
         match result {
-            Ok(Ok(name)) => tracing::info!("Sauvegarde {name} terminee pour {id}"),
+            Ok(Ok(name)) => {
+                tracing::info!("Sauvegarde {name} terminee pour {id}");
+                backup::after_backup_created(&state2, id, &name).await;
+            }
             Ok(Err(e)) => tracing::error!("Echec de sauvegarde pour {id}: {e}"),
             Err(e) => tracing::error!("Tache de sauvegarde annulee pour {id}: {e}"),
         }
@@ -836,6 +913,10 @@ async fn run_crash_diagnostic(State(state): State<AppState>, AxPath(id): AxPath<
     Ok(Json(report))
 }
 
+async fn get_server_history(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<history::ServerHistory>> {
+    Ok(Json(history::get(&state.data_dir, id).await))
+}
+
 #[derive(Deserialize)]
 struct SaveAiConfigBody {
     provider: String,
@@ -935,6 +1016,77 @@ async fn ai_chat(State(state): State<AppState>, Json(body): Json<AiChatBody>) ->
     };
     let reply = ai::chat(&state.http, &cfg, &context, &body.history, &body.message).await?;
     Ok(Json(json!({ "reply": reply })))
+}
+
+#[derive(Serialize)]
+struct NtfyConfigView {
+    enabled: bool,
+    server_url: String,
+    topic: String,
+    has_token: bool,
+    notify_crash: bool,
+    notify_backup: bool,
+    notify_scheduled_restart: bool,
+    notify_auto_stop: bool,
+    notify_player_join_leave: bool,
+}
+
+impl From<&ntfy::NtfyConfig> for NtfyConfigView {
+    fn from(cfg: &ntfy::NtfyConfig) -> Self {
+        NtfyConfigView {
+            enabled: cfg.enabled,
+            server_url: cfg.server_url.clone(),
+            topic: cfg.topic.clone(),
+            has_token: !cfg.auth_token.is_empty(),
+            notify_crash: cfg.notify_crash,
+            notify_backup: cfg.notify_backup,
+            notify_scheduled_restart: cfg.notify_scheduled_restart,
+            notify_auto_stop: cfg.notify_auto_stop,
+            notify_player_join_leave: cfg.notify_player_join_leave,
+        }
+    }
+}
+
+async fn get_ntfy_config(State(state): State<AppState>) -> AppResult<Json<NtfyConfigView>> {
+    let cfg = ntfy::load_config(&state.data_dir).await;
+    Ok(Json((&cfg).into()))
+}
+
+#[derive(Deserialize)]
+struct SaveNtfyConfigBody {
+    enabled: bool,
+    server_url: String,
+    topic: String,
+    /// Empty string = keep the currently saved token.
+    auth_token: String,
+    notify_crash: bool,
+    notify_backup: bool,
+    notify_scheduled_restart: bool,
+    notify_auto_stop: bool,
+    notify_player_join_leave: bool,
+}
+
+async fn save_ntfy_config(State(state): State<AppState>, Json(body): Json<SaveNtfyConfigBody>) -> AppResult<Json<NtfyConfigView>> {
+    let mut cfg = ntfy::load_config(&state.data_dir).await;
+    cfg.enabled = body.enabled;
+    cfg.server_url = body.server_url;
+    cfg.topic = body.topic;
+    if !body.auth_token.trim().is_empty() {
+        cfg.auth_token = body.auth_token.trim().to_string();
+    }
+    cfg.notify_crash = body.notify_crash;
+    cfg.notify_backup = body.notify_backup;
+    cfg.notify_scheduled_restart = body.notify_scheduled_restart;
+    cfg.notify_auto_stop = body.notify_auto_stop;
+    cfg.notify_player_join_leave = body.notify_player_join_leave;
+    ntfy::save_config(&state.data_dir, &cfg).await?;
+    Ok(Json((&cfg).into()))
+}
+
+async fn test_ntfy(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    let cfg = ntfy::load_config(&state.data_dir).await;
+    ntfy::send_test(&state.http, &cfg).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn check_addon_updates(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<Vec<serde_json::Value>>> {

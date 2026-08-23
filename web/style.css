@@ -59,11 +59,12 @@ nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
   border-radius: 8px;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s, transform 0.1s;
 }
-.nav-item:hover { background: var(--surface0); color: var(--text); }
+.nav-item:hover { background: var(--surface0); color: var(--text); transform: translateX(2px); }
 .nav-item.active { background: var(--blue); color: var(--crust); font-weight: 600; }
 .nav-item[disabled] { opacity: 0.4; cursor: not-allowed; }
+.nav-item[disabled]:hover { transform: none; }
 
 .server-picker { padding: 10px 6px; border-top: 1px solid var(--surface1); margin-top: 10px; }
 .server-picker label { font-size: 11px; color: var(--overlay0); display: block; margin-bottom: 4px; }
@@ -94,6 +95,11 @@ main#content {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  animation: view-in 0.2s ease-out;
+}
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 main#content > h1 { flex: none; }
 main#content > .subtitle { flex: none; }
@@ -109,13 +115,29 @@ h2 { font-size: 16px; margin: 0 0 12px; }
   border-radius: 12px;
   padding: 18px;
   margin-bottom: 16px;
+  transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
+  animation: card-in 0.25s ease-out;
 }
+.card:hover { border-color: var(--surface2); }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
 
-.stat-card { background: var(--mantle); border: 1px solid var(--surface1); border-radius: 12px; padding: 14px 16px; }
+.stat-card {
+  background: var(--mantle);
+  border: 1px solid var(--surface1);
+  border-radius: 12px;
+  padding: 14px 16px;
+  transition: transform 0.15s, border-color 0.2s;
+  animation: card-in 0.25s ease-out;
+}
+.stat-card:hover { transform: translateY(-2px); border-color: var(--blue); }
 .stat-card .label { font-size: 11px; color: var(--overlay0); text-transform: uppercase; letter-spacing: 0.03em; }
 .stat-card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 button, select, input, textarea {
   font-family: inherit;
@@ -125,11 +147,15 @@ button, select, input, textarea {
   border: 1px solid var(--surface1);
   border-radius: 8px;
   padding: 8px 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
+select:focus, input:focus, textarea:focus { border-color: var(--blue); outline: none; box-shadow: 0 0 0 2px rgba(138,173,244,0.2); }
 
-button { cursor: pointer; font-weight: 600; transition: filter 0.15s; }
+button { cursor: pointer; font-weight: 600; transition: filter 0.15s, transform 0.08s; }
 button:hover { filter: brightness(1.12); }
+button:active { transform: scale(0.97); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:disabled:active { transform: none; }
 
 .btn-blue { background: var(--blue); color: var(--crust); border-color: var(--blue); }
 .btn-green { background: var(--green); color: var(--crust); border-color: var(--green); }
@@ -154,15 +180,37 @@ th { color: var(--overlay0); font-weight: 600; font-size: 11px; text-transform: 
   flex: 1;
   min-height: 260px;
   overflow-y: auto;
-  font-family: Consolas, "Courier New", monospace;
-  font-size: 12.5px;
+  font-family: var(--console-font-family, Consolas, "Courier New", monospace);
+  font-size: var(--console-font-size, 12.5px);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
+.console > div { white-space: pre-wrap; word-break: break-word; }
 
 .console-input-row { display: flex; gap: 8px; margin-top: 10px; }
 .console-input-row input { flex: 1; }
+
+/* Multi-line command box (Console tab): bigger, resizable, monospace so
+   long/complex commands (custom `give` with NBT data, etc.) are actually
+   readable while typing instead of scrolling sideways in a single-line
+   input. */
+.console-input-row-multiline { flex-direction: column; align-items: stretch; }
+.console-input-row-multiline textarea#console-cmd {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  font-family: var(--console-font-family, Consolas, "Courier New", monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: var(--crust);
+  border: 1px solid var(--surface1);
+  border-radius: 8px;
+  color: var(--text);
+}
+.console-input-row-multiline textarea#console-cmd:focus { border-color: var(--blue); outline: none; }
+.console-input-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 
 .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .form-row label { font-size: 12px; color: var(--subtext1); }
@@ -206,6 +254,11 @@ th { color: var(--overlay0); font-weight: 600; font-size: 11px; text-transform: 
   margin-top: 8px;
   font-size: 13px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  animation: toast-in 0.2s ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 .toast.error { border-left-color: var(--red); }
 .toast.success { border-left-color: var(--green); }

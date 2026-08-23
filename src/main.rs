@@ -167,7 +167,10 @@ fn background_auto_backup(state: state::AppState) {
                     if due {
                         let folder = std::path::PathBuf::from(&entry.folder);
                         let data_dir = state.data_dir.clone();
-                        let _ = tokio::task::spawn_blocking(move || backup::create_backup(&data_dir, &id, &folder)).await;
+                        let result = tokio::task::spawn_blocking(move || backup::create_backup(&data_dir, &id, &folder)).await;
+                        if let Ok(Ok(name)) = result {
+                            backup::after_backup_created(&state, id, &name).await;
+                        }
                     }
                 }
             }

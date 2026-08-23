@@ -27,14 +27,11 @@
 
 use std::path::{Path, PathBuf};
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::secrets::{self, EncryptedBlob};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AiConfig {
@@ -76,12 +73,6 @@ struct StoredAiConfig {
     encrypted_key: Option<EncryptedBlob>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EncryptedBlob {
-    nonce: String,      // base64, 12 bytes
-    ciphertext: String, // base64
-}
-
 impl AiConfig {
     fn ollama_url(&self) -> String {
         if self.ollama_base_url.trim().is_empty() {
@@ -115,66 +106,6 @@ fn config_path(data_dir: &Path) -> PathBuf {
     data_dir.join("ai_config.json")
 }
 
-fn key_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("ai_key.bin")
-}
-
-async fn restrict_to_owner(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = tokio::fs::metadata(path).await {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = tokio::fs::set_permissions(path, perms).await;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path; // no portable equivalent; NTFS ACLs already default to owner-only for user profile dirs
-    }
-}
-
-/// Loads (generating on first use) the local AES-256 key used to encrypt
-/// the API key at rest. Kept in its own file so `ai_config.json` alone -
-/// e.g. attached to a bug report, or synced to a backup - is useless
-/// without it.
-async fn load_or_create_encryption_key(data_dir: &Path) -> Result<[u8; 32]> {
-    let path = key_path(data_dir);
-    if let Ok(bytes) = tokio::fs::read(&path).await {
-        if bytes.len() == 32 {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            return Ok(key);
-        }
-    }
-    let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    tokio::fs::write(&path, key).await.context("impossible d'ecrire la cle de chiffrement locale")?;
-    restrict_to_owner(&path).await;
-    Ok(key)
-}
-
-fn encrypt(key: &[u8; 32], plaintext: &str) -> Result<EncryptedBlob> {
-    let cipher = Aes256Gcm::new(key.into());
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
-        .map_err(|_| anyhow::anyhow!("echec du chiffrement de la cle API"))?;
-    Ok(EncryptedBlob { nonce: B64.encode(nonce_bytes), ciphertext: B64.encode(ciphertext) })
-}
-
-fn decrypt(key: &[u8; 32], blob: &EncryptedBlob) -> Result<String> {
-    let cipher = Aes256Gcm::new(key.into());
-    let nonce_bytes = B64.decode(&blob.nonce).context("nonce invalide")?;
-    let ciphertext = B64.decode(&blob.ciphertext).context("donnees chiffrees invalides")?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ciphertext.as_slice())
-        .map_err(|_| anyhow::anyhow!("echec du dechiffrement de la cle API (cle locale changee ou fichier corrompu ?)"))?;
-    String::from_utf8(plaintext).context("cle API dechiffree invalide (UTF-8)")
-}
-
 pub async fn load_config(data_dir: &Path) -> AiConfig {
     let Ok(content) = tokio::fs::read_to_string(config_path(data_dir)).await else {
         return AiConfig::default();
@@ -183,8 +114,8 @@ pub async fn load_config(data_dir: &Path) -> AiConfig {
         return AiConfig::default();
     };
     let api_key = match &stored.encrypted_key {
-        Some(blob) => match load_or_create_encryption_key(data_dir).await {
-            Ok(key) => decrypt(&key, blob).unwrap_or_default(),
+        Some(blob) => match secrets::load_or_create_key(data_dir).await {
+            Ok(key) => secrets::decrypt(&key, blob).unwrap_or_default(),
             Err(_) => String::new(),
         },
         None => String::new(),
@@ -196,8 +127,8 @@ pub async fn save_config(data_dir: &Path, cfg: &AiConfig) -> Result<()> {
     let encrypted_key = if cfg.api_key.is_empty() {
         None
     } else {
-        let key = load_or_create_encryption_key(data_dir).await?;
-        Some(encrypt(&key, &cfg.api_key)?)
+        let key = secrets::load_or_create_key(data_dir).await?;
+        Some(secrets::encrypt(&key, &cfg.api_key)?)
     };
     let stored = StoredAiConfig {
         provider: cfg.provider.clone(),
@@ -209,7 +140,7 @@ pub async fn save_config(data_dir: &Path, cfg: &AiConfig) -> Result<()> {
     let path = config_path(data_dir);
     let json = serde_json::to_string_pretty(&stored)?;
     tokio::fs::write(&path, json).await?;
-    restrict_to_owner(&path).await;
+    secrets::restrict_to_owner(&path).await;
     Ok(())
 }
 
@@ -676,15 +607,8 @@ async fn chat_ollama(http: &reqwest::Client, cfg: &AiConfig, system: &str, histo
 mod tests {
     use super::*;
 
-    #[test]
-    fn encrypt_decrypt_roundtrip() {
-        let mut key = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
-        let blob = encrypt(&key, "sk-ant-super-secret-key").unwrap();
-        assert_ne!(blob.ciphertext, "sk-ant-super-secret-key");
-        let plain = decrypt(&key, &blob).unwrap();
-        assert_eq!(plain, "sk-ant-super-secret-key");
-    }
+    // Encryption round-trip itself is covered by secrets::tests::roundtrip
+    // now that the AES-GCM logic lives there, shared with ntfy.rs.
 
     #[test]
     fn masked_key_shape() {

@@ -151,3 +151,87 @@ pub fn schematics_dir(server_folder: &Path) -> PathBuf {
     }
     server_folder.join("plugins").join("WorldEdit").join("schematics")
 }
+
+/// Zips `rel` (a file or a folder; empty string = the whole server folder)
+/// into a fresh temp file and returns its path, for the caller to stream
+/// back as a download. Written to disk rather than built in memory since
+/// a world folder can be gigabytes - same reasoning as `backup.rs`.
+pub fn export_zip(root: &Path, rel: &str) -> Result<PathBuf> {
+    use std::io::{Read, Write};
+    let source = safe_join(root, rel)?;
+    if !source.exists() {
+        anyhow::bail!("chemin introuvable");
+    }
+    let tmp = std::env::temp_dir().join(format!("mcmanager-export-{}.zip", uuid::Uuid::new_v4()));
+    let file = std::fs::File::create(&tmp)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    if source.is_file() {
+        let name = source.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".to_string());
+        zip.start_file(name, options)?;
+        let mut f = std::fs::File::open(&source)?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        zip.write_all(&buf)?;
+    } else {
+        for entry in walkdir::WalkDir::new(&source).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let rel_entry = path.strip_prefix(&source).unwrap_or(path);
+            let rel_str = rel_entry.to_string_lossy().replace('\\', "/");
+            if rel_str.is_empty() {
+                continue;
+            }
+            if path.is_dir() {
+                zip.add_directory(format!("{rel_str}/"), options)?;
+            } else {
+                zip.start_file(rel_str, options)?;
+                let mut f = std::fs::File::open(path)?;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf)?;
+                zip.write_all(&buf)?;
+            }
+        }
+    }
+    zip.finish()?;
+    Ok(tmp)
+}
+
+/// Extracts an uploaded zip archive into `rel_dir` inside `root`. Every
+/// entry path is resolved via `safe_join` before being written, the same
+/// path-traversal guard used everywhere else in this module - a malicious
+/// zip with a `../../etc/cron.d/x` entry ("zip-slip") is rejected entry by
+/// entry rather than trusted just because it arrived inside a zip.
+pub fn import_zip(root: &Path, rel_dir: &str, zip_bytes: &[u8]) -> Result<usize> {
+    use std::io::Read;
+    let dest_root = safe_join(root, rel_dir)?;
+    std::fs::create_dir_all(&dest_root)?;
+    let reader = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(reader).context("archive .zip invalide")?;
+    let mut extracted = 0usize;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let entry_name = entry.name().to_string();
+        // Reject anything that isn't a plain relative path up front - belt
+        // and suspenders alongside safe_join's own checks below.
+        if entry_name.contains("..") {
+            continue;
+        }
+        let target = match safe_join(&dest_root, &entry_name) {
+            Ok(p) => p,
+            Err(_) => continue, // skip any entry that resolves outside the target dir
+        };
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf)?;
+        std::fs::write(&target, buf)?;
+        extracted += 1;
+    }
+    Ok(extracted)
+}

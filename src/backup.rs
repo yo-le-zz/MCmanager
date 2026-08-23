@@ -137,3 +137,44 @@ pub fn delete_backup(data_dir: &Path, server_id: &uuid::Uuid, name: &str) -> Res
     std::fs::remove_file(path).context("suppression impossible")?;
     Ok(())
 }
+
+/// Deletes the oldest backups beyond `keep` (by creation time, newest
+/// first - same ordering as `list_backups`). Called right after a new
+/// backup finishes, from both the manual (`api.rs`) and scheduled
+/// (`main.rs`) backup paths via `after_backup_created` below, so the two
+/// don't duplicate this logic.
+pub fn apply_retention(data_dir: &Path, server_id: &uuid::Uuid, keep: u32) -> Result<Vec<String>> {
+    let backups = list_backups(data_dir, server_id)?;
+    let mut deleted = Vec::new();
+    for old in backups.into_iter().skip(keep as usize) {
+        if delete_backup(data_dir, server_id, &old.name).is_ok() {
+            deleted.push(old.name);
+        }
+    }
+    Ok(deleted)
+}
+
+/// Shared tail end of "a backup just finished successfully": prune old
+/// backups per the server's retention setting (if any), then send a
+/// notification. Kept in one place so the manual-backup and
+/// scheduled-auto-backup code paths can't quietly drift apart.
+pub async fn after_backup_created(state: &crate::state::AppState, id: uuid::Uuid, backup_name: &str) {
+    let entry = state.servers.read().await.get(&id).cloned();
+    let Some(entry) = entry else { return };
+
+    if let Some(keep) = entry.backup_retention {
+        let data_dir = state.data_dir.clone();
+        let deleted = tokio::task::spawn_blocking(move || apply_retention(&data_dir, &id, keep)).await
+            .unwrap_or(Ok(Vec::new()))
+            .unwrap_or_default();
+        if !deleted.is_empty() {
+            tracing::info!("Retention: {} ancienne(s) sauvegarde(s) supprimee(s) pour {id}", deleted.len());
+        }
+    }
+
+    crate::ntfy::notify(
+        &state.http, &state.data_dir, crate::ntfy::Event::Backup,
+        &format!("💾 {} : sauvegarde terminee", entry.name),
+        &format!("Nouvelle sauvegarde creee : {backup_name}."),
+    ).await;
+}

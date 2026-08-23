@@ -169,25 +169,129 @@ fn resolve_data_dir() -> PathBuf {
 /// a previous instance crashed hard enough to leave the file behind, the
 /// error message explains how to clear it manually rather than silently
 /// overwriting a lock that might still be valid.
+/// What we found when inspecting an existing `mcmanager.lock` file.
+enum LockState {
+    /// No lock file at all - the common case.
+    Free,
+    /// The PID in the lock is alive and really is an MCManager process
+    /// (`mcmanager` or `mcmanager-headless`, matched by executable name) -
+    /// a real conflict, never auto-resolved.
+    HeldByMcManager { pid: u32 },
+    /// The PID in the lock isn't running at all anymore - a stale lock left
+    /// behind by an unclean shutdown (`kill -9`, power loss, crash).
+    Stale { pid: u32 },
+    /// The PID in the lock *is* running, but it's some other program - most
+    /// likely PID reuse by the OS after the original MCManager process
+    /// exited (very possible on Linux, where PIDs cycle) rather than an
+    /// actual second MCManager instance.
+    ForeignProcess { pid: u32, name: String },
+}
+
+fn inspect_lock(lock_path: &std::path::Path) -> LockState {
+    let Ok(content) = std::fs::read_to_string(lock_path) else { return LockState::Free };
+    let Ok(pid) = content.trim().parse::<u32>() else {
+        // Unreadable/corrupt content - treat like a stale lock rather than
+        // refusing to start over a file we can't even interpret.
+        return LockState::Stale { pid: 0 };
+    };
+
+    let mut sys = sysinfo::System::new();
+    sys.refresh_process(sysinfo::Pid::from_u32(pid));
+    match sys.process(sysinfo::Pid::from_u32(pid)) {
+        None => LockState::Stale { pid },
+        Some(proc_) => {
+            let name = proc_.name().to_string();
+            let is_mcmanager = name.eq_ignore_ascii_case("mcmanager")
+                || name.eq_ignore_ascii_case("mcmanager.exe")
+                || name.eq_ignore_ascii_case("mcmanager-headless")
+                || name.eq_ignore_ascii_case("mcmanager-headless.exe");
+            if is_mcmanager {
+                LockState::HeldByMcManager { pid }
+            } else {
+                LockState::ForeignProcess { pid, name }
+            }
+        }
+    }
+}
+
+/// Both binaries (`mcmanager`, the web app, and `mcmanager-headless`) supervise
+/// server processes purely in-memory - nothing about which PIDs belong to
+/// which server is shared between OS processes. Running two instances
+/// against the same data directory at once is a real risk of double-starting
+/// a server or corrupting `servers.json`, not just a theoretical one.
+///
+/// Unlike the earlier version of this function, a lock file present on disk
+/// no longer means an automatic refusal: the PID it names is checked for
+/// both liveness and identity (via `sysinfo`, already a dependency for the
+/// CPU/RAM stats). A stale lock (process no longer running) or one that now
+/// belongs to an unrelated program (PID reuse after MCManager exited) is
+/// offered up for cleanup - interactively, over stdin, so an unattended
+/// service (stdin closed/`/dev/null`, immediate EOF) always falls back to
+/// the safe refusal rather than silently deleting a lock it can't actually
+/// verify is safe to remove. A lock genuinely held by another live
+/// MCManager process is never offered for deletion, attended or not.
 fn acquire_instance_lock(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let lock_path = data_dir.join("mcmanager.lock");
-    if lock_path.exists() {
-        let prev_pid = std::fs::read_to_string(&lock_path).unwrap_or_default();
-        anyhow::bail!(
-            "Un verrou d'instance existe deja : {}\n\
-             Cela signifie qu'une autre instance de MCManager (web ou headless, pid note : {}) \
-             tourne peut-etre deja sur ce dossier de donnees. Lancer deux instances en meme temps \
-             sur le meme dossier peut corrompre l'etat des serveurs (demarrages en double, fichier \
-             servers.json ecrase par l'une pendant que l'autre le lit...).\n\
-             Si vous etes sur qu'aucune autre instance ne tourne (ex: arret brutal precedent), \
-             supprimez ce fichier puis relancez.",
-            lock_path.display(),
-            prev_pid.trim()
-        );
+
+    match inspect_lock(&lock_path) {
+        LockState::Free => {}
+        LockState::HeldByMcManager { pid } => {
+            anyhow::bail!(
+                "Une autre instance de MCManager tourne deja sur ce dossier de donnees (pid {pid}, verifie et confirme). \
+                 Fermez-la avant de relancer, ou utilisez un dossier de donnees different (MCMANAGER_DATA_DIR)."
+            );
+        }
+        LockState::Stale { pid } => {
+            let prompt = if pid == 0 {
+                "Le fichier de verrou d'instance existant est illisible/corrompu.".to_string()
+            } else {
+                format!("Le fichier de verrou d'instance existant reference le pid {pid}, qui ne tourne plus (arret brutal precedent ?).")
+            };
+            if !confirm_delete_lock(&prompt) {
+                anyhow::bail!(
+                    "{prompt}\nSupprimez {} manuellement puis relancez si vous etes sur qu'aucune autre instance ne tourne.",
+                    lock_path.display()
+                );
+            }
+            let _ = std::fs::remove_file(&lock_path);
+        }
+        LockState::ForeignProcess { pid, name } => {
+            let prompt = format!(
+                "Le fichier de verrou d'instance existant reference le pid {pid}, qui tourne bien mais correspond a \"{name}\" \
+                 et non a MCManager - probablement un ancien pid reutilise par un autre programme apres l'arret de MCManager."
+            );
+            if !confirm_delete_lock(&prompt) {
+                anyhow::bail!(
+                    "{prompt}\nSupprimez {} manuellement puis relancez si vous etes sur qu'aucune instance MCManager ne tourne.",
+                    lock_path.display()
+                );
+            }
+            let _ = std::fs::remove_file(&lock_path);
+        }
     }
+
     std::fs::write(&lock_path, std::process::id().to_string())
         .map_err(|e| anyhow::anyhow!("impossible de creer le verrou d'instance {} : {e}", lock_path.display()))?;
     Ok(())
+}
+
+/// Asks over stdin whether to delete and continue. Returns `false`
+/// immediately (no deletion) if stdin isn't attended - an immediate EOF
+/// (0 bytes read), as happens under systemd with stdin on `/dev/null` -
+/// rather than blocking a service startup forever waiting for input nobody
+/// will provide.
+fn confirm_delete_lock(prompt: &str) -> bool {
+    use std::io::Write;
+    println!("{prompt}");
+    print!("Supprimer ce verrou et continuer le demarrage ? [o/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line).unwrap_or(0);
+    if n == 0 {
+        println!("(entree non-interactive - verrou conserve par securite)");
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "o" | "oui" | "y" | "yes")
 }
 
 pub async fn save_servers(state: &AppState) -> anyhow::Result<()> {
