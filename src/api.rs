@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers", get(list_servers).post(create_server))
         .route("/api/servers/import", post(import_server))
         .route("/api/servers/:id", get(get_server).put(update_server).delete(delete_server))
+        .route("/api/servers/:id/java/test", post(test_java))
         .route("/api/servers/:id/start", post(start_server))
         .route("/api/servers/:id/stop", post(stop_server))
         .route("/api/servers/:id/kill", post(kill_server))
@@ -54,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers/:id/presets/:key/install", post(install_preset))
         .route("/api/servers/:id/presets/category/:category/install", post(install_preset_category))
         .route("/api/servers/:id/managed-addons", post(add_managed_addon))
+        .route("/api/servers/:id/addons/:file/track", post(track_existing_addon))
         .route("/api/servers/:id/managed-addons/:project_id", delete(remove_managed_addon))
         .route("/api/servers/:id/managed-addons/sync", post(sync_managed_addons))
         .route("/api/servers/:id/debug/crash-diagnostic", post(run_crash_diagnostic))
@@ -318,6 +320,40 @@ async fn update_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, 
     drop(servers);
     save_servers(&state).await?;
     Ok(Json(updated))
+}
+
+#[derive(Deserialize)]
+struct TestJavaBody {
+    java_path: Option<String>,
+    xmx_mb: Option<u32>,
+}
+
+/// Validates a Java executable (and, if the configured heap size is given,
+/// that it can actually be allocated) *before* the user tries to start the
+/// real server and gets a cryptic JVM crash. Reuses the server's saved
+/// java_path/xmx_mb when the request doesn't override them, so "Tester ce
+/// Java" in Settings checks exactly what a real launch would use.
+async fn test_java(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, body: Option<Json<TestJavaBody>>) -> AppResult<Json<serde_json::Value>> {
+    let entry = state.servers.read().await.get(&id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    let body = body.map(|b| b.0).unwrap_or(TestJavaBody { java_path: None, xmx_mb: None });
+    let java_path = body.java_path.filter(|s| !s.trim().is_empty()).unwrap_or(entry.java_path);
+    let xmx_mb = body.xmx_mb.unwrap_or(entry.xmx_mb);
+
+    let output = tokio::process::Command::new(&java_path)
+        .arg(format!("-Xmx{xmx_mb}M"))
+        .arg("-version")
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("impossible de lancer \"{java_path}\" : {e} (chemin introuvable ou non executable ?)"))?;
+
+    // `java -version` prints to stderr by convention, not stdout.
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    Ok(Json(json!({
+        "ok": output.status.success(),
+        "java_path": java_path,
+        "xmx_mb": xmx_mb,
+        "output": text.trim(),
+    })))
 }
 
 async fn delete_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
@@ -841,6 +877,38 @@ async fn add_managed_addon(State(state): State<AppState>, AxPath(id): AxPath<Uui
     Ok(Json(updated))
 }
 
+/// "Start tracking" for a mod/plugin that's already sitting in the
+/// mods/plugins folder (installed by hand, or before managed-addons
+/// existed) - identifies it by file hash via Modrinth (same lookup
+/// `check_addon_updates` already uses) rather than requiring the user to
+/// know its project slug/ID.
+async fn track_existing_addon(State(state): State<AppState>, AxPath((id, file_name)): AxPath<(Uuid, String)>) -> AppResult<Json<ServerEntry>> {
+    let entry = {
+        let servers = state.servers.read().await;
+        servers.get(&id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?
+    };
+    let path = PathBuf::from(&entry.folder).join(entry.loader.addon_dir()).join(&file_name);
+    let bytes = tokio::fs::read(&path).await.map_err(|_| anyhow::anyhow!("fichier introuvable"))?;
+    let hash = sha512_hex(&bytes);
+    let info = modrinth::identify_by_hash(&state.http, &hash).await?
+        .ok_or_else(|| anyhow::anyhow!("ce fichier n'a pas ete reconnu par Modrinth (installe manuellement depuis une autre source ?)"))?;
+    let project_id = info["project_id"].as_str().unwrap_or_default().to_string();
+    if project_id.is_empty() {
+        return Err(anyhow::anyhow!("projet Modrinth introuvable pour ce fichier").into());
+    }
+    let label = file_name.trim_end_matches(".jar").to_string();
+
+    let mut servers = state.servers.write().await;
+    let entry = servers.get_mut(&id).ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    if !entry.managed_addons.iter().any(|m| m.project_id == project_id) {
+        entry.managed_addons.push(crate::models::ManagedAddon { project_id, label });
+    }
+    let updated = entry.clone();
+    drop(servers);
+    save_servers(&state).await?;
+    Ok(Json(updated))
+}
+
 async fn remove_managed_addon(State(state): State<AppState>, AxPath((id, project_id)): AxPath<(Uuid, String)>) -> AppResult<Json<ServerEntry>> {
     let mut servers = state.servers.write().await;
     let entry = servers.get_mut(&id).ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
@@ -1014,7 +1082,7 @@ async fn ai_chat(State(state): State<AppState>, Json(body): Json<AiChatBody>) ->
         }
         None => "aucun serveur selectionne".to_string(),
     };
-    let reply = ai::chat(&state.http, &cfg, &context, &body.history, &body.message).await?;
+    let reply = ai::chat(&state.http, &cfg, &state, body.server_id, &context, &body.history, &body.message).await?;
     Ok(Json(json!({ "reply": reply })))
 }
 

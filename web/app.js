@@ -213,7 +213,7 @@ async function renderDashboard() {
   }));
 
   content.innerHTML = `
-    <h1>Tableau de bord</h1>
+    <h1>${t('view.dashboard')}</h1>
     <div class="subtitle">Vue d'ensemble de tous vos serveurs Minecraft.</div>
     <div class="grid">
       <div class="stat-card"><div class="label">Serveurs</div><div class="value">${state.servers.length}</div></div>
@@ -265,7 +265,7 @@ async function renderServers() {
   const content = $("#content");
   await refreshServerList();
   content.innerHTML = `
-    <h1>Serveurs</h1>
+    <h1>${t('view.servers')}</h1>
     <div class="subtitle">Créez et gérez vos serveurs Minecraft.</div>
     <div class="toolbar">
       <button class="btn-blue" id="new-server-btn">+ Nouveau serveur</button>
@@ -286,7 +286,7 @@ async function renderServers() {
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
           <button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>
-          <button class="btn-red" data-del="${s.id}">Supprimer</button>
+          <button class="btn-red" data-del="${s.id}">${t('common.delete')}</button>
         </div>
       </div>
     `).join("");
@@ -527,7 +527,7 @@ function renderConsole() {
   const s = currentServer();
   const content = $("#content");
   content.innerHTML = `
-    <h1>Console — ${escapeHtml(s.name)}</h1>
+    <h1>${t('view.console')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">${s.loader} · ${s.mc_version} · port ${s.port}</div>
     <div class="toolbar">
       <button class="btn-green" id="c-start">▶ Démarrer</button>
@@ -660,7 +660,7 @@ async function renderFiles(path = "") {
   const content = $("#content");
   const entries = await api(`/servers/${s.id}/files?path=${encodeURIComponent(path)}`);
   content.innerHTML = `
-    <h1>Fichiers — ${escapeHtml(s.name)}</h1>
+    <h1>${t('view.files')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Chemin actuel : /${escapeHtml(path)}</div>
     <div class="toolbar">
       ${path ? '<button class="btn-ghost" id="f-up">⬆ Dossier parent</button>' : ""}
@@ -780,7 +780,7 @@ async function renderAddons() {
   const addons = await api(`/servers/${s.id}/addons`);
   const isModded = ["fabric", "quilt", "forge", "neoforge"].includes(s.loader);
   content.innerHTML = `
-    <h1>${isModded ? "Mods" : "Plugins"} — ${escapeHtml(s.name)}</h1>
+    <h1>${isModded ? t('view.mods') : t('view.plugins')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Activez, désactivez ou supprimez vos ${isModded ? "mods" : "plugins"} installés.</div>
     <div class="toolbar">
       <button class="btn-blue" id="check-updates">🔄 Vérifier les mises à jour</button>
@@ -809,6 +809,7 @@ async function renderAddons() {
   `;
 
   const addonDir = isModded ? "mods" : "plugins";
+  const managedIds = new Set((s.managed_addons || []).map((m) => m.project_id));
   const modList = $("#mod-list");
   modList.innerHTML = addons.length ? addons.map((a) => `
     <div class="mod-row">
@@ -818,6 +819,7 @@ async function renderAddons() {
       </div>
       <div class="mod-actions">
         <button class="btn-ghost" data-config="${escapeHtml(a.file_name)}" title="${t('addons.configTip')}">${t('addons.config')}</button>
+        <button class="btn-ghost" data-track-existing="${escapeHtml(a.file_name)}" title="Repérer ce fichier sur Modrinth et le suivre pour les mises à jour auto">👁 Suivre</button>
         <button class="btn-ghost" data-toggle="${escapeHtml(a.file_name)}">${a.enabled ? t('addons.disable') : t('addons.enable')}</button>
         <button class="btn-red" data-remove="${escapeHtml(a.file_name)}">${t('common.delete')}</button>
       </div>
@@ -833,6 +835,38 @@ async function renderAddons() {
     await api(`/servers/${s.id}/addons/${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
     renderAddons();
   }));
+  // "Suivre" identifies an already-installed file via Modrinth (by hash,
+  // same mechanism as the update checker) and adds it to the "managed"
+  // list below, so files installed by hand (or before that feature
+  // existed) can still be kept up to date with "Synchroniser maintenant"
+  // without the user needing to know its Modrinth slug/ID.
+  $$("[data-track-existing]", modList).forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    const original = b.textContent;
+    b.textContent = "Identification…";
+    try {
+      const updated = await api(`/servers/${s.id}/addons/${encodeURIComponent(b.dataset.trackExisting)}/track`, { method: "POST" });
+      state.servers = state.servers.map((sv) => sv.id === updated.id ? updated : sv);
+      toast(`${b.dataset.trackExisting} est maintenant suivi (voir "Mods/plugins gérés automatiquement" ci-dessous).`, "success");
+      renderAddons();
+    } catch (e) {
+      toast(e.message || "Fichier non reconnu par Modrinth.", "error");
+      b.disabled = false;
+      b.textContent = original;
+    }
+  }));
+  // Addons already tracked get the button hidden rather than left
+  // clickable-but-redundant.
+  $$("[data-track-existing]", modList).forEach((b) => {
+    // We don't know an installed file's project_id without asking the
+    // server, so this only hides for files whose name obviously matches an
+    // already-managed label - a light best-effort dedupe, not exhaustive.
+    const name = b.dataset.trackExisting.replace(/\.jar$/, "");
+    if ([...managedIds].some((id) => name.toLowerCase().includes(id.toLowerCase()))) {
+      b.style.display = "none";
+    }
+  });
+
   // "Config" jumps straight into the mods/plugins folder in the Files
   // browser (rather than guessing a per-plugin config path, which varies
   // wildly between plugins) so the user lands one click away from e.g.
@@ -926,7 +960,7 @@ async function renderMarketplace() {
   const content = $("#content");
   const projectType = ["fabric", "quilt", "forge", "neoforge"].includes(s.loader) ? "mod" : "plugin";
   content.innerHTML = `
-    <h1>Marketplace</h1>
+    <h1>${t('view.marketplace')}</h1>
     <div class="subtitle">Recherche intégrée Modrinth, filtrée pour ${s.loader} ${s.mc_version}.</div>
     <div class="toolbar">
       <input id="mk-query" placeholder="Rechercher un mod ou plugin…" style="flex:1;min-width:240px">
@@ -1001,7 +1035,7 @@ async function renderSchematics() {
       <div class="name">${escapeHtml(f.name)}</div>
       <div class="mod-actions">
         <span class="meta">${humanSize(f.size_bytes)}</span>
-        <button class="btn-red" data-del-sc="${escapeHtml(f.name)}">Supprimer</button>
+        <button class="btn-red" data-del-sc="${escapeHtml(f.name)}">${t('common.delete')}</button>
       </div>
     </div>`).join("") : '<div class="empty-state">Aucun schematic pour le moment.</div>';
 
@@ -1041,7 +1075,7 @@ async function renderBackups() {
   const content = $("#content");
   const backups = await api(`/servers/${s.id}/backups`);
   content.innerHTML = `
-    <h1>Sauvegardes — ${escapeHtml(s.name)}</h1>
+    <h1>${t('view.backups')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Sauvegardes complètes (mondes, configs, mods/plugins) au format .zip.</div>
     <div class="toolbar">
       <button class="btn-blue" id="bk-create">💾 Créer une sauvegarde maintenant</button>
@@ -1060,7 +1094,7 @@ async function renderBackups() {
       <td>${humanSize(b.size_bytes)}</td>
       <td>
         <button class="btn-yellow" data-restore="${escapeHtml(b.name)}">Restaurer</button>
-        <button class="btn-red" data-delbk="${escapeHtml(b.name)}">Supprimer</button>
+        <button class="btn-red" data-delbk="${escapeHtml(b.name)}">${t('common.delete')}</button>
       </td>
     </tr>`).join("") : '<tr><td colspan="4" class="empty-state">Aucune sauvegarde.</td></tr>';
 
@@ -1101,7 +1135,7 @@ async function renderStats() {
   const content = $("#content");
   const hist = await api(`/servers/${s.id}/history`);
   content.innerHTML = `
-    <h1>📈 Statistiques — ${escapeHtml(s.name)}</h1>
+    <h1>📈 ${t('view.stats')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Historique de fonctionnement de ce serveur (conservé localement par MCManager).</div>
     <div class="grid">
       <div class="stat-card"><div class="label">Démarrages</div><div class="value">${hist.total_boots}</div></div>
@@ -1152,7 +1186,7 @@ async function renderWhitelist() {
   } catch { /* pas encore de server.properties */ }
 
   content.innerHTML = `
-    <h1>🛡 Liste blanche — ${escapeHtml(s.name)}</h1>
+    <h1>🛡 ${t('view.whitelist')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Seuls les joueurs listés ici pourront rejoindre si la liste blanche est activée.</div>
     <div class="card">
       <label style="display:flex;align-items:center;gap:8px">
@@ -1283,14 +1317,14 @@ async function renderProperties() {
     const res = await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("server.properties")}`);
     raw = res.content || "";
   } catch {
-    content.innerHTML = `<h1>📝 Propriétés serveur — ${escapeHtml(s.name)}</h1><div class="empty-state">server.properties introuvable (le serveur n'a peut-être jamais été démarré).</div>`;
+    content.innerHTML = `<h1>📝 ${t('view.properties')} — ${escapeHtml(s.name)}</h1><div class="empty-state">${t('view.propertiesMissing')}</div>`;
     return;
   }
   const props = parseProperties(raw);
   const status = await api(`/servers/${s.id}/status`);
 
   content.innerHTML = `
-    <h1>📝 Propriétés serveur — ${escapeHtml(s.name)}</h1>
+    <h1>📝 ${t('view.properties')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Réglages les plus courants de server.properties, avec des contrôles adaptés plutôt que du texte brut. ${status.running ? "Un redémarrage est nécessaire pour appliquer les changements." : ""}</div>
     <div class="card">
       <div class="form-grid">
@@ -1305,7 +1339,7 @@ async function renderProperties() {
           return `<div class="form-row"><label>${p.label}</label><input class="prop-field" data-key="${p.key}" data-type="${p.type}" type="${p.type === "number" ? "number" : "text"}" value="${escapeHtml(val)}"></div>`;
         }).join("")}
       </div>
-      <button class="btn-green" id="props-save">Enregistrer</button>
+      <button class="btn-green" id="props-save">${t('common.save')}</button>
     </div>
     <div class="card">
       <h2>Fichier complet (avancé)</h2>
@@ -1341,7 +1375,7 @@ async function renderNetwork() {
   const content = $("#content");
   const status = await api("/playit/status");
   content.innerHTML = `
-    <h1>Réseau — playit.gg</h1>
+    <h1>${t('view.network')} — playit.gg</h1>
     <div class="subtitle">Exposez votre serveur sur Internet sans configurer votre routeur (pas d'ouverture de ports nécessaire).</div>
     <div class="card">
       <h2>Statut de l'agent</h2>
@@ -1408,7 +1442,7 @@ async function renderAssistant() {
   }
 
   content.innerHTML = `
-    <h1>🤖 Assistant IA</h1>
+    <h1>🤖 ${t('view.assistant')}</h1>
     <p class="subtitle">Suggestions personnalisées sur quoi ajouter, modifier ou réparer sur votre serveur. Votre clé API reste stockée localement et est envoyée uniquement au fournisseur choisi — jamais à un serveur MCManager.</p>
     <div class="card">
       <h2>Fournisseur</h2>
@@ -1448,7 +1482,7 @@ async function renderAssistant() {
           </div>
         </div>
       </div>
-      <button class="btn-green" id="ai-save">Enregistrer</button>
+      <button class="btn-green" id="ai-save">${t('common.save')}</button>
       <p style="color:var(--overlay0);font-size:12px;margin-top:8px">
         La clé est chiffrée sur disque (AES-256-GCM) avec une clé de chiffrement générée localement et stockée séparément, accès restreint au propriétaire du compte. C'est une vraie protection contre une copie/sauvegarde accidentelle du seul fichier de config, mais pas l'équivalent d'un trousseau système : la clé de déchiffrement reste sur la même machine.
         Pour Ollama local, aucune clé n'est nécessaire ; l'assistant peut alors chercher sur le web (DuckDuckGo) et lire des pages pour vous répondre.
@@ -1535,11 +1569,65 @@ async function renderAssistant() {
   $("#ai-chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendAiChat(); });
 }
 
+// ───────────────────────── markdown minimal (chat IA) ─────────────────────────
+
+/// Small, self-contained Markdown → HTML converter for the AI chat bubbles -
+/// no CDN dependency, just the subset an LLM actually uses in practice:
+/// fenced code blocks, inline code, bold/italic, headers, bullet/numbered
+/// lists, links. Input is escaped first, so nothing in a response (however
+/// the provider phrases it) can inject markup.
+function renderMarkdownLite(text) {
+  const codeBlocks = [];
+  // Pull fenced code blocks out first so their content isn't mangled by
+  // the later inline-formatting passes (a `**` inside a code sample
+  // shouldn't turn into bold).
+  let working = escapeHtml(text).replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push(`<pre class="md-code"><code>${code.replace(/\n$/, "")}</code></pre>`);
+    return `\u0000CODEBLOCK${codeBlocks.length - 1}\u0000`;
+  });
+
+  working = working
+    .replace(/^### (.*)$/gm, "<h4>$1</h4>")
+    .replace(/^## (.*)$/gm, "<h4>$1</h4>")
+    .replace(/^# (.*)$/gm, "<h4>$1</h4>")
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<i>$1</i>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // Bullet/numbered lists: group consecutive matching lines into one
+  // <ul>/<ol> rather than wrapping each line individually.
+  const lines = working.split("\n");
+  const out = [];
+  let listType = null;
+  for (const line of lines) {
+    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+\.\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      const type = bullet ? "ul" : "ol";
+      if (listType !== type) {
+        if (listType) out.push(`</${listType}>`);
+        out.push(`<${type}>`);
+        listType = type;
+      }
+      out.push(`<li>${(bullet || numbered)[1]}</li>`);
+    } else {
+      if (listType) { out.push(`</${listType}>`); listType = null; }
+      out.push(line);
+    }
+  }
+  if (listType) out.push(`</${listType}>`);
+
+  let html = out.join("\n").replace(/\n/g, "<br>").replace(/(<\/(ul|ol|li|h4)>)<br>/g, "$1");
+  html = html.replace(/\u0000CODEBLOCK(\d+)\u0000/g, (_, i) => codeBlocks[Number(i)]);
+  return html;
+}
+
 function renderAiChatLog() {
   const log = $("#ai-chat-log");
   if (!log) return;
   log.innerHTML = state.aiChatHistory.length
-    ? state.aiChatHistory.map((m) => `<div style="margin-bottom:10px"><b>${m.role === "user" ? "Vous" : "Assistant"} :</b> ${escapeHtml(m.content).replace(/\n/g, "<br>")}</div>`).join("")
+    ? state.aiChatHistory.map((m) => `<div class="ai-msg ai-msg-${m.role}"><b>${m.role === "user" ? "Vous" : "Assistant"} :</b> ${m.role === "assistant" ? renderMarkdownLite(m.content) : escapeHtml(m.content).replace(/\n/g, "<br>")}</div>`).join("")
     : `<div class="empty-state">Posez une question sur votre serveur — mods à installer, réglages de perf, pourquoi ça lag...</div>`;
   log.scrollTop = log.scrollHeight;
 }
@@ -1590,7 +1678,7 @@ async function renderSettings() {
   let ntfyCfg;
   try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   content.innerHTML = `
-    <h1>Paramètres</h1>
+    <h1>${t('view.settings')}</h1>
     <div class="card">
       <h2>${t('common.language')}</h2>
       <div class="form-grid">
@@ -1643,7 +1731,7 @@ async function renderSettings() {
         <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-players" style="width:auto" ${ntfyCfg.notify_player_join_leave ? "checked" : ""}> Connexion/déconnexion joueur</label>
       </div>
       <div style="margin-top:10px;display:flex;gap:8px">
-        <button class="btn-green" id="nt-save">Enregistrer</button>
+        <button class="btn-green" id="nt-save">${t('common.save')}</button>
         <button class="btn-ghost" id="nt-test">📨 Envoyer un test</button>
       </div>
     </div>
@@ -1654,7 +1742,7 @@ async function renderSettings() {
         <div class="form-row"><label>Dépôt GitHub pour les mises à jour (owner/repo)</label><input id="st-repo" value="${escapeHtml(cfg.update_repo)}"></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="st-autocheck" style="width:auto" ${cfg.check_updates_on_start ? "checked" : ""}> Vérifier les mises à jour au démarrage</label></div>
       </div>
-      <button class="btn-green" id="st-save">Enregistrer</button>
+      <button class="btn-green" id="st-save">${t('common.save')}</button>
     </div>
     ${s ? `
     <div class="card">
@@ -1666,6 +1754,13 @@ async function renderSettings() {
         <div class="form-row"><label>Port</label><input id="ss-port" type="number" value="${s.port}"></div>
         <div class="form-row"><label>Sauvegarde auto (minutes, 0 = désactivé)</label><input id="ss-autobk" type="number" value="${s.auto_backup_minutes || 0}"></div>
         <div class="form-row"><label>Sauvegardes à conserver (vide = illimité)</label><input id="ss-bkretention" type="number" min="1" value="${s.backup_retention ?? ""}"></div>
+        <div class="form-row"><label>Exécutable Java pour ce serveur</label>
+          <div style="display:flex;gap:8px">
+            <input id="ss-java" style="flex:1" value="${escapeHtml(s.java_path || "")}" placeholder="java (celui du système)">
+            <button class="btn-ghost" id="ss-java-test" type="button">🧪 Tester</button>
+          </div>
+          <div id="ss-java-result" style="font-size:12px;margin-top:4px"></div>
+        </div>
         <div class="form-row"><label>Arguments JVM additionnels</label><input id="ss-extraargs" value="${escapeHtml((s.extra_args || []).join(' '))}"></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-aikar" style="width:auto" ${s.aikar_flags ? "checked" : ""}> Flags de performance (Aikar)</label></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-autorestart" style="width:auto" ${s.auto_restart ? "checked" : ""}> Redémarrage automatique en cas de crash</label></div>
@@ -1676,7 +1771,7 @@ async function renderSettings() {
         </div>
         <div class="form-row"><label>… après combien de minutes sans joueur</label><input id="ss-stopempty-min" type="number" min="1" value="${s.stop_when_empty_minutes || 20}" ${s.stop_when_empty_minutes ? "" : "disabled"}></div>
       </div>
-      <button class="btn-green" id="ss-save">Enregistrer</button>
+      <button class="btn-green" id="ss-save">${t('common.save')}</button>
       <p style="color:var(--overlay0);font-size:12px;margin-top:8px">RAM/port/args JVM/flags Aikar s'appliquent au prochain démarrage. Le redémarrage programmé, le délai de redémarrage auto, la rétention des sauvegardes et l'arrêt sur inactivité prennent effet immédiatement, même sans redémarrer manuellement.</p>
     </div>` : ""}
     <div class="card">
@@ -1731,6 +1826,24 @@ async function renderSettings() {
     $("#ss-stopempty").addEventListener("change", (e) => {
       $("#ss-stopempty-min").disabled = !e.target.checked;
     });
+    $("#ss-java-test").addEventListener("click", async () => {
+      const resultEl = $("#ss-java-result");
+      resultEl.textContent = "Test en cours…";
+      resultEl.style.color = "var(--overlay0)";
+      try {
+        const xmx = parseInt($("#ss-xmx").value, 10) || s.xmx_mb;
+        const javaPath = $("#ss-java").value.trim() || undefined;
+        const res = await api(`/servers/${s.id}/java/test`, { method: "POST", body: JSON.stringify({ java_path: javaPath, xmx_mb: xmx }) });
+        resultEl.style.color = res.ok ? "var(--green)" : "var(--red)";
+        resultEl.textContent = res.ok
+          ? `✓ "${res.java_path}" fonctionne avec -Xmx${res.xmx_mb}M — ${res.output.split("\n")[0]}`
+          : `✗ Échec avec -Xmx${res.xmx_mb}M : ${res.output || "aucune sortie"}`;
+      } catch (e) {
+        resultEl.style.color = "var(--red)";
+        resultEl.textContent = `✗ ${e.message || "Impossible de lancer ce Java (chemin introuvable ?)."}`;
+      }
+    });
+
     $("#ss-save").addEventListener("click", async () => {
       const extraArgs = $("#ss-extraargs").value.trim();
       const schedRestart = parseInt($("#ss-schedrestart").value, 10) || 0;
@@ -1748,8 +1861,15 @@ async function renderSettings() {
         auto_restart_delay_secs: parseInt($("#ss-restartdelay").value, 10) || 0,
         scheduled_restart_minutes: schedRestart > 0 ? schedRestart : null,
         stop_when_empty_minutes: $("#ss-stopempty").checked ? (parseInt($("#ss-stopempty-min").value, 10) || 20) : null,
+        java_path: $("#ss-java").value.trim() || null,
       };
-      await api(`/servers/${s.id}`, { method: "PUT", body: JSON.stringify(body) });
+      // The PUT response IS the freshly-saved server entry - apply it
+      // straight into state.servers instead of just tossing it, otherwise
+      // the very next renderSettings() call reads currentServer() from the
+      // stale pre-save cache and the form appears to "not have saved"
+      // even though the backend wrote the change correctly.
+      const updated = await api(`/servers/${s.id}`, { method: "PUT", body: JSON.stringify(body) });
+      state.servers = state.servers.map((sv) => sv.id === updated.id ? updated : sv);
       toast("Paramètres du serveur enregistrés.", "success");
       renderSettings();
     });

@@ -3,6 +3,46 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.0.5] - 2026-08-23 (correctifs Java critiques, IA agissante, markdown, suivi de plugins)
+### Corrections critiques
+- **Le chemin Java configuré n'était jamais utilisé pour un serveur déjà
+  créé.** Il n'existait qu'un réglage Java **global**, appliqué uniquement
+  aux serveurs créés *après* l'avoir changé - un serveur existant restait
+  bloqué sur le Java par défaut du système. C'est ce qui causait des
+  erreurs comme "Invalid maximum heap size" avec `-Xmx4096M` alors que la
+  même commande fonctionnait très bien lancée à la main avec le bon Java.
+  Ajout d'un champ **Java par serveur** dans Paramètres, avec un bouton
+  **"🧪 Tester"** qui lance réellement `<ce java> -Xmx<valeur> -version`
+  et affiche le resultat exact - pour detecter le probleme avant de
+  démarrer le serveur, pas après un crash.
+- **Les paramètres de serveur ne semblaient pas s'enregistrer.** Après un
+  clic sur "Enregistrer", l'interface republiait les anciennes valeurs
+  parce que le cache local des serveurs n'était mis à jour qu'au
+  changement de page, jamais juste après la sauvegarde - alors que le
+  serveur avait bien enregistré le changement côté backend. Corrigé : la
+  réponse de sauvegarde met maintenant directement à jour ce cache.
+### Ajouts
+- **Markdown dans les réponses de l'assistant IA** : gras, listes, blocs
+  de code, liens, titres sont maintenant rendus proprement au lieu de
+  s'afficher en texte brut avec des astérisques. Rendu maison, aucune
+  dépendance externe.
+- **L'assistant IA peut agir, pas seulement suggérer** : nouvel outil
+  "installer un mod/plugin" branché sur Anthropic et Ollama (boucle
+  d'appel d'outils bornée à 4 étapes pour éviter qu'un modèle confus ne
+  boucle indéfiniment), plus un outil pour lister ce qui est déjà
+  installé avant de proposer un doublon.
+- **Suivre un mod/plugin déjà installé** : nouveau bouton "👁 Suivre" sur
+  chaque addon de l'onglet Mods/Plugins, qui l'identifie via Modrinth (par
+  empreinte de fichier, comme la vérification de mises à jour) et l'ajoute
+  à la liste "gérée" sans avoir à connaître son slug/ID Modrinth.
+- **Traductions manquantes comblées** : les titres de toutes les pages
+  (Tableau de bord, Serveurs, Console, Fichiers, Marketplace, Sauvegardes,
+  Statistiques, Liste blanche, Propriétés serveur, Réseau, Assistant IA,
+  Paramètres) et plusieurs boutons "Enregistrer"/"Supprimer" restants
+  passent maintenant par `web/i18n.js` au lieu d'être figés en français.
+  Couverture toujours partielle (voir ci-dessous) - reste principalement
+  le contenu long des cartes de paramètres et certains labels de formulaire.
+
 ## [1.0.4] - 2026-08-23 (notifications, statistiques, liste blanche, propriétés serveur, console améliorée, import/export)
 ### Ajouts
 - **Notifications ntfy** (au lieu d'un bot Discord — plus simple, pas de compte

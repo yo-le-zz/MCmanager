@@ -3,7 +3,7 @@
 **Gestionnaire de serveurs Minecraft** — rapide, tout-en-un, avec interface web.
 Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkinter.
 
-> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.4**
+> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.5**
 
 ---
 

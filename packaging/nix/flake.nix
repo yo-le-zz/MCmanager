@@ -14,7 +14,7 @@
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "mcmanager";
-          version = "1.0.4";
+          version = "1.0.5";
           src = ../..;
 
           cargoLock.lockFile = ../../Cargo.lock;

@@ -173,6 +173,15 @@ th { color: var(--overlay0); font-weight: 600; font-size: 11px; text-transform: 
 .badge-red { background: rgba(237,135,150,0.15); color: var(--red); }
 .badge-blue { background: rgba(138,173,244,0.15); color: var(--blue); }
 
+.ai-msg { margin-bottom: 12px; }
+.ai-msg-assistant b { color: var(--blue); }
+.ai-msg-user b { color: var(--green); }
+.ai-msg code { background: var(--surface0); padding: 1px 5px; border-radius: 4px; font-family: Consolas, monospace; font-size: 12px; }
+.ai-msg .md-code { background: var(--crust); border: 1px solid var(--surface1); border-radius: 6px; padding: 8px 10px; margin: 6px 0; overflow-x: auto; }
+.ai-msg .md-code code { background: none; padding: 0; }
+.ai-msg h4 { margin: 8px 0 4px; font-size: 14px; }
+.ai-msg ul, .ai-msg ol { margin: 4px 0 4px 20px; }
+
 .console {
   background: var(--crust);
   border-radius: 10px;

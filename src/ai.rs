@@ -281,46 +281,123 @@ pub struct ChatMessage {
 /// the current server (loader/version/addons/status) that gets folded into
 /// the system prompt so suggestions are actually specific to what's
 /// installed, not generic Minecraft advice.
-pub async fn chat(http: &reqwest::Client, cfg: &AiConfig, context: &str, history: &[ChatMessage], message: &str) -> Result<String> {
+pub async fn chat(http: &reqwest::Client, cfg: &AiConfig, state: &crate::state::AppState, server_id: Option<uuid::Uuid>, context: &str, history: &[ChatMessage], message: &str) -> Result<String> {
     if !matches!(cfg.provider.as_str(), "ollama") && cfg.api_key.trim().is_empty() {
         anyhow::bail!("aucune cle API configuree pour {}", cfg.provider);
     }
     let system_prompt = format!(
         "Tu es l'assistant integre a MCManager, un gestionnaire de serveurs Minecraft. \
-         Tu aides l'utilisateur a decider quoi ajouter, modifier ou reparer sur son serveur. \
+         Tu aides l'utilisateur a decider quoi ajouter, modifier ou reparer sur son serveur, \
+         et tu peux agir directement via les outils fournis (installer un mod/plugin, lister ceux \
+         deja installes) quand c'est pertinent - pas seulement le suggerir en texte. \
          Sois concret et concis (quelques phrases ou une liste courte), propose des mods/plugins \
          ou reglages precis quand c'est pertinent plutot que des conseils generiques. \
          Etat actuel du serveur concerne :\n{context}"
     );
 
     match cfg.provider.as_str() {
-        "anthropic" => chat_anthropic(http, cfg, &system_prompt, history, message).await,
+        "anthropic" => chat_anthropic(http, cfg, state, server_id, &system_prompt, history, message).await,
         "openai" => chat_openai(http, cfg, &system_prompt, history, message).await,
         "gemini" => chat_gemini(http, cfg, &system_prompt, history, message).await,
-        "ollama" => chat_ollama(http, cfg, &system_prompt, history, message).await,
+        "ollama" => chat_ollama(http, cfg, state, server_id, &system_prompt, history, message).await,
         "omniroute" => chat_omniroute(http, cfg, &system_prompt, history, message).await,
         other => anyhow::bail!("provider inconnu : {other}"),
     }
 }
 
-async fn chat_anthropic(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
+/// MCManager actions the assistant can take directly, beyond plain chat.
+/// Currently: install a mod/plugin, and list what's already installed (so
+/// it doesn't suggest installing something that's already there). Wired
+/// into Anthropic and Ollama, whose tool-calling loops are implemented
+/// below; OpenAI/Gemini stay plain-chat for now.
+async fn execute_mc_tool(state: &crate::state::AppState, server_id: Option<uuid::Uuid>, name: &str, args: &Value) -> Value {
+    let Some(id) = server_id else {
+        return json!({ "error": "aucun serveur n'est selectionne dans MCManager en ce moment" });
+    };
+    let entry = match state.servers.read().await.get(&id).cloned() {
+        Some(e) => e,
+        None => return json!({ "error": "serveur introuvable" }),
+    };
+    match name {
+        "install_addon" => {
+            let project = args["project_id"].as_str().unwrap_or("").trim();
+            if project.is_empty() {
+                return json!({ "error": "project_id manquant" });
+            }
+            let version = match crate::modrinth::latest_matching_version(&state.http, project, entry.loader.modrinth_loader(), &entry.mc_version).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return json!({ "error": format!("aucune version de \"{project}\" compatible avec {} {}", entry.loader.as_str(), entry.mc_version) }),
+                Err(e) => return json!({ "error": e.to_string() }),
+            };
+            let dest = std::path::PathBuf::from(&entry.folder).join(entry.loader.addon_dir());
+            match crate::modrinth::download_version_file(&state.http, &version, &dest).await {
+                Ok(filename) => json!({ "ok": true, "installed_file": filename, "note": "redemarrage du serveur necessaire pour l'activer" }),
+                Err(e) => json!({ "error": e.to_string() }),
+            }
+        }
+        "list_installed_addons" => {
+            match crate::files::list_addons(&std::path::PathBuf::from(&entry.folder), entry.loader) {
+                Ok(list) => json!({ "addons": list.iter().map(|a| json!({ "file": a.file_name, "enabled": a.enabled })).collect::<Vec<_>>() }),
+                Err(e) => json!({ "error": e.to_string() }),
+            }
+        }
+        other => json!({ "error": format!("outil inconnu: {other}") }),
+    }
+}
+
+fn anthropic_mc_tools() -> Value {
+    json!([
+        {
+            "name": "install_addon",
+            "description": "Installe la derniere version compatible d'un mod/plugin Modrinth sur le serveur MCManager actuellement selectionne. Necessite un redemarrage du serveur pour prendre effet.",
+            "input_schema": { "type": "object", "properties": { "project_id": { "type": "string", "description": "slug ou ID du projet Modrinth, ex: lithium, fabric-api" } }, "required": ["project_id"] }
+        },
+        {
+            "name": "list_installed_addons",
+            "description": "Liste les mods/plugins deja installes sur le serveur selectionne, avec leur etat actif/desactive.",
+            "input_schema": { "type": "object", "properties": {} }
+        }
+    ])
+}
+
+async fn chat_anthropic(http: &reqwest::Client, cfg: &AiConfig, state: &crate::state::AppState, server_id: Option<uuid::Uuid>, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
     let mut messages: Vec<Value> = history.iter().map(|m| json!({ "role": m.role, "content": m.content })).collect();
     messages.push(json!({ "role": "user", "content": message }));
     let model = if cfg.model.trim().is_empty() { "claude-sonnet-4-5" } else { cfg.model.as_str() };
-    let resp = http.post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &cfg.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&json!({ "model": model, "max_tokens": 1024, "system": system, "messages": messages }))
-        .send().await.context("requete Anthropic echouee")?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("reponse Anthropic invalide")?;
-    if !status.is_success() {
-        anyhow::bail!("Anthropic a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
+
+    // Bounded tool-use loop, same reasoning as chat_ollama's: a confused
+    // model shouldn't be able to loop forever installing things.
+    for _ in 0..4 {
+        let resp = http.post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &cfg.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({ "model": model, "max_tokens": 1024, "system": system, "messages": messages, "tools": anthropic_mc_tools() }))
+            .send().await.context("requete Anthropic echouee")?;
+        let status = resp.status();
+        let body: Value = resp.json().await.context("reponse Anthropic invalide")?;
+        if !status.is_success() {
+            anyhow::bail!("Anthropic a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
+        }
+        let content = body["content"].as_array().cloned().unwrap_or_default();
+        let tool_uses: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
+
+        if tool_uses.is_empty() {
+            let text = content.iter().find_map(|b| b["text"].as_str()).unwrap_or("(reponse vide)");
+            return Ok(text.to_string());
+        }
+
+        messages.push(json!({ "role": "assistant", "content": content }));
+        let mut tool_results = Vec::new();
+        for tu in &tool_uses {
+            let name = tu["name"].as_str().unwrap_or("");
+            let tool_use_id = tu["id"].as_str().unwrap_or("");
+            let result = execute_mc_tool(state, server_id, name, &tu["input"]).await;
+            tool_results.push(json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": result.to_string() }));
+        }
+        messages.push(json!({ "role": "user", "content": tool_results }));
     }
-    let text = body["content"].as_array()
-        .and_then(|c| c.iter().find_map(|b| b["text"].as_str()))
-        .unwrap_or("(reponse vide)");
-    Ok(text.to_string())
+
+    anyhow::bail!("le modele a enchaine trop d'appels d'outils sans conclure - reessayez avec une question plus precise")
 }
 
 async fn chat_openai(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
@@ -404,6 +481,22 @@ fn ollama_tools() -> Value {
                 "name": "web_fetch",
                 "description": "Recupere le contenu texte d'une page web a partir de son URL.",
                 "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "install_addon",
+                "description": "Installe la derniere version compatible d'un mod/plugin Modrinth sur le serveur MCManager actuellement selectionne. Necessite un redemarrage du serveur pour prendre effet.",
+                "parameters": { "type": "object", "properties": { "project_id": { "type": "string", "description": "slug ou ID du projet Modrinth, ex: lithium, fabric-api" } }, "required": ["project_id"] }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_installed_addons",
+                "description": "Liste les mods/plugins deja installes sur le serveur selectionne, avec leur etat actif/desactive.",
+                "parameters": { "type": "object", "properties": {} }
             }
         }
     ])
@@ -560,7 +653,7 @@ fn strip_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-async fn chat_ollama(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
+async fn chat_ollama(http: &reqwest::Client, cfg: &AiConfig, state: &crate::state::AppState, server_id: Option<uuid::Uuid>, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
     let model = if cfg.model.trim().is_empty() { anyhow::bail!("choisissez un modele Ollama installe localement") } else { cfg.model.as_str() };
     let mut messages = vec![json!({ "role": "system", "content": system })];
     messages.extend(history.iter().map(|m| json!({ "role": m.role, "content": m.content })));
@@ -568,9 +661,10 @@ async fn chat_ollama(http: &reqwest::Client, cfg: &AiConfig, system: &str, histo
 
     let url = format!("{}/api/chat", cfg.ollama_url());
 
-    // Bounded tool-use loop: the model can call web_search/web_fetch a few
-    // times before we force a final answer, so a confused model can't loop
-    // forever burning the user's CPU.
+    // Bounded tool-use loop: the model can call web_search/web_fetch/
+    // install_addon a few times before we force a final answer, so a
+    // confused model can't loop forever burning the user's CPU (or
+    // installing addons in a loop).
     for _ in 0..4 {
         let resp = http.post(&url)
             .json(&json!({ "model": model, "messages": messages, "tools": ollama_tools(), "stream": false }))
@@ -594,6 +688,7 @@ async fn chat_ollama(http: &reqwest::Client, cfg: &AiConfig, system: &str, histo
             let result = match name {
                 "web_search" => tool_web_search(http, args["query"].as_str().unwrap_or("")).await,
                 "web_fetch" => tool_web_fetch(http, args["url"].as_str().unwrap_or("")).await,
+                "install_addon" | "list_installed_addons" => execute_mc_tool(state, server_id, name, args).await.to_string(),
                 other => format!("outil inconnu : {other}"),
             };
             messages.push(json!({ "role": "tool", "content": result }));
