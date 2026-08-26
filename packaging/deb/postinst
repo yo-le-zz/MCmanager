@@ -2,9 +2,16 @@
 set -e
 mkdir -p /usr/share/mcmanager
 chmod 755 /usr/bin/mcmanager || true
+command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
 echo ""
 echo "MCManager installe."
-echo "Lancez-le avec la commande : mcmanager"
+echo "Lancez-le avec la commande : mcmanager (ou cherchez \"MCManager\" dans votre menu applications)"
 echo "Interface web par defaut  : http://127.0.0.1:7777"
-echo "Pour le lancer au demarrage : systemctl --user enable --now mcmanager"
+echo "Pour le lancer au demarrage (interface web, session utilisateur) : systemctl --user enable --now mcmanager"
+echo ""
+echo "Mode headless (VPS, sans interface web) :"
+echo "  mcmanager-headless                          -> shell interactif"
+echo "  sudo systemctl enable --now mcmanager-headless  -> service au demarrage du systeme (avec redemarrage automatique)"
+echo "  Configuration du demarrage automatique de serveurs : /etc/mcmanager/autostart.txt (une commande par ligne, ex: 'start <id>')"
 exit 0

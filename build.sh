@@ -79,7 +79,11 @@ build_deb() {
            "$pkg_dir/usr/bin" \
            "$pkg_dir/usr/share/mcmanager" \
            "$pkg_dir/usr/lib/systemd/user" \
-           "$pkg_dir/usr/share/doc/mcmanager"
+           "$pkg_dir/usr/lib/systemd/system" \
+           "$pkg_dir/etc/mcmanager" \
+           "$pkg_dir/usr/share/doc/mcmanager" \
+           "$pkg_dir/usr/share/applications" \
+           "$pkg_dir/usr/share/icons/hicolor/256x256/apps"
 
   cp "$bin" "$pkg_dir/usr/bin/mcmanager"
   chmod 755 "$pkg_dir/usr/bin/mcmanager"
@@ -89,6 +93,13 @@ build_deb() {
   fi
   cp -r web "$pkg_dir/usr/share/mcmanager/web"
   cp packaging/deb/mcmanager.service "$pkg_dir/usr/lib/systemd/user/mcmanager.service"
+  # mcmanager-headless.service is a SYSTEM unit (not user): it needs to
+  # start at boot without any user session existing yet, unlike the web
+  # GUI's user unit above which only makes sense once someone is logged in.
+  cp packaging/deb/mcmanager-headless.service "$pkg_dir/usr/lib/systemd/system/mcmanager-headless.service"
+  touch "$pkg_dir/etc/mcmanager/autostart.txt"
+  cp packaging/deb/mcmanager.desktop "$pkg_dir/usr/share/applications/mcmanager.desktop"
+  cp web/assets/icon-256.png "$pkg_dir/usr/share/icons/hicolor/256x256/apps/mcmanager.png"
   cp README.md LICENSE CHANGELOG.md "$pkg_dir/usr/share/doc/mcmanager/" 2>/dev/null || true
 
   sed -e "s/__VERSION__/${VERSION}/" -e "s/__ARCH__/${arch}/" \

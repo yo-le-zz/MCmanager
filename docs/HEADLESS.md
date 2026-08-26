@@ -83,25 +83,81 @@ Les mêmes que pour `mcmanager` (web) : `MCMANAGER_DATA_DIR`. `MCMANAGER_HOST`
 et `MCMANAGER_PORT` n'ont aucun effet ici puisqu'aucun serveur web n'est
 démarré.
 
-## Exemple : service systemd sur un VPS
+## Démarrage automatique de serveurs
 
-```ini
-# /etc/systemd/system/mcmanager-headless.service
-[Unit]
-Description=MCManager (CLI, sans interface web)
-After=network.target
+`autostart add <id>` marque un serveur pour qu'il démarre automatiquement
+à chaque lancement de `mcmanager-headless` (par exemple après un reboot,
+via le service systemd ci-dessous) — pas besoin de taper `start` à la main.
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/mcmanager-headless --script /etc/mcmanager/autostart.txt
-Restart=on-failure
-User=minecraft
-
-[Install]
-WantedBy=multi-user.target
+```
+mcmanager> autostart add 7c3a1e2e-...-...
+mcmanager> autostart list
 ```
 
-Où `autostart.txt` contiendrait par exemple :
+`autostart remove <id>` désactive, `autostart list` affiche la liste actuelle.
+
+## Contrôle à distance (chiffré, authentifié par clé RSA)
+
+`mcmanager-headless` peut exposer une petite API de contrôle sur le réseau
+(`0.0.0.0`, toutes interfaces) pour être piloté depuis une autre machine —
+**strictement optionnel, désactivé par défaut**. Chiffrement hybride
+RSA + AES-256-GCM (comme TLS/SSH/PGP : RSA échange une clé de session
+AES, qui chiffre ensuite les échanges), et chaque requête est signée par
+la clé privée du client pour authentifier qui la fait.
+
+**Sur la machine à piloter** (celle qui héberge les serveurs) :
 ```
-start 7c3a1e2e-...-...
+mcmanager> remote enable 7778
+Contrôle à distance actif sur le port 7778 (0.0.0.0 - toutes interfaces).
+Empreinte de cette instance : d4:41:52:0b:...
+
+mcmanager> remote pairing-code
+Code de jumelage (valide 10 minutes, usage unique) : 03847680
 ```
+
+**Sur la machine qui pilote** (peut être une autre install de
+`mcmanager-headless`, y compris sur votre PC) :
+```
+mcmanager> remote pair 192.168.1.42:7778 mon-serveur
+Empreinte annoncée par 192.168.1.42:7778 : d4:41:52:0b:...
+Vérifiez qu'elle correspond à celle affichée par 'remote pairing-code' sur cette machine distante.
+Code de jumelage reçu de cette machine : 03847680
+Jumelé avec succès sous le nom "mon-serveur".
+
+mcmanager> remote list mon-serveur
+mcmanager> remote start mon-serveur 7c3a1e2e-...-...
+mcmanager> remote status mon-serveur 7c3a1e2e-...-...
+mcmanager> remote send mon-serveur 7c3a1e2e-...-... say bonjour
+```
+
+Le jumelage exige de lire le code affiché sur la machine hébergeant les
+serveurs — un inconnu qui trouve juste le port ouvert ne peut pas
+s'auto-jumeler. Gestion des accès : `remote clients` (qui est autorisé),
+`remote revoke <id>` (retirer un accès), `remote disable` (tout couper).
+
+## Mode daemon (systemd, ou tout superviseur de process)
+
+Sans terminal attaché, le mode interactif normal se termine immédiatement
+(l'entrée standard est `/dev/null`, donc lue comme "fin de fichier" tout de
+suite). Le flag `--daemon` fait attendre le process indéfiniment (jusqu'à
+Ctrl+C / SIGTERM) au lieu de quitter - combiné à `--script`, ça permet de
+lancer des commandes de configuration puis de rester actif :
+
+```
+mcmanager-headless --script /etc/mcmanager/autostart.txt --daemon
+```
+
+Le service systemd fourni par le paquet `.deb` (`mcmanager-headless.service`,
+unité **système**, pas utilisateur - pour démarrer avant toute connexion)
+utilise exactement cette combinaison, avec `Restart=on-failure` :
+
+```
+sudo systemctl enable --now mcmanager-headless   # demarre maintenant + a chaque boot
+sudo systemctl status mcmanager-headless
+```
+
+Le fichier `/etc/mcmanager/autostart.txt` (une commande par ligne) permet
+d'y activer `remote enable`, ou tout autre réglage à appliquer au
+démarrage - il peut aussi rester vide : le démarrage automatique configuré
+via `autostart add <id>` s'applique de toute façon à chaque lancement,
+indépendamment de ce fichier.

@@ -101,6 +101,16 @@ pub struct ServerEntry {
     /// inactivity (the previous, only, behavior).
     #[serde(default)]
     pub stop_when_empty_minutes: Option<u32>,
+    /// "Serveur dynamique" (sleep/wake): once `stop_when_empty_minutes`
+    /// auto-stops the server, instead of leaving the port dead, a
+    /// lightweight listener takes it over - answers server-list pings with
+    /// a "sleeping" MOTD, and on a real join attempt, starts the real
+    /// server and tells the player to retry in a few seconds. Trades a
+    /// slower first join (real server boot time) for not running an idle
+    /// JVM 24/7. Requires `stop_when_empty_minutes` to be set - it's what
+    /// decides *when* to go to sleep in the first place.
+    #[serde(default)]
+    pub dynamic_server: bool,
     #[serde(default)]
     pub aikar_flags: bool,
     /// Mods/plugins the user wants MCManager to keep on the correct
@@ -160,6 +170,7 @@ pub struct UpdateServerRequest {
     pub auto_restart_delay_secs: Option<u32>,
     pub scheduled_restart_minutes: Option<Option<u32>>,
     pub stop_when_empty_minutes: Option<Option<u32>>,
+    pub dynamic_server: Option<bool>,
     pub auto_backup_minutes: Option<u32>,
     pub backup_retention: Option<Option<u32>>,
     pub java_path: Option<String>,

@@ -3,6 +3,55 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.0.6] - 2026-08-24 (serveur dynamique, controle a distance RSA, site web)
+### Ajouts
+- **"Serveur dynamique"** (option par serveur, économie d'énergie) : une
+  fois qu'un serveur s'est arrêté automatiquement par inactivité
+  (`stop_when_empty_minutes`), un petit processus prend le relais sur son
+  port au lieu de le laisser mort. Il répond aux pings de la liste de
+  serveurs (le serveur reste visible avec un message "en veille") et, dès
+  qu'un joueur essaie vraiment de rejoindre, démarre le vrai serveur et
+  répond poliment "réessayez dans quelques secondes" plutôt que de tenter
+  un relais TCP fragile. Couvre le protocole Java Edition (implémentation
+  testée de bout en bout, y compris sur un vrai socket TCP) et, en
+  best-effort/expérimental, Bedrock via Geyser (ping RakNet + détection de
+  tentative de connexion réelle). Compromis assumé et expliqué dans
+  l'interface : la première connexion après une mise en veille prend le
+  temps de démarrage normal du serveur - des mods comme LazyDFU ou
+  Starlight peuvent réduire ce délai.
+- **Contrôle à distance pour `mcmanager-headless`**, chiffré et authentifié
+  par RSA (option, désactivée par défaut) : expose une API de gestion sur
+  le réseau (`0.0.0.0`) pour piloter des serveurs depuis une autre
+  machine. Chiffrement hybride RSA-OAEP + AES-256-GCM (même principe que
+  TLS/SSH/PGP - RSA échange une clé de session, qui chiffre ensuite les
+  échanges), chaque requête signée par la clé privée du client pour
+  authentifier qui la fait, jumelage par code à usage unique (10 minutes)
+  affiché sur la machine hébergeant les serveurs - impossible de
+  s'auto-jumeler juste en trouvant le port ouvert. Nouvelles commandes
+  `remote enable/disable/pairing-code/clients/revoke` (côté exposé) et
+  `remote pair/targets/list/status/start/stop/restart/logs/send` (côté
+  pilote - peut être une autre install de `mcmanager-headless`). Le
+  protocole est couvert par des tests unitaires et un test d'intégration
+  qui fait tourner un vrai serveur HTTP et un vrai client l'un contre
+  l'autre (jumelage, session, requête signée+chiffrée, rejet d'un client
+  non jumelé).
+- **Démarrage automatique de serveurs** (`autostart add/remove/list <id>`)
+  et **mode daemon** (`--daemon`, attend indéfiniment au lieu de quitter
+  immédiatement sans terminal attaché) pour `mcmanager-headless`.
+- **Service systemd système `mcmanager-headless.service`** (paquet .deb) :
+  démarre au boot (pas seulement à la connexion d'un utilisateur, contrairement
+  au service web existant) et redémarre automatiquement en cas d'échec
+  (`Restart=on-failure`).
+- **Menu applications Linux** : le paquet `.deb` installe maintenant une
+  entrée `.desktop` + icône (visible à la touche Super sous GNOME/KDE) ;
+  le script d'installation portable (`install.sh`) fait de même.
+- **Site web** (`website/`, à déployer sur mcmanager.pages.dev) : page de
+  présentation, commandes d'installation Windows/Linux/NixOS fonctionnelles
+  (résolvent toujours la dernière release GitHub), copié depuis une
+  maquette Stitch adaptée avec des liens réels. Scripts d'installation
+  (`install.sh`, `install.ps1`) dupliqués dans `/scripts` à la racine du
+  dépôt.
+
 ## [1.0.5] - 2026-08-23 (correctifs Java critiques, IA agissante, markdown, suivi de plugins)
 ### Corrections critiques
 - **Le chemin Java configuré n'était jamais utilisé pour un serveur déjà

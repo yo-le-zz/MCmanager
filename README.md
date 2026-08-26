@@ -3,7 +3,7 @@
 **Gestionnaire de serveurs Minecraft** — rapide, tout-en-un, avec interface web.
 Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkinter.
 
-> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.5**
+> Auteur : **yolezz** · Licence : **MIT** · Version : **1.0.6**
 
 ---
 
@@ -27,9 +27,12 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **playit.gg intégré** : téléchargement de l'agent, démarrage/arrêt, mini-tutoriel intégré pour exposer un serveur sur Internet sans configurer son routeur — ou utilisez directement une installation locale de `playit` déjà présente sur la machine.
 - **Auto-mise à jour** : vérifie les tags GitHub au démarrage, propose et applique la mise à jour du binaire lui-même (comportement adapté selon `.deb`/Nix/portable — voir ci-dessous).
 - **Redémarrage automatique en cas de crash**, redémarrage programmé, et arrêt automatique si le serveur reste vide — tous configurables et modifiables à tout moment, même après la création du serveur.
+- **Serveur dynamique** (économie d'énergie) : une fois arrêté par inactivité, MCManager peut mettre le port en veille (Java, et Bedrock/Geyser en expérimental) et ne redémarrer le serveur qu'à la prochaine tentative de connexion réelle.
 - **Diagnostic de crash automatique** : isole le mod/plugin fautif (ou une combinaison problématique) en testant les configurations une par une.
 - **Import de serveurs existants** : pointez MCManager vers un dossier de serveur déjà présent sur la machine.
 - **Deux binaires** : `mcmanager` (interface web) et **`mcmanager-headless`** (gestion 100% en ligne de commande, aucun serveur web, pensé pour un VPS sans navigateur — voir [docs/HEADLESS.md](docs/HEADLESS.md)). `mcmanager cli` reste disponible comme télécommande HTTP vers une instance `mcmanager` déjà lancée (voir [docs/CLI.md](docs/CLI.md)).
+- **Contrôle à distance pour `mcmanager-headless`** : expose (en option) une API de gestion sur le réseau, chiffrée et authentifiée par échange de clés RSA (chiffrement hybride RSA + AES-256-GCM, jumelage par code à usage unique) — voir [docs/HEADLESS.md](docs/HEADLESS.md).
+- **Démarrage automatique et service système** : `autostart add <id>` relance un serveur au démarrage de `mcmanager-headless`, avec un service systemd (`mcmanager-headless.service`) qui redémarre au boot et se relance automatiquement en cas d'échec.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
 - **Multiplateforme** : Linux (.deb + script d'installation), NixOS/GLF OS (flake.nix à la racine + module NixOS — `nix run github:yo-le-zz/MCmanager`), Windows (portable + installateur Inno Setup).
 

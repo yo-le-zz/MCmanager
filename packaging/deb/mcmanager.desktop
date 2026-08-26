@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MCManager
+Comment=Gestionnaire de serveurs Minecraft
+Exec=mcmanager
+Icon=mcmanager
+Terminal=false
+Categories=Game;Utility;Network;

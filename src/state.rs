@@ -136,6 +136,32 @@ pub async fn build_state() -> anyhow::Result<AppState> {
     Ok(state)
 }
 
+/// Test-only variant of `build_state()`: same construction, but skips
+/// `acquire_instance_lock` (tests may run concurrently against their own
+/// isolated temp directories, and shouldn't fight over - or leave behind -
+/// a lock file meant for real, single-instance daemon usage).
+#[cfg(test)]
+pub async fn build_state_for_test(data_dir: &std::path::Path) -> AppState {
+    let data_dir = data_dir.to_path_buf();
+    tokio::fs::create_dir_all(&data_dir).await.ok();
+    tokio::fs::create_dir_all(data_dir.join("servers")).await.ok();
+
+    let http = reqwest::Client::builder().build().expect("client http de test");
+    let (playit_tx, _rx) = broadcast::channel(512);
+
+    Arc::new(AppStateInner {
+        config: RwLock::new(default_config(&data_dir)),
+        data_dir,
+        servers: RwLock::new(HashMap::new()),
+        runtime: RwLock::new(HashMap::new()),
+        http,
+        playit_child: RwLock::new(None),
+        playit_tx,
+        playit_backlog: RwLock::new(Vec::new()),
+        backup_progress: RwLock::new(HashMap::new()),
+    })
+}
+
 fn default_config(data_dir: &PathBuf) -> AppConfig {
     AppConfig {
         java_path: "java".to_string(),

@@ -1,6 +1,6 @@
 [package]
 name = "mcmanager"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2021"
 authors = ["yolezz"]
 license = "MIT"
@@ -38,9 +38,15 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 dirs = "5"
 rand = "0.8"
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["oid"] }
 aes-gcm = "0.10"
+rsa = "0.9"
 base64 = "0.22"
+# Pinned: base64ct >=1.7 requires edition2024, which isn't available on
+# this project's older Rust toolchain baseline. rsa/pkcs8 only need the
+# API surface, not the newer edition features.
+base64ct = "=1.6.0"
+zeroize = "=1.7.0"
 
 # Pins to stay compatible with the Rust toolchain available in this build
 # environment (1.75). Newer releases of these transitive deps require

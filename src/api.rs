@@ -195,6 +195,7 @@ async fn create_server(State(state): State<AppState>, Json(req): Json<CreateServ
         stop_when_empty_minutes: req.stop_when_empty_minutes,
         aikar_flags: req.aikar_flags,
         managed_addons: vec![],
+        dynamic_server: false,
         created_at: chrono::Utc::now(),
     };
 
@@ -289,6 +290,7 @@ async fn import_server(State(state): State<AppState>, Json(req): Json<ImportServ
         stop_when_empty_minutes: None,
         aikar_flags: false,
         managed_addons: vec![],
+        dynamic_server: false,
         created_at: chrono::Utc::now(),
     };
 
@@ -313,6 +315,7 @@ async fn update_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, 
     if let Some(v) = req.auto_restart_delay_secs { entry.auto_restart_delay_secs = v; }
     if let Some(v) = req.scheduled_restart_minutes { entry.scheduled_restart_minutes = v; }
     if let Some(v) = req.stop_when_empty_minutes { entry.stop_when_empty_minutes = v; }
+    if let Some(v) = req.dynamic_server { entry.dynamic_server = v; }
     if req.auto_backup_minutes.is_some() { entry.auto_backup_minutes = req.auto_backup_minutes; }
     if let Some(v) = req.backup_retention { entry.backup_retention = v; }
     if let Some(v) = req.java_path { entry.java_path = v; }

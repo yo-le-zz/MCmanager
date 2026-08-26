@@ -1770,6 +1770,16 @@ async function renderSettings() {
           <label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-stopempty" style="width:auto" ${s.stop_when_empty_minutes ? "checked" : ""}> Couper le serveur si personne ne rejoint</label>
         </div>
         <div class="form-row"><label>… après combien de minutes sans joueur</label><input id="ss-stopempty-min" type="number" min="1" value="${s.stop_when_empty_minutes || 20}" ${s.stop_when_empty_minutes ? "" : "disabled"}></div>
+        <div class="form-row">
+          <label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-dynamic" style="width:auto" ${s.dynamic_server ? "checked" : ""} ${s.stop_when_empty_minutes ? "" : "disabled"}> ⚡ Serveur dynamique (économie d'énergie)</label>
+          <p style="color:var(--overlay0);font-size:12px;margin-top:4px">
+            Une fois arrêté par inactivité, MCManager écoute discrètement sur le port du serveur (Java, et Bedrock/Geyser si détecté — expérimental) au lieu de laisser le port mort.
+            Il répond aux pings (le serveur reste visible avec un message "en veille") et redémarre le serveur dès qu'un joueur essaie vraiment de rejoindre.
+            <b>Compromis</b> : la toute première connexion après une mise en veille prend le temps normal de démarrage du serveur (pas instantané) — le joueur doit réessayer quelques secondes après le premier message de refus.
+            Pour réduire ce délai, des mods comme <a href="https://modrinth.com/mod/lazydfu" target="_blank" rel="noopener">LazyDFU</a> (Fabric/Forge, accélère le démarrage en différant l'initialisation du DataFixerUpper) ou <a href="https://modrinth.com/plugin/starlight" target="_blank" rel="noopener">Starlight</a> (moteur de lumière plus rapide, Paper/Fabric) peuvent aider.
+            Nécessite "Couper le serveur si personne ne rejoint" activé ci-dessus, qui décide quand la mise en veille se déclenche.
+          </p>
+        </div>
       </div>
       <button class="btn-green" id="ss-save">${t('common.save')}</button>
       <p style="color:var(--overlay0);font-size:12px;margin-top:8px">RAM/port/args JVM/flags Aikar s'appliquent au prochain démarrage. Le redémarrage programmé, le délai de redémarrage auto, la rétention des sauvegardes et l'arrêt sur inactivité prennent effet immédiatement, même sans redémarrer manuellement.</p>
@@ -1825,6 +1835,8 @@ async function renderSettings() {
   if (s) {
     $("#ss-stopempty").addEventListener("change", (e) => {
       $("#ss-stopempty-min").disabled = !e.target.checked;
+      $("#ss-dynamic").disabled = !e.target.checked;
+      if (!e.target.checked) $("#ss-dynamic").checked = false;
     });
     $("#ss-java-test").addEventListener("click", async () => {
       const resultEl = $("#ss-java-result");
@@ -1861,6 +1873,7 @@ async function renderSettings() {
         auto_restart_delay_secs: parseInt($("#ss-restartdelay").value, 10) || 0,
         scheduled_restart_minutes: schedRestart > 0 ? schedRestart : null,
         stop_when_empty_minutes: $("#ss-stopempty").checked ? (parseInt($("#ss-stopempty-min").value, 10) || 20) : null,
+        dynamic_server: $("#ss-stopempty").checked && $("#ss-dynamic").checked,
         java_path: $("#ss-java").value.trim() || null,
       };
       // The PUT response IS the freshly-saved server entry - apply it

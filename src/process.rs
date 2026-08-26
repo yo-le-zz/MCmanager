@@ -223,6 +223,18 @@ fn spawn_watcher(state: AppState, id: Uuid) {
 /// Exits as soon as this start's session ends (server stopped, or a newer
 /// start superseded it) - identified by comparing `started_at`, since a
 /// fresh `start_server()` call always sets a new timestamp.
+/// Best-effort detection of a Geyser install (any addon file whose name
+/// contains "geyser", case-insensitive) - used to decide whether the sleep
+/// listener should also bind the Bedrock/RakNet port. Not authoritative
+/// (Geyser's actual configured port could differ from the 19132 default),
+/// but a reasonable default for the common case.
+fn has_geyser(entry: &crate::models::ServerEntry) -> bool {
+    let dir = std::path::PathBuf::from(&entry.folder).join(entry.loader.addon_dir());
+    let Ok(read) = std::fs::read_dir(&dir) else { return false };
+    read.filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().to_lowercase().contains("geyser"))
+}
+
 fn spawn_idle_watcher(state: AppState, id: Uuid) {
     tokio::spawn(async move {
         let session_started_at = {
@@ -320,6 +332,20 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
                                 &format!("Aucun joueur connecte depuis {minutes} minutes - serveur arrete automatiquement."),
                             ).await;
                             let _ = stop_server(&state, id, false).await;
+
+                            if entry.dynamic_server {
+                                // Wait for the real port to actually free up
+                                // before the sleeper tries to bind it.
+                                for _ in 0..60 {
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    if !state.runtime.read().await.get(&id).map(|rt| rt.running).unwrap_or(false) {
+                                        break;
+                                    }
+                                }
+                                let bedrock_port = has_geyser(&entry).then_some(19132);
+                                let motd = format!("§b💤 {} - en veille, rejoignez pour la reveiller", entry.name);
+                                tokio::spawn(crate::sleeper::run(state.clone(), id, motd, entry.port, bedrock_port));
+                            }
                             break;
                         }
                     }

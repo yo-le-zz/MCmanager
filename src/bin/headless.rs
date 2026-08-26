@@ -21,8 +21,18 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use mcmanager::models::Loader;
-use mcmanager::{debug, downloader, modrinth, process, state, updater};
+use mcmanager::remote::{RemoteIdentity, RemoteRuntime};
+use mcmanager::{debug, downloader, modrinth, process, remote, state, updater};
 use uuid::Uuid;
+
+/// Everything the REPL needs for the remote-control feature, held across
+/// the whole session (not per-command) since pairing/session state and the
+/// background server task both need to outlive a single line of input.
+struct RemoteRepl {
+    identity: RemoteIdentity,
+    runtime: Option<RemoteRuntime>,
+    server_task: Option<tokio::task::JoinHandle<()>>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,6 +51,30 @@ async fn main() -> anyhow::Result<()> {
     println!("Dossier de donnees : {}", app_state.data_dir.display());
     println!("Tapez 'help' pour la liste des commandes, 'quit' pour quitter.\n");
 
+    let identity = match remote::load_or_create_identity(&app_state.data_dir).await {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("Avertissement : impossible de charger/creer l'identite de controle a distance : {e}");
+            eprintln!("(les commandes 'remote' ne fonctionneront pas cette session)");
+            // Still usable for everything else - remote control is opt-in,
+            // its identity failing to load shouldn't block plain server management.
+            RemoteIdentity::ephemeral()
+        }
+    };
+    let mut remote_repl = RemoteRepl { identity, runtime: None, server_task: None };
+
+    // Auto-start: servers the user has flagged (via `autostart add <id>`)
+    // to launch as soon as the daemon comes up - e.g. after a reboot, so a
+    // systemd unit with this binary can bring a server back without anyone
+    // needing to type `start` by hand.
+    let autostart_ids = load_autostart(&app_state.data_dir).await;
+    for id in &autostart_ids {
+        println!("Demarrage automatique de {id}...");
+        if let Err(e) = process::start_server(&app_state, *id).await {
+            eprintln!("  echec : {e}");
+        }
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let lock_data_dir = app_state.data_dir.clone();
 
@@ -49,16 +83,56 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("--script necessite un chemin de fichier");
             std::process::exit(1);
         };
-        run_script(&app_state, path).await
+        let script_result = run_script(&app_state, &mut remote_repl, path).await;
+        // --script normally exits once the file is done (documented,
+        // scripting/automation use case). --daemon combined with it means
+        // "run this setup (e.g. `remote enable`, `start <id>`), then stay
+        // up" - the systemd unit uses exactly this combination.
+        if script_result.is_ok() && args.iter().any(|a| a == "--daemon") {
+            run_daemon(&app_state.data_dir).await
+        } else {
+            script_result
+        }
+    } else if args.iter().any(|a| a == "--daemon") {
+        run_daemon(&app_state.data_dir).await
     } else {
-        run_interactive(&app_state).await
+        run_interactive(&app_state, &mut remote_repl).await
     };
 
+    if let Some(task) = remote_repl.server_task.take() {
+        task.abort();
+    }
     let _ = tokio::fs::remove_file(lock_data_dir.join("mcmanager.lock")).await;
     result
 }
 
-async fn run_interactive(state: &state::AppState) -> anyhow::Result<()> {
+/// For running under systemd (or any supervisor) with no attached
+/// terminal: `run_interactive()`'s stdin-read loop would see an immediate
+/// EOF on `/dev/null` and exit right away, which is wrong for a service
+/// that's meant to stay up. This just waits for a shutdown signal instead
+/// - the actual work (auto-started servers, `remote enable`d control) is
+/// already running in background tasks by the time this is called.
+async fn run_daemon(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    println!("Mode daemon - en attente (Ctrl+C ou SIGTERM pour arreter proprement).");
+    let ctrl_c = async { tokio::signal::ctrl_c().await.ok(); };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    println!("Arret demande, fermeture propre...");
+    let _ = data_dir; // lock cleanup happens in the caller, same as every other exit path
+    Ok(())
+}
+
+async fn run_interactive(state: &state::AppState, remote_repl: &mut RemoteRepl) -> anyhow::Result<()> {
     loop {
         print!("mcmanager> ");
         std::io::stdout().flush().ok();
@@ -75,14 +149,14 @@ async fn run_interactive(state: &state::AppState) -> anyhow::Result<()> {
         if matches!(line, "quit" | "exit") {
             break;
         }
-        if let Err(e) = dispatch(state, line).await {
+        if let Err(e) = dispatch(state, remote_repl, line).await {
             println!("Erreur : {e}");
         }
     }
     Ok(())
 }
 
-async fn run_script(state: &state::AppState, path: &str) -> anyhow::Result<()> {
+async fn run_script(state: &state::AppState, remote_repl: &mut RemoteRepl, path: &str) -> anyhow::Result<()> {
     let content = tokio::fs::read_to_string(path).await?;
     for line in content.lines() {
         let line = line.trim();
@@ -90,14 +164,14 @@ async fn run_script(state: &state::AppState, path: &str) -> anyhow::Result<()> {
             continue;
         }
         println!("$ {line}");
-        if let Err(e) = dispatch(state, line).await {
+        if let Err(e) = dispatch(state, remote_repl, line).await {
             println!("Erreur : {e}");
         }
     }
     Ok(())
 }
 
-async fn dispatch(state: &state::AppState, line: &str) -> anyhow::Result<()> {
+async fn dispatch(state: &state::AppState, remote_repl: &mut RemoteRepl, line: &str) -> anyhow::Result<()> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     match parts.as_slice() {
         ["help"] => { print_help(); Ok(()) }
@@ -114,6 +188,25 @@ async fn dispatch(state: &state::AppState, line: &str) -> anyhow::Result<()> {
         ["debug", id] => cmd_debug(state, id).await,
         ["managed-sync", id] => cmd_managed_sync(state, id).await,
         ["create", rest @ ..] => cmd_create(state, rest).await,
+        ["autostart", "add", id] => cmd_autostart_add(state, id).await,
+        ["autostart", "remove", id] => cmd_autostart_remove(state, id).await,
+        ["autostart", "list"] => cmd_autostart_list(state).await,
+        ["remote", "fingerprint"] => { println!("Empreinte de cette instance : {}", remote_repl.identity.fingerprint()); Ok(()) }
+        ["remote", "enable"] => cmd_remote_enable(state, remote_repl, 7778).await,
+        ["remote", "enable", port] => cmd_remote_enable(state, remote_repl, port.parse().unwrap_or(7778)).await,
+        ["remote", "disable"] => { if let Some(t) = remote_repl.server_task.take() { t.abort(); remote_repl.runtime = None; println!("Controle a distance desactive."); } else { println!("N'etait pas actif."); } Ok(()) }
+        ["remote", "pairing-code"] => cmd_remote_pairing_code(remote_repl).await,
+        ["remote", "clients"] => cmd_remote_clients(state).await,
+        ["remote", "revoke", client_id] => cmd_remote_revoke(state, client_id).await,
+        ["remote", "pair", host, label] => cmd_remote_pair(state, remote_repl, host, label).await,
+        ["remote", "targets"] => cmd_remote_targets(state).await,
+        ["remote", "list", label] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"list"})).await,
+        ["remote", "status", label, id] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"status","server_id":id})).await,
+        ["remote", "start", label, id] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"start","server_id":id})).await,
+        ["remote", "stop", label, id] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"stop","server_id":id})).await,
+        ["remote", "restart", label, id] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"restart","server_id":id})).await,
+        ["remote", "logs", label, id] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"logs","server_id":id})).await,
+        ["remote", "send", label, id, cmd_rest @ ..] if !cmd_rest.is_empty() => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"send","server_id":id,"command":cmd_rest.join(" ")})).await,
         _ => { println!("Commande inconnue : {line}\nTapez 'help' pour la liste des commandes."); Ok(()) }
     }
 }
@@ -132,6 +225,20 @@ fn print_help() {
   debug <id>                    diagnostic automatique de crash (teste les mods/plugins un par un)
   create --name N --loader L --version V [--port P]
                                  cree un nouveau serveur (loader: vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge)
+  autostart add|remove|list <id>
+                                 serveurs a demarrer automatiquement quand ce daemon se lance (ex: apres un reboot)
+  remote fingerprint            empreinte de l'identite RSA de cette instance
+  remote enable [port]          active le controle a distance (0.0.0.0, port 7778 par defaut)
+  remote disable                desactive le controle a distance
+  remote pairing-code           genere un code de jumelage a usage unique (valide 10 min)
+  remote clients                liste les clients autorises a se connecter a cette instance
+  remote revoke <client_id>     revoque un client
+  remote pair <host:port> <nom> jumelage avec une AUTRE instance pour la piloter (demande le code affiche la-bas)
+  remote targets                liste les instances distantes jumelees
+  remote list|status|start|stop|restart|logs <nom> [id]
+                                 pilote une instance distante deja jumelee
+  remote send <nom> <id> <commande...>
+                                 envoie une commande console a un serveur distant
   help                          cette aide
   quit / exit                   quitter (Ctrl+D fonctionne aussi)
 "#);
@@ -294,6 +401,7 @@ async fn cmd_create(state: &state::AppState, args: &[&str]) -> anyhow::Result<()
         stop_when_empty_minutes: None,
         aikar_flags: false,
         managed_addons: vec![],
+        dynamic_server: false,
         created_at: chrono::Utc::now(),
     };
     tokio::fs::write(folder.join("eula.txt"), "eula=true\n").await.ok();
@@ -304,5 +412,155 @@ async fn cmd_create(state: &state::AppState, args: &[&str]) -> anyhow::Result<()
     state.servers.write().await.insert(id, entry);
     state::save_servers(state).await?;
     println!("Cree avec l'ID : {id}");
+    Ok(())
+}
+
+// ───────────────────────── autostart (config locale) ─────────────────────────
+
+fn autostart_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("headless_autostart.json")
+}
+
+async fn load_autostart(data_dir: &std::path::Path) -> Vec<Uuid> {
+    match tokio::fs::read_to_string(autostart_path(data_dir)).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn save_autostart(data_dir: &std::path::Path, list: &[Uuid]) -> anyhow::Result<()> {
+    tokio::fs::write(autostart_path(data_dir), serde_json::to_string_pretty(list)?).await?;
+    Ok(())
+}
+
+async fn cmd_autostart_add(state: &state::AppState, id: &str) -> anyhow::Result<()> {
+    let id = parse_id(id)?;
+    if !state.servers.read().await.contains_key(&id) {
+        anyhow::bail!("serveur introuvable");
+    }
+    let mut list = load_autostart(&state.data_dir).await;
+    if !list.contains(&id) {
+        list.push(id);
+        save_autostart(&state.data_dir, &list).await?;
+    }
+    println!("Demarrage automatique active pour {id}.");
+    Ok(())
+}
+
+async fn cmd_autostart_remove(state: &state::AppState, id: &str) -> anyhow::Result<()> {
+    let id = parse_id(id)?;
+    let mut list = load_autostart(&state.data_dir).await;
+    list.retain(|i| *i != id);
+    save_autostart(&state.data_dir, &list).await?;
+    println!("Demarrage automatique desactive pour {id}.");
+    Ok(())
+}
+
+async fn cmd_autostart_list(state: &state::AppState) -> anyhow::Result<()> {
+    let list = load_autostart(&state.data_dir).await;
+    if list.is_empty() {
+        println!("Aucun serveur en demarrage automatique.");
+        return Ok(());
+    }
+    let servers = state.servers.read().await;
+    for id in &list {
+        let name = servers.get(id).map(|e| e.name.as_str()).unwrap_or("(introuvable)");
+        println!("  {id}  {name}");
+    }
+    Ok(())
+}
+
+// ───────────────────────── controle a distance (cote expose) ─────────────────────────
+
+async fn cmd_remote_enable(state: &state::AppState, remote_repl: &mut RemoteRepl, port: u16) -> anyhow::Result<()> {
+    if remote_repl.server_task.is_some() {
+        println!("Deja actif. Utilisez 'remote disable' d'abord pour changer de port.");
+        return Ok(());
+    }
+    let rt = RemoteRuntime::new(state.clone(), state.data_dir.clone()).await?;
+    let rt_for_task = rt.clone();
+    let task = tokio::spawn(async move {
+        if let Err(e) = remote::serve(rt_for_task, port).await {
+            eprintln!("[remote] arrete : {e}");
+        }
+    });
+    println!("Controle a distance active sur le port {port} (0.0.0.0 - toutes interfaces).");
+    println!("Empreinte de cette instance : {}", rt.fingerprint());
+    println!("Utilisez 'remote pairing-code' pour autoriser une machine a se connecter.");
+    remote_repl.runtime = Some(rt);
+    remote_repl.server_task = Some(task);
+    Ok(())
+}
+
+async fn cmd_remote_pairing_code(remote_repl: &RemoteRepl) -> anyhow::Result<()> {
+    let Some(rt) = &remote_repl.runtime else {
+        anyhow::bail!("le controle a distance n'est pas actif ('remote enable' d'abord)");
+    };
+    let code = rt.generate_pairing_code().await;
+    println!("Code de jumelage (valide 10 minutes, usage unique) : {code}");
+    println!("Empreinte de cette instance (a verifier du cote client) : {}", rt.fingerprint());
+    println!("Sur la machine qui doit piloter celle-ci : remote pair <cette-machine>:<port> <nom>");
+    Ok(())
+}
+
+async fn cmd_remote_clients(state: &state::AppState) -> anyhow::Result<()> {
+    let clients = remote::load_trusted(&state.data_dir).await;
+    if clients.is_empty() {
+        println!("Aucun client autorise.");
+        return Ok(());
+    }
+    for c in &clients {
+        println!("  {} ({}) - jumele le {}", c.label, c.id, c.paired_at.format("%Y-%m-%d %H:%M"));
+    }
+    Ok(())
+}
+
+async fn cmd_remote_revoke(state: &state::AppState, client_id: &str) -> anyhow::Result<()> {
+    if remote::revoke_client(&state.data_dir, client_id).await? {
+        println!("Client revoque.");
+    } else {
+        println!("Aucun client avec cet identifiant.");
+    }
+    Ok(())
+}
+
+// ───────────────────────── controle a distance (cote client) ─────────────────────────
+
+async fn cmd_remote_pair(state: &state::AppState, remote_repl: &RemoteRepl, host: &str, label: &str) -> anyhow::Result<()> {
+    println!("Contact de {host}...");
+    let (fingerprint, _pubkey) = remote::client_fetch_info(&state.http, host).await?;
+    println!("Empreinte annoncee par {host} : {fingerprint}");
+    println!("Verifiez qu'elle correspond a celle affichee par 'remote pairing-code' sur cette machine distante.");
+    print!("Code de jumelage recu de cette machine : ");
+    std::io::stdout().flush().ok();
+    let mut code = String::new();
+    std::io::stdin().read_line(&mut code)?;
+    let code = code.trim();
+    if code.is_empty() {
+        println!("Jumelage annule (aucun code saisi).");
+        return Ok(());
+    }
+    remote::client_pair(&state.http, &state.data_dir, &remote_repl.identity, host, label, code).await?;
+    println!("Jumele avec succes sous le nom \"{label}\".");
+    Ok(())
+}
+
+async fn cmd_remote_targets(state: &state::AppState) -> anyhow::Result<()> {
+    let targets = remote::load_targets(&state.data_dir).await;
+    if targets.is_empty() {
+        println!("Aucune instance distante jumelee.");
+        return Ok(());
+    }
+    for t in &targets {
+        println!("  {} -> {}", t.label, t.host);
+    }
+    Ok(())
+}
+
+async fn cmd_remote_call(state: &state::AppState, remote_repl: &RemoteRepl, label: &str, action: serde_json::Value) -> anyhow::Result<()> {
+    let targets = remote::load_targets(&state.data_dir).await;
+    let target = targets.iter().find(|t| t.label == label).ok_or_else(|| anyhow::anyhow!("instance \"{label}\" inconnue - voir 'remote targets'"))?;
+    let result = remote::client_call(&state.http, &remote_repl.identity, target, action).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

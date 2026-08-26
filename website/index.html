@@ -1,9 +1,346 @@
 <!DOCTYPE html>
-<html>
-    <head>
-        <title>Example</title>
-    </head>
-    <body>
-        <p>This is an example of a simple HTML page with one paragraph.</p>
-    </body>
+<html class="dark" lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>MCManager — Gérez vos serveurs Minecraft en toute simplicité</title>
+<meta name="description" content="MCManager est un gestionnaire de serveurs Minecraft open source (Vanilla, Paper, Purpur, Spigot, Fabric, Forge, NeoForge) avec interface web, marketplace Modrinth, sauvegardes automatiques et assistant IA. Windows, Linux, NixOS.">
+<link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "secondary-fixed": "#f0dbff",
+                    "outline": "#8f909d",
+                    "surface-container-lowest": "#060e20",
+                    "error": "#ffb4ab",
+                    "on-surface": "#dae2fd",
+                    "on-primary-fixed": "#00115a",
+                    "on-secondary": "#490080",
+                    "on-primary-fixed-variant": "#2a3d9b",
+                    "primary-container": "#8a9cff",
+                    "tertiary-fixed": "#6bff8f",
+                    "tertiary-fixed-dim": "#4ae176",
+                    "tertiary-container": "#06bb56",
+                    "surface-container": "#171f33",
+                    "primary-fixed": "#dee0ff",
+                    "on-secondary-fixed-variant": "#6900b3",
+                    "inverse-on-surface": "#283044",
+                    "on-surface-variant": "#c5c5d4",
+                    "secondary": "#ddb7ff",
+                    "on-tertiary": "#003915",
+                    "on-primary": "#0b2484",
+                    "secondary-fixed-dim": "#ddb7ff",
+                    "secondary-container": "#6f00be",
+                    "on-secondary-container": "#d6a9ff",
+                    "primary-fixed-dim": "#bac3ff",
+                    "surface-container-highest": "#2d3449",
+                    "surface-container-low": "#131b2e",
+                    "inverse-primary": "#4456b4",
+                    "primary": "#bac3ff",
+                    "error-container": "#93000a",
+                    "on-error-container": "#ffdad6",
+                    "on-primary-container": "#192e8d",
+                    "surface-tint": "#bac3ff",
+                    "inverse-surface": "#dae2fd",
+                    "surface-bright": "#31394d",
+                    "on-error": "#690005",
+                    "surface-container-high": "#222a3d",
+                    "on-background": "#dae2fd",
+                    "on-secondary-fixed": "#2c0051",
+                    "outline-variant": "#454652",
+                    "tertiary": "#4ae176",
+                    "background": "#0b1326",
+                    "on-tertiary-fixed-variant": "#005321",
+                    "surface-variant": "#2d3449",
+                    "surface": "#0b1326",
+                    "on-tertiary-fixed": "#002109",
+                    "surface-dim": "#0b1326",
+                    "on-tertiary-container": "#00431a"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+            },
+            "spacing": {
+                    "margin-desktop": "40px",
+                    "margin-mobile": "16px",
+                    "unit": "4px",
+                    "gutter": "24px",
+                    "container-max": "1280px"
+            },
+            "fontFamily": {
+                    "body-md": ["Geist", "sans-serif"],
+                    "display": ["Hanken Grotesk", "sans-serif"],
+                    "code-snippet": ["JetBrains Mono", "monospace"],
+                    "label-sm": ["JetBrains Mono", "monospace"],
+                    "headline-lg": ["Hanken Grotesk", "sans-serif"],
+                    "body-lg": ["Geist", "sans-serif"],
+                    "headline-md": ["Hanken Grotesk", "sans-serif"],
+                    "headline-lg-mobile": ["Hanken Grotesk", "sans-serif"]
+            },
+            "fontSize": {
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "display": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "code-snippet": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                    "label-sm": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "500"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "600"}],
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                    "headline-md": ["24px", {"lineHeight": "32px", "fontWeight": "500"}],
+                    "headline-lg-mobile": ["24px", {"lineHeight": "32px", "fontWeight": "600"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body {
+            background-color: theme('colors.background');
+            color: theme('colors.on-background');
+            font-family: theme('fontFamily.body-md');
+            background-image:
+                radial-gradient(circle at 15% 50%, rgba(138, 156, 255, 0.05), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(138, 156, 255, 0.05), transparent 25%);
+            background-attachment: fixed;
+        }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.4);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .text-gradient {
+            background: linear-gradient(to right, theme('colors.primary'), theme('colors.secondary'));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .glow-hover:hover {
+            box-shadow: 0 0 15px rgba(138, 156, 255, 0.2);
+            border-color: rgba(138, 156, 255, 0.4);
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-8px); }
+        }
+        .float-anim { animation: float 6s ease-in-out infinite; }
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(74, 225, 118, 0.5); }
+            50% { opacity: 0.85; box-shadow: 0 0 0 6px rgba(74, 225, 118, 0); }
+        }
+        .status-dot { animation: pulse-dot 2s ease-in-out infinite; }
+        .fade-up { animation: fade-up 0.6s ease-out both; }
+        @keyframes fade-up {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .copy-btn.copied { color: theme('colors.tertiary'); opacity: 1 !important; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+<!-- TopNavBar -->
+<nav class="sticky top-0 z-50 w-full bg-background/80 backdrop-blur-md dark:bg-background/80 border-b border-outline-variant/10 shadow-sm">
+<div class="flex justify-between items-center h-16 px-margin-desktop max-w-container-max mx-auto">
+<div class="flex items-center gap-3">
+<img class="w-8 h-8 rounded-lg object-contain" alt="Logo MCManager" src="assets/logo.svg"/>
+<span class="font-display text-headline-md font-bold text-on-surface dark:text-on-surface">MCManager</span>
+</div>
+<div class="hidden md:flex items-center gap-6">
+<a class="font-body-md text-body-md text-on-surface-variant dark:text-on-surface-variant hover:text-primary transition-colors duration-200" href="#features">Fonctionnalités</a>
+<a class="font-body-md text-body-md text-on-surface-variant dark:text-on-surface-variant hover:text-primary transition-colors duration-200" href="#installation">Installation</a>
+<a class="font-body-md text-body-md text-on-surface-variant dark:text-on-surface-variant hover:text-primary transition-colors duration-200" href="https://github.com/yo-le-zz/MCmanager" target="_blank" rel="noopener">GitHub</a>
+</div>
+<div class="flex items-center gap-4">
+<a class="hidden md:inline-flex items-center justify-center bg-primary-container text-on-primary-container font-body-md px-4 py-2 rounded-lg hover:brightness-110 transition-all duration-200 active:scale-95" href="#installation">
+                    Commencer
+                </a>
+</div>
+</div>
+</nav>
+<!-- Main Content -->
+<main class="flex-grow">
+<!-- Hero Section -->
+<section class="relative pt-32 pb-20 px-margin-desktop overflow-hidden">
+<div class="max-w-container-max mx-auto text-center relative z-10">
+<img class="w-20 h-20 mx-auto mb-8 float-anim" alt="Logo MCManager" src="assets/logo.svg"/>
+<h1 class="fade-up font-display text-display md:text-[64px] font-bold tracking-tight mb-6 max-w-4xl mx-auto text-on-surface">
+                    Gérez vos serveurs Minecraft en <span class="text-gradient">toute simplicité.</span>
+</h1>
+<p class="fade-up font-body-lg text-body-lg text-on-surface-variant max-w-2xl mx-auto mb-10" style="animation-delay: 0.1s">
+                    Interface web, assistant IA, marketplace Modrinth, sauvegardes automatiques et diagnostic de crash — pour Vanilla, Paper, Purpur, Spigot, Fabric, Forge et NeoForge.
+                </p>
+<div class="fade-up flex flex-wrap justify-center gap-4" style="animation-delay: 0.2s">
+<a class="inline-flex items-center justify-center bg-primary-container text-on-primary-container font-body-md px-6 py-3 rounded-lg hover:brightness-110 transition-all duration-200 glow-hover" href="#installation">
+<span class="material-symbols-outlined mr-2">download</span>
+                        Installer MCManager
+                    </a>
+<a class="inline-flex items-center justify-center border border-outline-variant/30 text-on-surface font-body-md px-6 py-3 rounded-lg hover:bg-surface-container-high transition-all duration-200" href="#features">
+<span class="material-symbols-outlined mr-2">explore</span>
+                        Découvrir les fonctionnalités
+                    </a>
+</div>
+<div class="fade-up mt-8 flex items-center justify-center gap-2 text-on-surface-variant font-label-sm text-label-sm" style="animation-delay: 0.3s">
+<span class="material-symbols-outlined text-[16px]">verified</span>
+                    Licence MIT · Open Source
+                    <span class="mx-1">·</span>
+<span class="inline-flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-tertiary status-dot"></span> Développement actif</span>
+</div>
+</div>
+</section>
+<!-- Installation Section -->
+<section class="py-20 px-margin-desktop bg-surface-container-low/50" id="installation">
+<div class="max-w-container-max mx-auto">
+<div class="text-center mb-12">
+<h2 class="font-display text-headline-lg font-bold text-on-surface mb-4">Installation rapide</h2>
+<p class="font-body-md text-on-surface-variant max-w-2xl mx-auto">Choisissez votre plateforme et commencez en quelques secondes.</p>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+<!-- Windows -->
+<div class="glass-panel rounded-xl p-6 glow-hover transition-all duration-300 flex flex-col">
+<div class="flex items-center gap-3 mb-4">
+<span class="material-symbols-outlined text-primary text-3xl">window</span>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Windows</h3>
+</div>
+<p class="font-body-md text-on-surface-variant mb-6 h-12">Installateur classique (raccourci menu Démarrer + désinstallation) ou une ligne PowerShell.</p>
+<a class="w-full mb-4 inline-flex items-center justify-center bg-surface-container-highest border border-outline-variant/20 text-on-surface font-body-md px-4 py-2 rounded-lg hover:bg-surface-variant transition-colors" href="https://github.com/yo-le-zz/MCmanager/releases/latest" target="_blank" rel="noopener">
+<span class="material-symbols-outlined mr-2">download</span>
+                            Télécharger .exe
+                        </a>
+<div class="bg-black/50 rounded-lg p-3 font-code-snippet text-code-snippet border border-outline-variant/10 relative group mt-auto">
+<code class="copy-target text-tertiary-fixed-dim block overflow-x-auto whitespace-nowrap pb-2">iex (irm mcmanager.pages.dev/install.ps1)</code>
+<button aria-label="Copier la commande" class="copy-btn absolute top-2 right-2 p-1.5 bg-surface-container-high rounded text-on-surface-variant hover:text-on-surface opacity-0 group-hover:opacity-100 transition-opacity">
+<span class="material-symbols-outlined text-[16px]">content_copy</span>
+</button>
+</div>
+</div>
+<!-- Linux -->
+<div class="glass-panel rounded-xl p-6 glow-hover transition-all duration-300 relative overflow-hidden flex flex-col">
+<div class="absolute top-0 right-0 w-32 h-32 bg-primary/5 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none"></div>
+<div class="flex items-center gap-3 mb-4">
+<span class="material-symbols-outlined text-tertiary text-3xl">terminal</span>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Linux</h3>
+</div>
+<p class="font-body-md text-on-surface-variant mb-6 h-12">Détecte votre distribution (.deb si possible), installe le raccourci dans le menu applications.</p>
+<div class="bg-black/50 rounded-lg p-3 font-code-snippet text-code-snippet border border-outline-variant/10 relative group mt-auto">
+<code class="copy-target text-tertiary-fixed-dim block overflow-x-auto whitespace-nowrap pb-2">curl -fsSL mcmanager.pages.dev/install.sh | bash</code>
+<button aria-label="Copier la commande" class="copy-btn absolute top-2 right-2 p-1.5 bg-surface-container-high rounded text-on-surface-variant hover:text-on-surface opacity-0 group-hover:opacity-100 transition-opacity">
+<span class="material-symbols-outlined text-[16px]">content_copy</span>
+</button>
+</div>
+</div>
+<!-- NixOS -->
+<div class="glass-panel rounded-xl p-6 glow-hover transition-all duration-300 flex flex-col">
+<div class="flex items-center gap-3 mb-4">
+<span class="material-symbols-outlined text-secondary text-3xl">memory</span>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">NixOS / GLF OS</h3>
+</div>
+<p class="font-body-md text-on-surface-variant mb-6 h-12">Flake avec module NixOS (<code class="text-label-sm font-label-sm">services.mcmanager.enable</code>).</p>
+<div class="bg-black/50 rounded-lg p-3 font-code-snippet text-code-snippet border border-outline-variant/10 relative group mt-auto">
+<code class="copy-target text-tertiary-fixed-dim block overflow-x-auto whitespace-nowrap pb-2">nix run github:yo-le-zz/MCmanager</code>
+<button aria-label="Copier la commande" class="copy-btn absolute top-2 right-2 p-1.5 bg-surface-container-high rounded text-on-surface-variant hover:text-on-surface opacity-0 group-hover:opacity-100 transition-opacity">
+<span class="material-symbols-outlined text-[16px]">content_copy</span>
+</button>
+</div>
+</div>
+</div>
+<p class="text-center mt-8 font-label-sm text-label-sm text-on-surface-variant">
+                Besoin de gérer un serveur sans interface web (VPS distant) ? Voir <a class="text-primary hover:underline" href="https://github.com/yo-le-zz/MCmanager/blob/main/docs/HEADLESS.md" target="_blank" rel="noopener">mcmanager-headless</a>.
+            </p>
+</div>
+</section>
+<!-- Features Section -->
+<section class="py-20 px-margin-desktop" id="features">
+<div class="max-w-container-max mx-auto">
+<div class="text-center mb-16">
+<h2 class="font-display text-headline-lg font-bold text-on-surface mb-4">Fonctionnalités principales</h2>
+<p class="font-body-md text-on-surface-variant max-w-2xl mx-auto">Conçu pour les administrateurs exigeants — du serveur entre amis au VPS de production.</p>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-primary">
+<span class="material-symbols-outlined text-[28px]">smart_toy</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Assistant IA intégré</h3>
+<p class="font-body-md text-on-surface-variant">Anthropic, OpenAI, Gemini, Ollama local ou OmniRoute — suggère et installe des mods/plugins directement depuis le chat.</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-tertiary">
+<span class="material-symbols-outlined text-[28px]">speed</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Diagnostic de crash automatique</h3>
+<p class="font-body-md text-on-surface-variant">Isole le mod/plugin fautif (ou une combinaison problématique) en testant les configurations une par une.</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-secondary">
+<span class="material-symbols-outlined text-[28px]">devices</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Web ou 100% CLI</h3>
+<p class="font-body-md text-on-surface-variant">Interface web complète, ou <code class="text-label-sm font-label-sm">mcmanager-headless</code> pour gérer un VPS sans navigateur ni port ouvert.</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-primary">
+<span class="material-symbols-outlined text-[28px]">extension</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Marketplace Modrinth</h3>
+<p class="font-body-md text-on-surface-variant">Recherche, installation et mise à jour de mods/plugins dans la bonne version pour votre loader, en un clic.</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-tertiary">
+<span class="material-symbols-outlined text-[28px]">backup</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Sauvegardes & notifications</h3>
+<p class="font-body-md text-on-surface-variant">Sauvegardes programmées avec rétention automatique, alertes ntfy (crash, joueur connecté, redémarrage).</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-secondary">
+<span class="material-symbols-outlined text-[28px]">language</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Multilingue</h3>
+<p class="font-body-md text-on-surface-variant">Français, anglais, espagnol — et intégration playit.gg pour exposer un serveur sans configurer son routeur.</p>
+</div>
+</div>
+</div>
+</section>
+</main>
+<!-- Footer -->
+<footer class="w-full py-12 bg-surface-container-low dark:bg-surface-container-low border-t border-outline-variant/10">
+<div class="grid grid-cols-1 md:grid-cols-2 gap-gutter px-margin-desktop max-w-container-max mx-auto items-center">
+<div class="flex items-center gap-2">
+<span class="font-body-md text-body-md text-on-surface-variant">© 2026 MCManager. Sous licence MIT.</span>
+</div>
+<div class="flex flex-wrap justify-start md:justify-end gap-6 font-body-md text-body-md">
+<a class="text-outline dark:text-outline hover:text-on-surface transition-colors" href="https://github.com/yo-le-zz/MCmanager#readme" target="_blank" rel="noopener">Documentation</a>
+<a class="text-outline dark:text-outline hover:text-on-surface transition-colors" href="https://github.com/yo-le-zz/MCmanager/blob/main/LICENSE" target="_blank" rel="noopener">Licence</a>
+<a class="text-outline dark:text-outline hover:text-on-surface transition-colors" href="https://github.com/yo-le-zz/MCmanager/issues" target="_blank" rel="noopener">Signaler un bug</a>
+<a class="text-outline dark:text-outline hover:text-on-surface transition-colors" href="https://github.com/yo-le-zz/MCmanager" target="_blank" rel="noopener">GitHub</a>
+</div>
+</div>
+</footer>
+<script>
+  // Copy-to-clipboard for the install command snippets.
+  document.querySelectorAll('.copy-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const code = btn.closest('.group').querySelector('.copy-target').textContent.trim();
+      try {
+        await navigator.clipboard.writeText(code);
+      } catch {
+        // Clipboard API unavailable (very old browser, non-HTTPS) - fall back silently, the command is still selectable/copyable by hand.
+        return;
+      }
+      const icon = btn.querySelector('.material-symbols-outlined');
+      const original = icon.textContent;
+      icon.textContent = 'check';
+      btn.classList.add('copied');
+      setTimeout(() => { icon.textContent = original; btn.classList.remove('copied'); }, 1500);
+    });
+  });
+</script>
+</body>
 </html>

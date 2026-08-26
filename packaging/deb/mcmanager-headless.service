@@ -1,0 +1,22 @@
+[Unit]
+Description=MCManager (headless) - gestionnaire de serveurs Minecraft, sans interface web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --script lance les commandes de configuration (ex: 'remote enable 7778',
+# 'start <id>') puis --daemon fait en sorte que le process reste actif au
+# lieu de quitter une fois le script termine (necessaire ici : sans
+# terminal attache, le mode interactif normal quitterait immediatement).
+# Le fichier peut etre vide - le demarrage automatique configure via
+# 'autostart add <id>' s'applique de toute facon a chaque lancement.
+ExecStart=/usr/bin/mcmanager-headless --script /etc/mcmanager/autostart.txt --daemon
+Restart=on-failure
+RestartSec=5
+# Decommente et ajuste pour ne pas tourner en root :
+# User=minecraft
+# Group=minecraft
+
+[Install]
+WantedBy=multi-user.target
