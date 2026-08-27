@@ -8,6 +8,7 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -15,7 +16,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, backup, debug, downloader, files, history, modrinth, ntfy, playit, presets, process, stats, updater, ws};
+use crate::{ai, backup, debug, downloader, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -65,6 +66,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ai/chat", post(ai_chat))
         .route("/api/ntfy/config", get(get_ntfy_config).post(save_ntfy_config))
         .route("/api/ntfy/test", post(test_ntfy))
+        .route("/api/remote/targets", get(remote_targets).post(remote_pair))
+        .route("/api/remote/targets/:label", delete(remote_forget_target))
+        .route("/api/remote/:label/call", post(remote_call))
+        .route("/api/remote/:label/deploy/:server_id", post(remote_deploy))
         .route("/api/servers/:id/marketplace/updates", get(check_addon_updates))
         .route("/api/marketplace/search", get(marketplace_search))
         .route("/api/marketplace/project/:id/versions", get(marketplace_versions))
@@ -1158,6 +1163,79 @@ async fn test_ntfy(State(state): State<AppState>) -> AppResult<Json<serde_json::
     let cfg = ntfy::load_config(&state.data_dir).await;
     ntfy::send_test(&state.http, &cfg).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ───────────────────────── controle a distance (piloter une instance mcmanager-headless) ─────────────────────────
+//
+// The desktop app acts as just another client of the RSA/AES-encrypted
+// remote protocol implemented in `remote.rs` (and already exercised by
+// `mcmanager-headless`'s own `remote pair`/`remote list`/etc REPL
+// commands) - the browser never touches any crypto, it talks plain HTTP
+// to this backend, which does the encrypted round-trip to the actual
+// remote instance on the browser's behalf.
+
+async fn remote_targets(State(state): State<AppState>) -> AppResult<Json<Vec<remote::RemoteTarget>>> {
+    Ok(Json(remote::load_targets(&state.data_dir).await))
+}
+
+#[derive(Deserialize)]
+struct RemotePairBody {
+    host: String,
+    label: String,
+    code: String,
+}
+
+async fn remote_pair(State(state): State<AppState>, Json(body): Json<RemotePairBody>) -> AppResult<Json<serde_json::Value>> {
+    let identity = remote::load_or_create_identity(&state.data_dir).await?;
+    remote::client_pair(&state.http, &state.data_dir, &identity, &body.host, &body.label, &body.code).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn remote_forget_target(State(state): State<AppState>, AxPath(label): AxPath<String>) -> AppResult<Json<serde_json::Value>> {
+    let removed = remote::forget_target(&state.data_dir, &label).await?;
+    Ok(Json(json!({ "ok": removed })))
+}
+
+/// Generic passthrough: the request body is the exact action MCManager
+/// would otherwise send from the CLI (`{"action":"list"}`,
+/// `{"action":"start","server_id":"..."}`, etc - see
+/// `remote::dispatch_action`), so the frontend can drive every remote
+/// action through one endpoint instead of one route per action.
+async fn remote_call(State(state): State<AppState>, AxPath(label): AxPath<String>, Json(action): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
+    let identity = remote::load_or_create_identity(&state.data_dir).await?;
+    let targets = remote::load_targets(&state.data_dir).await;
+    let target = targets.iter().find(|t| t.label == label).ok_or_else(|| anyhow::anyhow!("instance distante \"{label}\" inconnue"))?;
+    let result = remote::client_call(&state.http, &identity, target, action).await?;
+    Ok(Json(result))
+}
+
+/// "Envoyer ce serveur vers une instance distante" - zips the local
+/// server and ships it to the remote instance's `import_server` action.
+/// See that action's own doc comment in `remote.rs` for the size caveat
+/// (fine for typical setups, not chunked/resumable for huge worlds).
+async fn remote_deploy(State(state): State<AppState>, AxPath((label, server_id)): AxPath<(String, Uuid)>) -> AppResult<Json<serde_json::Value>> {
+    let entry = state.servers.read().await.get(&server_id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    let root = PathBuf::from(&entry.folder);
+    let zip_path = tokio::task::spawn_blocking(move || files::export_zip(&root, "")).await
+        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    let zip_bytes = tokio::fs::read(&zip_path).await?;
+    tokio::fs::remove_file(&zip_path).await.ok();
+    let zip_b64 = base64::engine::general_purpose::STANDARD.encode(&zip_bytes);
+
+    let identity = remote::load_or_create_identity(&state.data_dir).await?;
+    let targets = remote::load_targets(&state.data_dir).await;
+    let target = targets.iter().find(|t| t.label == label).ok_or_else(|| anyhow::anyhow!("instance distante \"{label}\" inconnue"))?;
+
+    let action = json!({
+        "action": "import_server",
+        "name": entry.name,
+        "loader": entry.loader,
+        "mc_version": entry.mc_version,
+        "port": entry.port,
+        "zip_base64": zip_b64,
+    });
+    let result = remote::client_call(&state.http, &identity, target, action).await?;
+    Ok(Json(result))
 }
 
 async fn check_addon_updates(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<Vec<serde_json::Value>>> {

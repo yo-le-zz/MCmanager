@@ -399,6 +399,53 @@ pub async fn dispatch_action(rt: &RemoteRuntime, action: serde_json::Value) -> s
                 }).unwrap_or_default();
                 Ok(serde_json::json!({ "lines": lines }))
             }
+            "import_server" => {
+                // Receives a whole server (zipped, base64) from a remote
+                // caller - what powers "send a local server to a remote
+                // instance" from the desktop app's new Contrôle à distance
+                // tab. Simple by design (one request, one blob): fine for
+                // typical setups, but means very large worlds will be slow
+                // and memory-heavy to transfer this way - a deliberate
+                // trade-off to avoid a chunked-upload protocol.
+                let name = action["name"].as_str().context("name manquant")?.to_string();
+                let loader: crate::models::Loader = serde_json::from_value(action["loader"].clone()).context("loader invalide")?;
+                let mc_version = action["mc_version"].as_str().context("mc_version manquant")?.to_string();
+                let port = action["port"].as_u64().unwrap_or(25565) as u16;
+                let zip_b64 = action["zip_base64"].as_str().context("zip_base64 manquant")?;
+                let zip_bytes = B64.decode(zip_b64).context("archive invalide (base64)")?;
+
+                let id = uuid::Uuid::new_v4();
+                let folder = state.data_dir.join("servers").join(id.to_string());
+                tokio::fs::create_dir_all(&folder).await?;
+                let folder2 = folder.clone();
+                tokio::task::spawn_blocking(move || crate::files::import_zip(&folder2, "", &zip_bytes)).await
+                    .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+
+                let java_path = state.config.read().await.java_path.clone();
+                let entry = crate::models::ServerEntry {
+                    id, name, loader, mc_version,
+                    loader_version: None,
+                    folder: folder.to_string_lossy().to_string(),
+                    jar_name: String::new(),
+                    java_path,
+                    xms_mb: 1024, xmx_mb: 2048, port,
+                    extra_args: vec![],
+                    eula_accepted: true,
+                    auto_backup_minutes: None,
+                    backup_retention: None,
+                    auto_restart: false,
+                    auto_restart_delay_secs: 5,
+                    scheduled_restart_minutes: None,
+                    stop_when_empty_minutes: None,
+                    dynamic_server: false,
+                    aikar_flags: false,
+                    managed_addons: vec![],
+                    created_at: chrono::Utc::now(),
+                };
+                state.servers.write().await.insert(id, entry);
+                crate::state::save_servers(state).await?;
+                Ok(serde_json::json!({ "ok": true, "server_id": id }))
+            }
             other => anyhow::bail!("action inconnue: {other}"),
         }
     }.await;
@@ -489,6 +536,17 @@ pub async fn load_targets(data_dir: &Path) -> Vec<RemoteTarget> {
 async fn save_targets(data_dir: &Path, list: &[RemoteTarget]) -> Result<()> {
     tokio::fs::write(targets_path(data_dir), serde_json::to_string_pretty(list)?).await?;
     Ok(())
+}
+
+pub async fn forget_target(data_dir: &Path, label: &str) -> Result<bool> {
+    let mut list = load_targets(data_dir).await;
+    let before = list.len();
+    list.retain(|t| t.label != label);
+    let removed = list.len() != before;
+    if removed {
+        save_targets(data_dir, &list).await?;
+    }
+    Ok(removed)
 }
 
 /// Fetches a not-yet-trusted instance's identity (fingerprint + public

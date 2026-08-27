@@ -188,6 +188,7 @@ async function render() {
       case "backups": return renderBackups();
       case "stats": return renderStats();
       case "network": return renderNetwork();
+      case "remote": return renderRemote();
       case "docs": return renderDocs();
       case "assistant": return renderAssistant();
       case "settings": return renderSettings();
@@ -1423,6 +1424,151 @@ async function renderNetwork() {
   });
   $("#pl-start").addEventListener("click", async () => { await api("/playit/start", { method: "POST" }); renderNetwork(); });
   $("#pl-stop").addEventListener("click", async () => { await api("/playit/stop", { method: "POST" }); renderNetwork(); });
+}
+
+// ───────────────────────── controle a distance (piloter une instance mcmanager-headless) ─────────────────────────
+//
+// The browser only ever talks plain HTTP to this app's own backend - all
+// the RSA/AES encryption to reach the actual remote instance happens
+// server-side (see src/remote.rs and the /api/remote/* routes).
+
+let remoteSelectedTarget = null;
+
+async function renderRemote() {
+  const content = $("#content");
+  const targets = await api("/remote/targets");
+  if (!remoteSelectedTarget || !targets.some((t) => t.label === remoteSelectedTarget)) {
+    remoteSelectedTarget = targets[0]?.label || null;
+  }
+
+  content.innerHTML = `
+    <h1>🖧 ${t('view.remote')}</h1>
+    <div class="subtitle">Pilotez une autre instance MCManager (mode <code>mcmanager-headless</code>, typiquement sur un VPS) depuis cette interface — connexion chiffrée et authentifiée par échange de clés RSA.</div>
+
+    <div class="card">
+      <h2>Jumeler une nouvelle instance</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
+        Sur la machine distante : <code>mcmanager-headless</code> → <code>remote enable &lt;port&gt;</code> puis <code>remote pairing-code</code> pour obtenir un code à usage unique (valide 10 minutes). Vérifiez que l'empreinte affichée ici correspond bien à celle donnée là-bas avant de valider.
+      </p>
+      <div class="form-grid">
+        <div class="form-row"><label>Adresse (hôte:port)</label><input id="rm-host" placeholder="192.168.1.42:7778"></div>
+        <div class="form-row"><label>Nom pour cette instance</label><input id="rm-label" placeholder="mon-vps"></div>
+        <div class="form-row"><label>Code de jumelage</label><input id="rm-code" placeholder="03847680"></div>
+      </div>
+      <button class="btn-green" id="rm-pair">🔗 Jumeler</button>
+    </div>
+
+    <div class="card">
+      <h2>Instances jumelées</h2>
+      ${targets.length ? `
+        <div class="form-row"><label>Instance</label>
+          <select id="rm-target-select">
+            ${targets.map((t) => `<option value="${escapeHtml(t.label)}" ${t.label === remoteSelectedTarget ? "selected" : ""}>${escapeHtml(t.label)} (${escapeHtml(t.host)})</option>`).join("")}
+          </select>
+        </div>
+        <button class="btn-red" id="rm-forget">Oublier cette instance</button>
+      ` : '<div class="empty-state">Aucune instance jumelée pour l\'instant.</div>'}
+    </div>
+
+    ${remoteSelectedTarget ? `
+    <div class="card">
+      <h2>Serveurs sur "${escapeHtml(remoteSelectedTarget)}"</h2>
+      <div id="rm-servers"><div class="empty-state">Chargement…</div></div>
+    </div>
+    <div class="card">
+      <h2>Envoyer un serveur local vers "${escapeHtml(remoteSelectedTarget)}"</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">Copie le dossier complet du serveur choisi vers l'instance distante et l'y enregistre comme nouveau serveur. Adapté à des serveurs de taille raisonnable — un très gros monde peut prendre du temps (un seul transfert, non repris en cas de coupure).</p>
+      <div style="display:flex;gap:8px">
+        <select id="rm-deploy-select" style="flex:1">
+          ${state.servers.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.loader} ${s.mc_version})</option>`).join("")}
+        </select>
+        <button class="btn-mauve" id="rm-deploy">📤 Envoyer</button>
+      </div>
+      <div id="rm-deploy-result" style="margin-top:8px;font-size:13px"></div>
+    </div>
+    ` : ""}
+  `;
+
+  $("#rm-pair").addEventListener("click", async () => {
+    const host = $("#rm-host").value.trim();
+    const label = $("#rm-label").value.trim();
+    const code = $("#rm-code").value.trim();
+    if (!host || !label || !code) { toast("Renseignez l'adresse, le nom et le code.", "error"); return; }
+    try {
+      await api("/remote/targets", { method: "POST", body: JSON.stringify({ host, label, code }) });
+      toast(`Jumelé avec "${label}".`, "success");
+      remoteSelectedTarget = label;
+      renderRemote();
+    } catch (e) {
+      toast(e.message || "Échec du jumelage.", "error");
+    }
+  });
+
+  if (targets.length) {
+    $("#rm-target-select").addEventListener("change", (e) => { remoteSelectedTarget = e.target.value; renderRemote(); });
+    $("#rm-forget").addEventListener("click", async () => {
+      if (!confirm(`Oublier l'instance "${remoteSelectedTarget}" ?`)) return;
+      await api(`/remote/targets/${encodeURIComponent(remoteSelectedTarget)}`, { method: "DELETE" });
+      remoteSelectedTarget = null;
+      renderRemote();
+    });
+  }
+
+  if (!remoteSelectedTarget) return;
+
+  const serversEl = $("#rm-servers");
+  try {
+    const result = await api(`/remote/${encodeURIComponent(remoteSelectedTarget)}/call`, { method: "POST", body: JSON.stringify({ action: "list" }) });
+    const servers = result.servers || [];
+    serversEl.innerHTML = servers.length ? servers.map((s) => `
+      <div class="mod-row">
+        <div>
+          <div class="name">${escapeHtml(s.name)}</div>
+          <div class="meta">${escapeHtml(s.loader)} · ${escapeHtml(s.mc_version)} · ${s.running ? '<span class="badge badge-green">En ligne</span>' : '<span class="badge badge-red">Arrêté</span>'}</div>
+        </div>
+        <div class="mod-actions">
+          <button class="btn-green" data-rm-start="${s.id}" ${s.running ? "disabled" : ""}>▶</button>
+          <button class="btn-red" data-rm-stop="${s.id}" ${s.running ? "" : "disabled"}>⏹</button>
+          <button class="btn-ghost" data-rm-restart="${s.id}">⟳</button>
+        </div>
+      </div>
+    `).join("") : '<div class="empty-state">Aucun serveur enregistré sur cette instance.</div>';
+
+    const callRemote = async (action, id) => {
+      try {
+        await api(`/remote/${encodeURIComponent(remoteSelectedTarget)}/call`, { method: "POST", body: JSON.stringify({ action, server_id: id }) });
+        toast("Commande envoyée.", "success");
+        renderRemote();
+      } catch (e) {
+        toast(e.message || "Échec.", "error");
+      }
+    };
+    $$("[data-rm-start]", serversEl).forEach((b) => b.addEventListener("click", () => callRemote("start", b.dataset.rmStart)));
+    $$("[data-rm-stop]", serversEl).forEach((b) => b.addEventListener("click", () => callRemote("stop", b.dataset.rmStop)));
+    $$("[data-rm-restart]", serversEl).forEach((b) => b.addEventListener("click", () => callRemote("restart", b.dataset.rmRestart)));
+  } catch (e) {
+    serversEl.innerHTML = `<div class="empty-state">Impossible de contacter cette instance : ${escapeHtml(e.message || "erreur inconnue")}</div>`;
+  }
+
+  $("#rm-deploy")?.addEventListener("click", async () => {
+    const serverId = $("#rm-deploy-select").value;
+    if (!serverId) return;
+    const btn = $("#rm-deploy");
+    btn.disabled = true;
+    btn.textContent = "Envoi en cours…";
+    try {
+      const result = await api(`/remote/${encodeURIComponent(remoteSelectedTarget)}/deploy/${serverId}`, { method: "POST" });
+      $("#rm-deploy-result").textContent = result.server_id ? `Envoyé avec succès (id distant : ${result.server_id}).` : (result.error || "Terminé.");
+      toast("Serveur envoyé.", "success");
+      renderRemote();
+    } catch (e) {
+      $("#rm-deploy-result").textContent = e.message || "Échec de l'envoi.";
+      toast(e.message || "Échec de l'envoi.", "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "📤 Envoyer";
+    }
+  });
 }
 
 // ───────────────────────── docs ─────────────────────────

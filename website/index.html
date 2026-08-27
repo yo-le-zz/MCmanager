@@ -16,50 +16,57 @@
         theme: {
           extend: {
             "colors": {
+                    /* Tokens actually used on this page reference CSS
+                       variables (defined in :root / .light below) instead
+                       of fixed hex, so the light/dark switch works by
+                       toggling a class on <html> - the cascade does the
+                       rest, no separate Tailwind dark: build needed.
+                       Unused Material 3 tokens are left as literal hex
+                       from the original design (harmless, never rendered). */
                     "secondary-fixed": "#f0dbff",
-                    "outline": "#8f909d",
+                    "outline": "var(--outline)",
                     "surface-container-lowest": "#060e20",
                     "error": "#ffb4ab",
-                    "on-surface": "#dae2fd",
+                    "on-surface": "var(--on-surface)",
                     "on-primary-fixed": "#00115a",
                     "on-secondary": "#490080",
                     "on-primary-fixed-variant": "#2a3d9b",
-                    "primary-container": "#8a9cff",
+                    "primary-container": "var(--primary-container)",
                     "tertiary-fixed": "#6bff8f",
                     "tertiary-fixed-dim": "#4ae176",
                     "tertiary-container": "#06bb56",
-                    "surface-container": "#171f33",
+                    "surface-container": "var(--surface-container)",
                     "primary-fixed": "#dee0ff",
                     "on-secondary-fixed-variant": "#6900b3",
                     "inverse-on-surface": "#283044",
-                    "on-surface-variant": "#c5c5d4",
-                    "secondary": "#ddb7ff",
+                    "on-surface-variant": "var(--on-surface-variant)",
+                    "secondary": "var(--secondary)",
                     "on-tertiary": "#003915",
                     "on-primary": "#0b2484",
                     "secondary-fixed-dim": "#ddb7ff",
                     "secondary-container": "#6f00be",
                     "on-secondary-container": "#d6a9ff",
                     "primary-fixed-dim": "#bac3ff",
-                    "surface-container-highest": "#2d3449",
-                    "surface-container-low": "#131b2e",
+                    "surface-container-highest": "var(--surface-container-highest)",
+                    "surface-container-low": "var(--surface-container-low)",
                     "inverse-primary": "#4456b4",
-                    "primary": "#bac3ff",
+                    "primary": "var(--primary)",
                     "error-container": "#93000a",
                     "on-error-container": "#ffdad6",
-                    "on-primary-container": "#192e8d",
+                    "on-primary-container": "var(--on-primary-container)",
                     "surface-tint": "#bac3ff",
                     "inverse-surface": "#dae2fd",
                     "surface-bright": "#31394d",
                     "on-error": "#690005",
-                    "surface-container-high": "#222a3d",
-                    "on-background": "#dae2fd",
+                    "surface-container-high": "var(--surface-container-high)",
+                    "on-background": "var(--on-surface)",
                     "on-secondary-fixed": "#2c0051",
-                    "outline-variant": "#454652",
-                    "tertiary": "#4ae176",
-                    "background": "#0b1326",
+                    "outline-variant": "var(--outline-variant)",
+                    "tertiary": "var(--tertiary)",
+                    "background": "var(--background)",
                     "on-tertiary-fixed-variant": "#005321",
-                    "surface-variant": "#2d3449",
-                    "surface": "#0b1326",
+                    "surface-variant": "var(--surface-variant)",
+                    "surface": "var(--background)",
                     "on-tertiary-fixed": "#002109",
                     "surface-dim": "#0b1326",
                     "on-tertiary-container": "#00431a"
@@ -102,23 +109,66 @@
       }
     </script>
 <style>
+        :root {
+            /* Dark palette (default). Light overrides in .light below -
+               toggled by JS adding/removing that class on <html>. */
+            --background: #0b1326;
+            --on-surface: #dae2fd;
+            --on-surface-variant: #c5c5d4;
+            --primary: #bac3ff;
+            --primary-container: #8a9cff;
+            --on-primary-container: #192e8d;
+            --secondary: #ddb7ff;
+            --tertiary: #4ae176;
+            --surface-container: #171f33;
+            --surface-container-low: #131b2e;
+            --surface-container-high: #222a3d;
+            --surface-container-highest: #2d3449;
+            --surface-variant: #2d3449;
+            --outline: #8f909d;
+            --outline-variant: #454652;
+            --glass-bg: rgba(30, 41, 59, 0.4);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --hero-glow: rgba(138, 156, 255, 0.05);
+        }
+        .light {
+            --background: #f7f8fc;
+            --on-surface: #1a1c2b;
+            --on-surface-variant: #45464f;
+            --primary: #4456b4;
+            --primary-container: #dde0ff;
+            --on-primary-container: #0e1a5e;
+            --secondary: #7a4fa8;
+            --tertiary: #1a7a3e;
+            --surface-container: #eef0fa;
+            --surface-container-low: #f2f3fb;
+            --surface-container-high: #e5e7f4;
+            --surface-container-highest: #dadded;
+            --surface-variant: #e2e4f0;
+            --outline: #767680;
+            --outline-variant: #c6c6d0;
+            --glass-bg: rgba(255, 255, 255, 0.6);
+            --glass-border: rgba(0, 0, 0, 0.08);
+            --hero-glow: rgba(68, 86, 180, 0.06);
+        }
         body {
-            background-color: theme('colors.background');
-            color: theme('colors.on-background');
+            background-color: var(--background);
+            color: var(--on-surface);
             font-family: theme('fontFamily.body-md');
             background-image:
-                radial-gradient(circle at 15% 50%, rgba(138, 156, 255, 0.05), transparent 25%),
-                radial-gradient(circle at 85% 30%, rgba(138, 156, 255, 0.05), transparent 25%);
+                radial-gradient(circle at 15% 50%, var(--hero-glow), transparent 25%),
+                radial-gradient(circle at 85% 30%, var(--hero-glow), transparent 25%);
             background-attachment: fixed;
+            transition: background-color 0.2s, color 0.2s;
         }
         .glass-panel {
-            background: rgba(30, 41, 59, 0.4);
+            background: var(--glass-bg);
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            border: 1px solid var(--glass-border);
         }
         .text-gradient {
-            background: linear-gradient(to right, theme('colors.primary'), theme('colors.secondary'));
+            background: linear-gradient(to right, var(--primary), var(--secondary));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
@@ -136,6 +186,17 @@
             50% { opacity: 0.85; box-shadow: 0 0 0 6px rgba(74, 225, 118, 0); }
         }
         .status-dot { animation: pulse-dot 2s ease-in-out infinite; }
+        .theme-toggle {
+            width: 40px; height: 40px; border-radius: 9999px;
+            display: flex; align-items: center; justify-content: center;
+            border: 1px solid var(--outline-variant);
+            background: var(--surface-container-high);
+            color: var(--on-surface);
+            cursor: pointer;
+            transition: background 0.2s, transform 0.15s;
+        }
+        .theme-toggle:hover { background: var(--surface-container-highest); }
+        .theme-toggle:active { transform: scale(0.92); }
         .fade-up { animation: fade-up 0.6s ease-out both; }
         @keyframes fade-up {
             from { opacity: 0; transform: translateY(16px); }
@@ -158,6 +219,9 @@
 <a class="font-body-md text-body-md text-on-surface-variant dark:text-on-surface-variant hover:text-primary transition-colors duration-200" href="https://github.com/yo-le-zz/MCmanager" target="_blank" rel="noopener">GitHub</a>
 </div>
 <div class="flex items-center gap-4">
+<button id="theme-toggle" class="theme-toggle" aria-label="Basculer le thème clair/sombre" title="Basculer le thème clair/sombre">
+<span id="theme-toggle-icon" class="material-symbols-outlined text-[20px]">light_mode</span>
+</button>
 <a class="hidden md:inline-flex items-center justify-center bg-primary-container text-on-primary-container font-body-md px-4 py-2 rounded-lg hover:brightness-110 transition-all duration-200 active:scale-95" href="#installation">
                     Commencer
                 </a>
@@ -324,6 +388,35 @@
 </div>
 </footer>
 <script>
+  // Light/dark toggle. Dark is the default (matches <html class="dark">
+  // in the markup); the choice is remembered per-browser in localStorage.
+  // No effect on system preference detection - an explicit switch beats
+  // guessing, and dark is what this site is designed around.
+  const THEME_KEY = "mcmanager-theme";
+  const html = document.documentElement;
+  const toggleBtn = document.getElementById("theme-toggle");
+  const toggleIcon = document.getElementById("theme-toggle-icon");
+
+  function applyTheme(theme) {
+    if (theme === "light") {
+      html.classList.remove("dark");
+      html.classList.add("light");
+      toggleIcon.textContent = "dark_mode";
+    } else {
+      html.classList.remove("light");
+      html.classList.add("dark");
+      toggleIcon.textContent = "light_mode";
+    }
+  }
+
+  applyTheme(localStorage.getItem(THEME_KEY) || "dark");
+
+  toggleBtn.addEventListener("click", () => {
+    const next = html.classList.contains("light") ? "dark" : "light";
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next);
+  });
+
   // Copy-to-clipboard for the install command snippets.
   document.querySelectorAll('.copy-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {

@@ -24,6 +24,7 @@ const TRANSLATIONS = {
     "nav.backups": "💾 Sauvegardes",
     "nav.stats": "📈 Statistiques",
     "nav.network": "🌐 Réseau (playit.gg)",
+    "nav.remote": "🖧 Contrôle à distance",
     "nav.docs": "📚 Docs & tutos",
     "nav.assistant": "🤖 Assistant IA",
     "nav.settings": "⚙ Paramètres",
@@ -59,6 +60,7 @@ const TRANSLATIONS = {
     "view.properties": "Propriétés serveur",
     "view.propertiesMissing": "server.properties introuvable (le serveur n'a peut-être jamais été démarré).",
     "view.network": "Réseau",
+    "view.remote": "Contrôle à distance",
     "view.assistant": "Assistant IA",
     "view.settings": "Paramètres",
 
@@ -89,6 +91,7 @@ const TRANSLATIONS = {
     "nav.backups": "💾 Backups",
     "nav.stats": "📈 Statistics",
     "nav.network": "🌐 Network (playit.gg)",
+    "nav.remote": "🖧 Remote control",
     "nav.docs": "📚 Docs & tutorials",
     "nav.assistant": "🤖 AI assistant",
     "nav.settings": "⚙ Settings",
@@ -124,6 +127,7 @@ const TRANSLATIONS = {
     "view.properties": "Server properties",
     "view.propertiesMissing": "server.properties not found (the server may never have been started).",
     "view.network": "Network",
+    "view.remote": "Remote control",
     "view.assistant": "AI Assistant",
     "view.settings": "Settings",
 
@@ -154,6 +158,7 @@ const TRANSLATIONS = {
     "nav.backups": "💾 Copias de seguridad",
     "nav.stats": "📈 Estadísticas",
     "nav.network": "🌐 Red (playit.gg)",
+    "nav.remote": "🖧 Control remoto",
     "nav.docs": "📚 Docs y tutoriales",
     "nav.settings": "⚙ Ajustes",
     "nav.assistant": "🤖 Asistente IA",
@@ -189,6 +194,7 @@ const TRANSLATIONS = {
     "view.properties": "Propiedades del servidor",
     "view.propertiesMissing": "server.properties no encontrado (puede que el servidor nunca se haya iniciado).",
     "view.network": "Red",
+    "view.remote": "Control remoto",
     "view.assistant": "Asistente IA",
     "view.settings": "Ajustes",
 
