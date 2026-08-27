@@ -3,21 +3,24 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
-## [1.0.6] - 2026-08-24 (serveur dynamique, controle a distance RSA, site web)
+## [1.0.7] - 2026-08-27 (onglet Controle a distance dans l'interface web, theme du site)
 ### Ajouts
 - **Onglet "Contrôle à distance" dans l'interface web** (`mcmanager`, pas
   seulement `mcmanager-headless`) : corrige le fait que le contrôle à
-  distance RSA n'avait, à sa sortie, aucune interface navigable - seulement
-  des commandes CLI. Le navigateur ne fait plus aucune cryptographie : il
-  parle en HTTP normal à son propre backend, qui gère le chiffrement
-  RSA+AES vers l'instance distante (réutilise le client déjà écrit et
-  testé pour `mcmanager-headless`). Permet de jumeler une instance
-  distante, lister/démarrer/arrêter/redémarrer ses serveurs, et
+  distance RSA n'avait, à sa sortie (v1.0.6), aucune interface navigable -
+  seulement des commandes CLI. Le navigateur ne fait plus aucune
+  cryptographie : il parle en HTTP normal à son propre backend, qui gère
+  le chiffrement RSA+AES vers l'instance distante (réutilise le client
+  déjà écrit et testé pour `mcmanager-headless`). Permet de jumeler une
+  instance distante, lister/démarrer/arrêter/redémarrer ses serveurs, et
   **envoyer un serveur local vers l'instance distante** (copie le dossier
   complet, l'enregistre là-bas comme nouveau serveur).
 - **Site web** : bascule clair/sombre (sombre par défaut, interrupteur en
   haut à droite, préférence mémorisée), palette de couleurs pilotée par
   variables CSS.
+
+## [1.0.6] - 2026-08-24 (serveur dynamique, controle a distance RSA, site web)
+### Ajouts
 - **"Serveur dynamique"** (option par serveur, économie d'énergie) : une
   fois qu'un serveur s'est arrêté automatiquement par inactivité
   (`stop_when_empty_minutes`), un petit processus prend le relais sur son
