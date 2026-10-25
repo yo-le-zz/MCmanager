@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 #  MCManager - build.sh
-#  Compile et empaquette MCManager pour Linux (.deb), NixOS (flake/derivation)
+#  Compile et empaquette MCManager pour Linux (.deb)
 #  et Windows (binaire + installeur Inno Setup), puis regroupe tous les
 #  artefacts dans ./dist/.
 #
@@ -9,7 +9,6 @@
 #     ./build.sh                # build tout ce qui est possible sur cette machine
 #     ./build.sh linux          # uniquement le binaire + .deb Linux
 #     ./build.sh windows        # uniquement le cross-build Windows
-#     ./build.sh nix            # uniquement empaqueter les fichiers Nix
 #     ./build.sh installer      # (re)génère l'installateur/script d'installation
 # ==============================================================================
 set -euo pipefail
@@ -37,15 +36,15 @@ build_linux() {
   log "Compilation du binaire Linux (release)…"
   cargo build --release --bins
   local bin="target/release/${APP_NAME}"
-  local bin_headless="target/release/${APP_NAME}-headless"
+  local bin_server="target/release/${APP_NAME}-server"
   if [ ! -f "$bin" ]; then
     err "binaire introuvable après compilation"; exit 1
   fi
   ok "binaire compilé: $bin"
-  if [ ! -f "$bin_headless" ]; then
-    warn "binaire ${APP_NAME}-headless introuvable, non inclus dans le paquet (verifiez la compilation)"
+  if [ ! -f "$bin_server" ]; then
+    warn "binaire ${APP_NAME}-server introuvable, non inclus dans le paquet (verifiez la compilation)"
   else
-    ok "binaire compilé: $bin_headless"
+    ok "binaire compilé: $bin_server"
   fi
 
   # ---- archive portable .tar.gz ----
@@ -53,19 +52,19 @@ build_linux() {
   rm -rf "$portable_dir"
   mkdir -p "$portable_dir"
   cp "$bin" "$portable_dir/"
-  [ -f "$bin_headless" ] && cp "$bin_headless" "$portable_dir/"
+  [ -f "$bin_server" ] && cp "$bin_server" "$portable_dir/"
   cp -r web "$portable_dir/"
   cp README.md LICENSE CHANGELOG.md "$portable_dir/" 2>/dev/null || true
   (cd "$DIST_DIR" && tar czf "${APP_NAME}-${VERSION}-linux-x86_64.tar.gz" "$(basename "$portable_dir")")
   ok "archive portable: dist/${APP_NAME}-${VERSION}-linux-x86_64.tar.gz"
 
-  build_deb "$bin" "$bin_headless"
+  build_deb "$bin" "$bin_server"
 }
 
 # ------------------------------------------------------------------------------
 build_deb() {
   local bin="$1"
-  local bin_headless="${2:-}"
+  local bin_server="${2:-}"
   if ! command -v dpkg-deb >/dev/null 2>&1; then
     warn "dpkg-deb introuvable, paquet .deb ignoré (installez dpkg-dev)."
     return
@@ -87,16 +86,16 @@ build_deb() {
 
   cp "$bin" "$pkg_dir/usr/bin/mcmanager"
   chmod 755 "$pkg_dir/usr/bin/mcmanager"
-  if [ -n "$bin_headless" ] && [ -f "$bin_headless" ]; then
-    cp "$bin_headless" "$pkg_dir/usr/bin/mcmanager-headless"
-    chmod 755 "$pkg_dir/usr/bin/mcmanager-headless"
+  if [ -n "$bin_server" ] && [ -f "$bin_server" ]; then
+    cp "$bin_server" "$pkg_dir/usr/bin/mcmanager-server"
+    chmod 755 "$pkg_dir/usr/bin/mcmanager-server"
   fi
   cp -r web "$pkg_dir/usr/share/mcmanager/web"
   cp packaging/deb/mcmanager.service "$pkg_dir/usr/lib/systemd/user/mcmanager.service"
-  # mcmanager-headless.service is a SYSTEM unit (not user): it needs to
+  # mcmanager-server.service is a SYSTEM unit (not user): it needs to
   # start at boot without any user session existing yet, unlike the web
   # GUI's user unit above which only makes sense once someone is logged in.
-  cp packaging/deb/mcmanager-headless.service "$pkg_dir/usr/lib/systemd/system/mcmanager-headless.service"
+  cp packaging/deb/mcmanager-server.service "$pkg_dir/usr/lib/systemd/system/mcmanager-server.service"
   touch "$pkg_dir/etc/mcmanager/autostart.txt"
   cp packaging/deb/mcmanager.desktop "$pkg_dir/usr/share/applications/mcmanager.desktop"
   cp web/assets/icon-256.png "$pkg_dir/usr/share/icons/hicolor/256x256/apps/mcmanager.png"
@@ -152,56 +151,17 @@ build_windows() {
   fi
 
   local bin="target/${TARGET_WINDOWS}/release/${APP_NAME}.exe"
-  local bin_headless="target/${TARGET_WINDOWS}/release/${APP_NAME}-headless.exe"
+  local bin_server="target/${TARGET_WINDOWS}/release/${APP_NAME}-server.exe"
   local portable_dir="$DIST_DIR/${APP_NAME}-${VERSION}-windows-x86_64"
   rm -rf "$portable_dir"
   mkdir -p "$portable_dir"
   cp "$bin" "$portable_dir/"
-  [ -f "$bin_headless" ] && cp "$bin_headless" "$portable_dir/"
+  [ -f "$bin_server" ] && cp "$bin_server" "$portable_dir/"
   cp -r web "$portable_dir/"
   cp README.md LICENSE CHANGELOG.md "$portable_dir/" 2>/dev/null || true
   (cd "$DIST_DIR" && zip -rq "${APP_NAME}-${VERSION}-windows-x86_64.zip" "$(basename "$portable_dir")")
   ok "archive portable Windows: dist/${APP_NAME}-${VERSION}-windows-x86_64.zip"
   ok "binaire Windows: $bin"
-}
-
-# ------------------------------------------------------------------------------
-build_nix() {
-  log "Préparation du paquet Nix…"
-  local nix_dist="$DIST_DIR/${APP_NAME}-${VERSION}-nix"
-  rm -rf "$nix_dist"
-  mkdir -p "$nix_dist"
-  cp flake.nix packaging/nix/default.nix "$nix_dist/"
-  cat > "$nix_dist/README.md" << 'EOF'
-# MCManager - installation NixOS / Nix
-
-Le flake.nix canonique vit a la racine du depot (pas dans packaging/nix) afin
-que `nix run github:yo-le-zz/MCmanager` fonctionne directement, sans avoir a
-preciser un sous-dossier.
-
-## Avec flakes (recommandé, ex: GLF OS)
-    nix run github:yo-le-zz/MCmanager
-    # ou, dans /etc/nixos/flake.nix :
-    inputs.mcmanager.url = "github:yo-le-zz/MCmanager";
-    # puis importez `mcmanager.nixosModules.default` et activez :
-    services.mcmanager.enable = true;
-
-## Sans flakes
-    nix-build packaging/nix/default.nix
-    ./result/bin/mcmanager
-EOF
-  if command -v nix >/dev/null 2>&1; then
-    log "Nix détecté, tentative de build réelle (nix build)…"
-    if (cd "$ROOT_DIR" && nix build .#default --out-link "$DIST_DIR/nix-result" 2>"$DIST_DIR/nix-build.log"); then
-      ok "dérivation Nix construite: dist/nix-result"
-    else
-      warn "build Nix échouée ou nix non configuré pour les flakes (voir dist/nix-build.log). Le flake.nix est fourni pour build sur une machine Nix/NixOS."
-    fi
-  else
-    warn "nix n'est pas installé sur cette machine : flake.nix fourni tel quel dans dist/${APP_NAME}-${VERSION}-nix/ pour être construit sur NixOS/GLF OS."
-  fi
-  (cd "$DIST_DIR" && tar czf "${APP_NAME}-${VERSION}-nix.tar.gz" "$(basename "$nix_dist")")
-  ok "archive Nix: dist/${APP_NAME}-${VERSION}-nix.tar.gz"
 }
 
 # ------------------------------------------------------------------------------
@@ -216,9 +176,9 @@ echo "Installation de MCManager ${VERSION}…"
 DEST="\${1:-/usr/local}"
 sudo mkdir -p "\$DEST/bin" "\$DEST/share/mcmanager"
 sudo cp "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager" "\$DEST/bin/mcmanager"
-if [ -f "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager-headless" ]; then
-  sudo cp "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager-headless" "\$DEST/bin/mcmanager-headless"
-  sudo chmod +x "\$DEST/bin/mcmanager-headless"
+if [ -f "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager-server" ]; then
+  sudo cp "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/mcmanager-server" "\$DEST/bin/mcmanager-server"
+  sudo chmod +x "\$DEST/bin/mcmanager-server"
 fi
 sudo cp -r "\$(dirname "\$0")/${APP_NAME}-${VERSION}-linux-x86_64/web" "\$DEST/share/mcmanager/web"
 sudo chmod +x "\$DEST/bin/mcmanager"
@@ -251,7 +211,7 @@ LicenseFile=LICENSE
 
 [Files]
 Source: "${APP_NAME}-${VERSION}-windows-x86_64\\mcmanager.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "${APP_NAME}-${VERSION}-windows-x86_64\\mcmanager-headless.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "${APP_NAME}-${VERSION}-windows-x86_64\\mcmanager-server.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "${APP_NAME}-${VERSION}-windows-x86_64\\web\\*"; DestDir: "{app}\\web"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -274,16 +234,14 @@ EOF
 case "$TASK" in
   linux)     build_linux ;;
   windows)   build_windows ;;
-  nix)       build_nix ;;
   installer) build_installer ;;
   all)
     build_linux
     build_windows
-    build_nix
     build_installer
     ;;
   *)
-    err "tâche inconnue: $TASK (utilisez: linux|windows|nix|installer|all)"
+    err "tâche inconnue: $TASK (utilisez: linux|windows|installer|all)"
     exit 1
     ;;
 esac

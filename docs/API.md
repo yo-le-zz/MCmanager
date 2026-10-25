@@ -6,7 +6,7 @@ JSON. Les erreurs renvoient `{"error": "message"}` avec un code HTTP 4xx/5xx.
 ## Général
 - `GET /version` → `{ "version": "1.0.1" }`
 - `GET /update/check` → infos de mise à jour (`updater::UpdateInfo`, inclut `install_kind`/`self_update_supported`/`self_update_note`)
-- `POST /update/apply` → télécharge et applique la mise à jour (refuse si `.deb`/Nix)
+- `POST /update/apply` → télécharge et applique la mise à jour (refuse si `.deb`)
 - `GET /settings` / `PUT /settings` → configuration globale (chemin Java, dépôt GitHub...)
 - `GET /loaders/:loader/versions` → liste des versions Minecraft dispo pour ce loader
 - `GET /loaders/:loader/builds?version=` → liste des builds/loader-versions installables pour cette version
@@ -57,3 +57,24 @@ JSON. Les erreurs renvoient `{"error": "message"}` avec un code HTTP 4xx/5xx.
 - `GET /playit/status`
 - `POST /playit/detect-local` → détecte et adopte une installation `playit` déjà présente sur la machine
 - `GET /playit/ws` → WebSocket des logs de l'agent
+
+## Serveurs distants (v1.0.8)
+- `GET /servers` → serveurs locaux **et** serveurs des instances jumelées ; ces derniers portent
+  `"remote": { "label", "host", "online" }`.
+- Toute route `/servers/:id/...` dont l'id appartient à un serveur distant est relayée telle quelle à
+  l'instance concernée (console, fichiers, addons, schematics, sauvegardes...). `open-folder` est refusé.
+- `POST /servers` et `POST /servers/import` avec l'en-tête `x-mcm-target: <nom de l'instance>` créent/importent
+  le serveur sur cette instance.
+- `GET /remote/hub` → état de chaque instance jumelée (`online`, `latency_ms`, `last_error`, `server_count`).
+- `GET /remote/targets` · `POST /remote/targets` `{host,label,code}` · `DELETE /remote/targets/:label`
+- `POST /remote/:label/deploy/:server_id` → envoie un serveur local vers l'instance (par blocs chiffrés).
+- WebSocket `/servers/:id/ws` fonctionne aussi pour un serveur distant (relais).
+
+## Mode serveur (`mcmanager-server`)
+Hors préfixe `/api` : `POST /auth/login` `{username,password}` · `POST /auth/logout` · `GET /auth/me` ·
+`POST /auth/password` · `GET /auth/sessions` · `DELETE /auth/sessions/:id` · `GET|POST /auth/users` ·
+`DELETE /auth/users/:name` · `GET /healthz`. Toutes les routes `/api/*` exigent le cookie de session
+(ou `Authorization: Bearer <api_token>`).
+- `GET /server/info` → empreinte, machines jumelées et sessions actives ; `POST /server/pairing-code`
+  `{minutes?}` ; `DELETE /server/clients/:id` (administrateurs).
+- `POST /remote/info|pair|session|api` : protocole machine à machine signé RSA, voir `src/remote.rs`.

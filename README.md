@@ -30,18 +30,17 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Serveur dynamique** (économie d'énergie) : une fois arrêté par inactivité, MCManager peut mettre le port en veille (Java, et Bedrock/Geyser en expérimental) et ne redémarrer le serveur qu'à la prochaine tentative de connexion réelle.
 - **Diagnostic de crash automatique** : isole le mod/plugin fautif (ou une combinaison problématique) en testant les configurations une par une.
 - **Import de serveurs existants** : pointez MCManager vers un dossier de serveur déjà présent sur la machine.
-- **Deux binaires** : `mcmanager` (interface web) et **`mcmanager-headless`** (gestion 100% en ligne de commande, aucun serveur web, pensé pour un VPS sans navigateur — voir [docs/HEADLESS.md](docs/HEADLESS.md)). `mcmanager cli` reste disponible comme télécommande HTTP vers une instance `mcmanager` déjà lancée (voir [docs/CLI.md](docs/CLI.md)).
-- **Contrôle à distance pour `mcmanager-headless`** : expose (en option) une API de gestion sur le réseau, chiffrée et authentifiée par échange de clés RSA (chiffrement hybride RSA + AES-256-GCM, jumelage par code à usage unique) — voir [docs/HEADLESS.md](docs/HEADLESS.md).
-- **Démarrage automatique et service système** : `autostart add <id>` relance un serveur au démarrage de `mcmanager-headless`, avec un service systemd (`mcmanager-headless.service`) qui redémarre au boot et se relance automatiquement en cas d'échec.
+- **Deux binaires** : `mcmanager` (application de bureau, interface web locale sans connexion) et **`mcmanager-server`** (mode serveur : même interface web, connexion multi-utilisateurs, accessible à distance, déployable via Docker ou service systemd — voir [docs/SERVER.md](docs/SERVER.md)).
+- **Serveurs distants intégrés** : jumelez une autre machine MCManager (VPS, serveur maison, Raspberry Pi) et **ses serveurs apparaissent dans votre tableau de bord comme les vôtres**, avec une étiquette « distant » — console en direct, fichiers, mods/plugins, schematics, sauvegardes, démarrage/arrêt, création directe là-bas. Chiffrement RSA + AES-256-GCM, requêtes signées et non rejouables, plusieurs machines et sessions simultanées.
+- **Service permanent et Docker** : `systemctl enable --now mcmanager-server` (utilisateur dédié, redémarrage automatique) ou `docker compose up -d`. Le contrôle à distance ne s'éteint plus à la fermeture d'un terminal.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
-- **Multiplateforme** : Linux (.deb + script d'installation), NixOS/GLF OS (flake.nix à la racine + module NixOS — `nix run github:yo-le-zz/MCmanager`), Windows (portable + installateur Inno Setup).
+- **Plateformes** : Linux (.deb, script d'installation, Docker) et Windows (installateur / zip portable).
 
 ### Mise à jour automatique selon le type d'installation
 | Installation | Comportement |
 |---|---|
 | Portable (zip/tar.gz) | Mise à jour en un clic depuis l'UI |
 | `.deb` | Désactivée volontairement (ne casse pas dpkg/apt) — l'appli indique comment mettre à jour via un nouveau `.deb` |
-| Nix / `nix run` | Désactivée (store Nix en lecture seule) — relancez simplement `nix run github:yo-le-zz/MCmanager`, Nix récupère la dernière version automatiquement |
 
 
 ---
@@ -72,15 +71,16 @@ mcmanager
 ```
 Ou via le script universel : `./install-linux.sh`.
 
-### NixOS / GLF OS
+### Docker (serveur)
 ```bash
-nix run github:yo-le-zz/MCmanager
+docker compose up -d      # interface web sur http://<machine>:7777 ; mot de passe admin dans `docker logs mcmanager`
 ```
-Ou en tant que service système, dans votre `flake.nix` :
-```nix
-inputs.mcmanager.url = "github:yo-le-zz/MCmanager";
-# ...
-services.mcmanager.enable = true;
+Voir [docs/SERVER.md](docs/SERVER.md) (volumes, ports Minecraft, comptes, HTTPS).
+
+### Mode serveur (VPS, Raspberry Pi)
+```bash
+sudo dpkg -i mcmanager_*.deb
+sudo systemctl enable --now mcmanager-server
 ```
 
 ### Windows
@@ -96,7 +96,6 @@ cargo build --release
 ./build.sh          # génère tous les paquets dans ./dist
 ./build.sh linux     # uniquement Linux (.deb + tar.gz)
 ./build.sh windows   # cross-compilation Windows (nécessite mingw-w64)
-./build.sh nix       # empaquetage Nix
 ./build.sh installer # scripts d'installation / Inno Setup
 ```
 
@@ -109,9 +108,8 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 - [docs/BUILD.md](docs/BUILD.md) — compiler et empaqueter pour chaque plateforme
 - [docs/API.md](docs/API.md) — toutes les routes de l'API REST/WebSocket
 - [docs/CLI.md](docs/CLI.md) — gérer MCManager en ligne de commande (serveurs distants)
-- [docs/HEADLESS.md](docs/HEADLESS.md) — `mcmanager-headless`, binaire séparé sans aucun serveur web (VPS/Ubuntu)
+- [docs/SERVER.md](docs/SERVER.md) — `mcmanager-server` : mode serveur, Docker, multi-utilisateurs, serveurs distants
 - [docs/PLAYIT.md](docs/PLAYIT.md) — tutoriel détaillé playit.gg
-- [docs/TUTO_INSTALLATION_GLFOS.md](docs/TUTO_INSTALLATION_GLFOS.md) — tuto d'installation simple pour NixOS/GLF OS
 - L'onglet **Docs & tutos** de l'application contient aussi un guide intégré.
 
 ## 🧩 Architecture (pour contribuer)
@@ -120,7 +118,7 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 src/
   lib.rs         racine de la bibliotheque partagee (tous les modules ci-dessous)
   main.rs        binaire "mcmanager" : point d'entrée web, routing HTTP, tâches de fond
-  bin/headless.rs binaire "mcmanager-headless" : shell CLI sans serveur web (voir docs/HEADLESS.md)
+  bin/server.rs binaire "mcmanager-server" : daemon web + shell CLI (voir docs/SERVER.md)
   api.rs         toutes les routes REST
   ws.rs          WebSocket console + logs playit.gg
   state.rs       état applicatif partagé + persistance JSON + verrou d'instance
@@ -135,12 +133,15 @@ src/
   debug.rs       diagnostic automatique de crash (test des addons un par un)
   stats.rs       CPU/RAM + ping Minecraft (joueurs en ligne)
   updater.rs     auto-mise à jour via GitHub releases
+  hub.rs         serveurs d'autres machines fusionnés dans le tableau de bord (relais, console distante)
+  auth.rs        connexion multi-utilisateurs (mode serveur)
+  web.rs         assemblage HTTP partagé par les deux binaires
 web/             interface web statique (HTML/CSS/JS, aucune étape de build)
-packaging/       fichiers .deb, Nix, Windows (Inno Setup)
+packaging/       fichiers .deb (dont le service systemd), Windows (Inno Setup)
 ```
 
-`mcmanager` (web) et `mcmanager-headless` (CLI pure, voir
-[docs/HEADLESS.md](docs/HEADLESS.md)) sont deux binaires distincts qui
+`mcmanager` (bureau) et `mcmanager-server` (mode serveur, voir
+[docs/SERVER.md](docs/SERVER.md)) sont deux binaires distincts qui
 partagent tout leur code via la bibliothèque `src/lib.rs` — aucune logique
 métier n'est dupliquée entre les deux.
 

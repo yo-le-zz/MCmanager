@@ -1,0 +1,7 @@
+target
+.git
+dist
+website
+docs
+*.md
+!README.md

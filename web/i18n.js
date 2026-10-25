@@ -25,6 +25,7 @@ const TRANSLATIONS = {
     "nav.stats": "📈 Statistiques",
     "nav.network": "🌐 Réseau (playit.gg)",
     "nav.remote": "🖧 Contrôle à distance",
+    "nav.users": "👥 Utilisateurs",
     "nav.docs": "📚 Docs & tutos",
     "nav.assistant": "🤖 Assistant IA",
     "nav.settings": "⚙ Paramètres",
@@ -61,6 +62,7 @@ const TRANSLATIONS = {
     "view.propertiesMissing": "server.properties introuvable (le serveur n'a peut-être jamais été démarré).",
     "view.network": "Réseau",
     "view.remote": "Contrôle à distance",
+    "view.users": "Utilisateurs et connexions",
     "view.assistant": "Assistant IA",
     "view.settings": "Paramètres",
 
@@ -92,6 +94,7 @@ const TRANSLATIONS = {
     "nav.stats": "📈 Statistics",
     "nav.network": "🌐 Network (playit.gg)",
     "nav.remote": "🖧 Remote control",
+    "nav.users": "👥 Users",
     "nav.docs": "📚 Docs & tutorials",
     "nav.assistant": "🤖 AI assistant",
     "nav.settings": "⚙ Settings",
@@ -128,6 +131,7 @@ const TRANSLATIONS = {
     "view.propertiesMissing": "server.properties not found (the server may never have been started).",
     "view.network": "Network",
     "view.remote": "Remote control",
+    "view.users": "Users and connections",
     "view.assistant": "AI Assistant",
     "view.settings": "Settings",
 
@@ -159,6 +163,7 @@ const TRANSLATIONS = {
     "nav.stats": "📈 Estadísticas",
     "nav.network": "🌐 Red (playit.gg)",
     "nav.remote": "🖧 Control remoto",
+    "nav.users": "👥 Usuarios",
     "nav.docs": "📚 Docs y tutoriales",
     "nav.settings": "⚙ Ajustes",
     "nav.assistant": "🤖 Asistente IA",
@@ -195,6 +200,7 @@ const TRANSLATIONS = {
     "view.propertiesMissing": "server.properties no encontrado (puede que el servidor nunca se haya iniciado).",
     "view.network": "Red",
     "view.remote": "Control remoto",
+    "view.users": "Usuarios y conexiones",
     "view.assistant": "Asistente IA",
     "view.settings": "Ajustes",
 

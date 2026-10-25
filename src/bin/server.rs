@@ -1,28 +1,39 @@
-//! `mcmanager-headless` - the CLI-only counterpart to the `mcmanager` web
-//! app, for people who want to run MCManager on a remote server (a VPS, a
-//! home Ubuntu box over SSH...) without ever binding a web port or needing
-//! a browser at all. It reuses the exact same core (`mcmanager::*`) - same
-//! `AppState`, same on-disk format under the same data directory - so
-//! servers created here show up in the web UI (on another machine, or run
-//! later on this one) and vice versa. Just not *both at once*: see
-//! `mcmanager::state::acquire_instance_lock`.
+//! `mcmanager-server` - MCManager for servers, VPS and Docker. Same core as
+//! the desktop `mcmanager` (same `AppState`, same on-disk format), but meant
+//! to run unattended and be reached over the network:
 //!
-//! Runs as a persistent interactive shell (reads commands from stdin, one
-//! per line) rather than a series of one-shot invocations, because server
-//! process supervision lives in memory for the life of this process - a
-//! `start` followed by exiting immediately would leave nobody watching the
-//! child's console output or crash/restart state. Type `help` once running.
+//! - **Daemon** (`--daemon`, what the systemd unit and the Docker image run):
+//!   serves the *full web interface* - identical to the local one - behind a
+//!   multi-user login, plus the RSA remote-control endpoints on the same
+//!   port, so other MCManager installs can pair with it and show its servers
+//!   in their own dashboard. Any number of people can be connected at once.
+//! - **Interactive shell** (default on a terminal): the CLI commands
+//!   (`help`), for setup over SSH. Add `--daemon` to a script run
+//!   (`--script FILE --daemon`) to configure then stay up.
+//!
+//! Both modes keep server processes supervised in memory for the life of
+//! this process, which is why the shell is persistent rather than a series
+//! of one-shot invocations. Only one MCManager process per data directory:
+//! see `mcmanager::state::acquire_instance_lock`.
 //!
 //! Usage:
-//!   mcmanager-headless                 interactive shell (default)
-//!   mcmanager-headless --script FILE    run commands from a file, one per line, then exit
+//!   mcmanager-server                       interactive shell
+//!   mcmanager-server --daemon              web UI + remote control, runs until stopped
+//!   mcmanager-server --daemon --no-web     no web UI (remote control / autostart only)
+//!   mcmanager-server --script FILE         run commands from a file, one per line, then exit
+//!   mcmanager-server --script FILE --daemon  run the file, then stay up (systemd unit)
+//!
+//! Environment: MCMANAGER_HOST (default 0.0.0.0), MCMANAGER_PORT (7777),
+//! MCMANAGER_DATA_DIR, MCMANAGER_AUTH (on|off, default on),
+//! MCMANAGER_ADMIN_USER / MCMANAGER_ADMIN_PASSWORD (first admin account),
+//! MCMANAGER_TRUST_PROXY=1 and MCMANAGER_COOKIE_SECURE=1 behind a TLS proxy.
 
 use std::io::Write as _;
 use std::path::PathBuf;
 
 use mcmanager::models::Loader;
 use mcmanager::remote::{RemoteIdentity, RemoteRuntime};
-use mcmanager::{debug, downloader, modrinth, process, remote, state, updater};
+use mcmanager::{auth, debug, downloader, modrinth, process, remote, state, updater, web};
 use uuid::Uuid;
 
 /// Everything the REPL needs for the remote-control feature, held across
@@ -40,7 +51,30 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
         .init();
 
-    println!("MCManager v{} - mode CLI (aucun serveur web ne sera lance)", updater::CURRENT_VERSION);
+    // `mcmanager-server user ...`: account management that works while the
+    // daemon is running (it only touches users.json, which the daemon re-reads
+    // by itself) - e.g. `docker exec mcmanager mcmanager-server user passwd admin`.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(|a| a.as_str()) == Some("user") {
+        let data_dir = state::resolve_data_dir();
+        tokio::fs::create_dir_all(&data_dir).await.ok();
+        let parts: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let result = match parts.as_slice() {
+            ["user", "list"] => cmd_user_list(&data_dir).await,
+            ["user", "add", name] => cmd_user_set(&data_dir, name, false, false).await,
+            ["user", "add", name, "--admin"] => cmd_user_set(&data_dir, name, true, false).await,
+            ["user", "passwd", name] => cmd_user_set(&data_dir, name, false, true).await,
+            ["user", "remove", name] => cmd_user_remove(&data_dir, name).await,
+            _ => { println!("Usage : mcmanager-server user list | add <nom> [--admin] | passwd <nom> | remove <nom>"); Ok(()) }
+        };
+        if let Err(e) = result {
+            eprintln!("Erreur : {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    println!("MCManager v{} - mode serveur", updater::CURRENT_VERSION);
     let app_state = match state::build_state().await {
         Ok(s) => s,
         Err(e) => {
@@ -89,12 +123,12 @@ async fn main() -> anyhow::Result<()> {
         // "run this setup (e.g. `remote enable`, `start <id>`), then stay
         // up" - the systemd unit uses exactly this combination.
         if script_result.is_ok() && args.iter().any(|a| a == "--daemon") {
-            run_daemon(&app_state.data_dir).await
+            run_daemon(&app_state, &mut remote_repl, &args).await
         } else {
             script_result
         }
     } else if args.iter().any(|a| a == "--daemon") {
-        run_daemon(&app_state.data_dir).await
+        run_daemon(&app_state, &mut remote_repl, &args).await
     } else {
         run_interactive(&app_state, &mut remote_repl).await
     };
@@ -106,30 +140,41 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// For running under systemd (or any supervisor) with no attached
-/// terminal: `run_interactive()`'s stdin-read loop would see an immediate
-/// EOF on `/dev/null` and exit right away, which is wrong for a service
-/// that's meant to stay up. This just waits for a shutdown signal instead
-/// - the actual work (auto-started servers, `remote enable`d control) is
-/// already running in background tasks by the time this is called.
-async fn run_daemon(data_dir: &std::path::Path) -> anyhow::Result<()> {
-    println!("Mode daemon - en attente (Ctrl+C ou SIGTERM pour arreter proprement).");
-    let ctrl_c = async { tokio::signal::ctrl_c().await.ok(); };
-    #[cfg(unix)]
-    let terminate = async {
-        if let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            sig.recv().await;
+/// Service mode (systemd, Docker): no terminal, so the interactive loop
+/// would see EOF at once and exit. Instead: serve the web UI (unless
+/// `--no-web`) with login and the `/remote/*` endpoints on the same port,
+/// until SIGTERM/Ctrl+C. Servers flagged with `autostart` are already up.
+async fn run_daemon(state: &state::AppState, remote_repl: &mut RemoteRepl, args: &[String]) -> anyhow::Result<()> {
+    if args.iter().any(|a| a == "--no-web") {
+        println!("Mode daemon sans interface web - en attente (Ctrl+C ou SIGTERM pour arreter proprement).");
+        web::spawn_background_tasks(state.clone());
+        web::wait_for_stop_signal().await;
+        println!("Arret demande, fermeture propre...");
+        return Ok(());
+    }
+
+    let host = std::env::var("MCMANAGER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port: u16 = std::env::var("MCMANAGER_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(7777);
+    let addr: std::net::SocketAddr = format!("{host}:{port}").parse().map_err(|e| anyhow::anyhow!("MCMANAGER_HOST/PORT invalide : {e}"))?;
+
+    // One RemoteRuntime shared by the web port, the optional dedicated
+    // `remote enable <port>` listener and the REPL commands, so a pairing code
+    // generated anywhere is valid everywhere.
+    let rt = match &remote_repl.runtime {
+        Some(rt) => rt.clone(),
+        None => {
+            let rt = RemoteRuntime::new(state.clone(), state.data_dir.clone()).await?;
+            remote_repl.runtime = Some(rt.clone());
+            rt
         }
     };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-    println!("Arret demande, fermeture propre...");
-    let _ = data_dir; // lock cleanup happens in the caller, same as every other exit path
-    Ok(())
+    let auth = web::auth_from_env(state, true, &host).await?;
+    let app = web::build_app(state.clone(), web::WebOptions { web_dir: web::resolve_web_dir(), auth, remote: Some(rt.clone()) });
+    web::spawn_background_tasks(state.clone());
+
+    println!("Interface web : http://{host}:{port}  (empreinte de cette instance : {})", rt.fingerprint());
+    println!("Controle a distance : actif sur ce meme port - 'remote pairing-code' (ou l'onglet Controle a distance) pour jumeler une machine.");
+    web::serve(app, addr, state.data_dir.clone()).await
 }
 
 async fn run_interactive(state: &state::AppState, remote_repl: &mut RemoteRepl) -> anyhow::Result<()> {
@@ -139,6 +184,11 @@ async fn run_interactive(state: &state::AppState, remote_repl: &mut RemoteRepl) 
         let mut line = String::new();
         let n = std::io::stdin().read_line(&mut line).unwrap_or(0);
         if n == 0 {
+            if remote_repl.server_task.is_some() {
+                println!();
+                println!("⚠ Le controle a distance est actif - fermer maintenant va le couper, personne ne pourra plus se connecter.");
+                println!("Pour qu'il reste actif sans terminal ouvert : 'remote install-permanent [port]'.");
+            }
             println!("Fin de l'entree, fermeture.");
             break;
         }
@@ -147,6 +197,16 @@ async fn run_interactive(state: &state::AppState, remote_repl: &mut RemoteRepl) 
             continue;
         }
         if matches!(line, "quit" | "exit") {
+            if remote_repl.server_task.is_some() {
+                print!("Le controle a distance est actif - quitter va le couper (plus personne ne pourra se connecter). Confirmer ? [o/N] ");
+                std::io::stdout().flush().ok();
+                let mut confirm_line = String::new();
+                std::io::stdin().read_line(&mut confirm_line).ok();
+                if !matches!(confirm_line.trim().to_lowercase().as_str(), "o" | "oui" | "y" | "yes") {
+                    println!("Annule. Pour garder le controle a distance actif sans terminal ouvert : 'remote install-permanent [port]'.");
+                    continue;
+                }
+            }
             break;
         }
         if let Err(e) = dispatch(state, remote_repl, line).await {
@@ -194,10 +254,18 @@ async fn dispatch(state: &state::AppState, remote_repl: &mut RemoteRepl, line: &
         ["remote", "fingerprint"] => { println!("Empreinte de cette instance : {}", remote_repl.identity.fingerprint()); Ok(()) }
         ["remote", "enable"] => cmd_remote_enable(state, remote_repl, 7778).await,
         ["remote", "enable", port] => cmd_remote_enable(state, remote_repl, port.parse().unwrap_or(7778)).await,
-        ["remote", "disable"] => { if let Some(t) = remote_repl.server_task.take() { t.abort(); remote_repl.runtime = None; println!("Controle a distance desactive."); } else { println!("N'etait pas actif."); } Ok(()) }
-        ["remote", "pairing-code"] => cmd_remote_pairing_code(remote_repl).await,
-        ["remote", "clients"] => cmd_remote_clients(state).await,
-        ["remote", "revoke", client_id] => cmd_remote_revoke(state, client_id).await,
+        ["remote", "install-permanent"] => cmd_remote_install_permanent(remote_repl, 7778).await,
+        ["remote", "install-permanent", port] => cmd_remote_install_permanent(remote_repl, port.parse().unwrap_or(7778)).await,
+        ["remote", "disable"] => { if let Some(t) = remote_repl.server_task.take() { t.abort(); println!("Controle a distance desactive."); } else { println!("N'etait pas actif."); } Ok(()) }
+        ["remote", "pairing-code"] => cmd_remote_pairing_code(remote_repl, remote::PAIRING_CODE_DEFAULT_TTL_MIN).await,
+        ["remote", "pairing-code", minutes] => cmd_remote_pairing_code(remote_repl, minutes.parse().unwrap_or(remote::PAIRING_CODE_DEFAULT_TTL_MIN)).await,
+        ["remote", "clients"] => cmd_remote_clients(state, remote_repl).await,
+        ["remote", "revoke", client_id] => cmd_remote_revoke(state, remote_repl, client_id).await,
+        ["user", "list"] => cmd_user_list(&state.data_dir).await,
+        ["user", "add", name] => cmd_user_set(&state.data_dir, name, false, false).await,
+        ["user", "add", name, "--admin"] => cmd_user_set(&state.data_dir, name, true, false).await,
+        ["user", "passwd", name] => cmd_user_set(&state.data_dir, name, false, true).await,
+        ["user", "remove", name] => cmd_user_remove(&state.data_dir, name).await,
         ["remote", "pair", host, label] => cmd_remote_pair(state, remote_repl, host, label).await,
         ["remote", "targets"] => cmd_remote_targets(state).await,
         ["remote", "list", label] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"list"})).await,
@@ -227,9 +295,15 @@ fn print_help() {
                                  cree un nouveau serveur (loader: vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge)
   autostart add|remove|list <id>
                                  serveurs a demarrer automatiquement quand ce daemon se lance (ex: apres un reboot)
+  user list|add <nom> [--admin]|passwd <nom>|remove <nom>
+                                 comptes de connexion a l'interface web (utilisable aussi depuis un autre terminal
+                                 pendant que le daemon tourne : mcmanager-server user passwd admin)
   remote fingerprint            empreinte de l'identite RSA de cette instance
-  remote enable [port]          active le controle a distance (0.0.0.0, port 7778 par defaut)
-  remote disable                desactive le controle a distance
+  remote enable [port]          active le controle a distance sur un port dedie (7778 par defaut) - pour cette session uniquement
+                                 (en mode --daemon il est deja actif sur le port de l'interface web)
+  remote install-permanent [port]
+                                 service systemd permanent : le controle a distance survit a la fermeture du terminal et aux reboots
+  remote disable                desactive le controle a distance (session en cours uniquement)
   remote pairing-code           genere un code de jumelage a usage unique (valide 10 min)
   remote clients                liste les clients autorises a se connecter a cette instance
   remote revoke <client_id>     revoque un client
@@ -418,7 +492,7 @@ async fn cmd_create(state: &state::AppState, args: &[&str]) -> anyhow::Result<()
 // ───────────────────────── autostart (config locale) ─────────────────────────
 
 fn autostart_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("headless_autostart.json")
+    data_dir.join("server_autostart.json")
 }
 
 async fn load_autostart(data_dir: &std::path::Path) -> Vec<Uuid> {
@@ -477,7 +551,10 @@ async fn cmd_remote_enable(state: &state::AppState, remote_repl: &mut RemoteRepl
         println!("Deja actif. Utilisez 'remote disable' d'abord pour changer de port.");
         return Ok(());
     }
-    let rt = RemoteRuntime::new(state.clone(), state.data_dir.clone()).await?;
+    let rt = match &remote_repl.runtime {
+        Some(rt) => rt.clone(),
+        None => RemoteRuntime::new(state.clone(), state.data_dir.clone()).await?,
+    };
     let rt_for_task = rt.clone();
     let task = tokio::spawn(async move {
         if let Err(e) = remote::serve(rt_for_task, port).await {
@@ -487,36 +564,53 @@ async fn cmd_remote_enable(state: &state::AppState, remote_repl: &mut RemoteRepl
     println!("Controle a distance active sur le port {port} (0.0.0.0 - toutes interfaces).");
     println!("Empreinte de cette instance : {}", rt.fingerprint());
     println!("Utilisez 'remote pairing-code' pour autoriser une machine a se connecter.");
+    println!("⚠ Actif seulement pour cette session : fermer ce terminal le coupera. Pour le garder actif en");
+    println!("  permanence, utilisez 'remote install-permanent {port}'.");
     remote_repl.runtime = Some(rt);
     remote_repl.server_task = Some(task);
     Ok(())
 }
 
-async fn cmd_remote_pairing_code(remote_repl: &RemoteRepl) -> anyhow::Result<()> {
+async fn cmd_remote_pairing_code(remote_repl: &RemoteRepl, minutes: i64) -> anyhow::Result<()> {
     let Some(rt) = &remote_repl.runtime else {
         anyhow::bail!("le controle a distance n'est pas actif ('remote enable' d'abord)");
     };
-    let code = rt.generate_pairing_code().await;
-    println!("Code de jumelage (valide 10 minutes, usage unique) : {code}");
+    let (code, applied_minutes) = rt.generate_pairing_code(minutes).await;
+    println!("Code de jumelage (usage unique) : {code}");
+    println!("Valide {applied_minutes} minute(s).");
+    if applied_minutes >= 30 {
+        println!("⚠ Attention : quiconque connait ce code peut se jumeler pendant toute sa duree de validite -");
+        println!("  plus elle est longue, plus un code intercepte (capture d'ecran, message laisse affiche...) reste exploitable.");
+        println!("  Preferez une duree courte (5-10 min) et ne partagez le code que par un canal que vous controlez.");
+    }
     println!("Empreinte de cette instance (a verifier du cote client) : {}", rt.fingerprint());
     println!("Sur la machine qui doit piloter celle-ci : remote pair <cette-machine>:<port> <nom>");
     Ok(())
 }
 
-async fn cmd_remote_clients(state: &state::AppState) -> anyhow::Result<()> {
-    let clients = remote::load_trusted(&state.data_dir).await;
+async fn cmd_remote_clients(state: &state::AppState, remote_repl: &RemoteRepl) -> anyhow::Result<()> {
+    let clients: Vec<(remote::TrustedClient, Option<usize>)> = match &remote_repl.runtime {
+        Some(rt) => rt.clients_with_sessions().await.into_iter().map(|(c, n)| (c, Some(n))).collect(),
+        None => remote::load_trusted(&state.data_dir).await.into_iter().map(|c| (c, None)).collect(),
+    };
     if clients.is_empty() {
         println!("Aucun client autorise.");
         return Ok(());
     }
-    for c in &clients {
-        println!("  {} ({}) - jumele le {}", c.label, c.id, c.paired_at.format("%Y-%m-%d %H:%M"));
+    for (c, live) in &clients {
+        let last_used = c.last_used_at.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "jamais utilise".to_string());
+        let live = live.map(|n| format!(" - {n} session(s) active(s) maintenant")).unwrap_or_default();
+        println!("  {} ({}) - jumele le {} - derniere activite : {}{}", c.label, c.id, c.paired_at.format("%Y-%m-%d %H:%M"), last_used, live);
     }
     Ok(())
 }
 
-async fn cmd_remote_revoke(state: &state::AppState, client_id: &str) -> anyhow::Result<()> {
-    if remote::revoke_client(&state.data_dir, client_id).await? {
+async fn cmd_remote_revoke(state: &state::AppState, remote_repl: &RemoteRepl, client_id: &str) -> anyhow::Result<()> {
+    let removed = match &remote_repl.runtime {
+        Some(rt) => rt.revoke(client_id).await?,
+        None => remote::revoke_client(&state.data_dir, client_id).await?,
+    };
+    if removed {
         println!("Client revoque.");
     } else {
         println!("Aucun client avec cet identifiant.");
@@ -562,5 +656,109 @@ async fn cmd_remote_call(state: &state::AppState, remote_repl: &RemoteRepl, labe
     let target = targets.iter().find(|t| t.label == label).ok_or_else(|| anyhow::anyhow!("instance \"{label}\" inconnue - voir 'remote targets'"))?;
     let result = remote::client_call(&state.http, &remote_repl.identity, target, action).await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+/// Permanent setup: writes `remote enable <port>` into
+/// `/etc/mcmanager/autostart.txt` (read by the systemd unit at startup) and
+/// enables + starts `mcmanager-server.service`, so remote control keeps
+/// running across terminal closes, logouts and reboots - unlike `remote
+/// enable` alone, which dies with the interactive session that started it.
+/// Needs root for both steps, so it shells out to `sudo` with inherited
+/// stdio (the password prompt appears right here, like running it by hand).
+async fn cmd_remote_install_permanent(remote_repl: &RemoteRepl, port: u16) -> anyhow::Result<()> {
+    println!("Configuration du controle a distance permanent (port {port})...");
+    println!("  (le service ne peut pas demarrer tant que ce shell tient le verrou de l'instance : quittez-le ensuite avec 'quit')");
+    println!("  1. Ecrire 'remote enable {port}' dans /etc/mcmanager/autostart.txt (droits administrateur requis)");
+    println!("  2. Activer + demarrer le service systemd mcmanager-server (et au prochain demarrage)");
+    print!("Continuer ? [o/N] ");
+    std::io::stdout().flush().ok();
+    let mut confirm = String::new();
+    std::io::stdin().read_line(&mut confirm)?;
+    if !matches!(confirm.trim().to_lowercase().as_str(), "o" | "oui" | "y" | "yes") {
+        println!("Annule.");
+        return Ok(());
+    }
+    if let Some(rt) = &remote_repl.runtime {
+        println!("(instance en cours - empreinte : {})", rt.fingerprint());
+    }
+    let mkdir_ok = std::process::Command::new("sudo").args(["mkdir", "-p", "/etc/mcmanager"]).status().map(|s| s.success()).unwrap_or(false);
+    if !mkdir_ok {
+        println!("Impossible de creer /etc/mcmanager (sudo requis). Faites-le a la main : sudo mkdir -p /etc/mcmanager");
+        return Ok(());
+    }
+    let mut child = std::process::Command::new("sudo")
+        .args(["tee", "/etc/mcmanager/autostart.txt"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(format!("remote enable {port}\n").as_bytes())?;
+    }
+    if !child.wait().map(|s| s.success()).unwrap_or(false) {
+        println!("Echec de l'ecriture de /etc/mcmanager/autostart.txt.");
+        return Ok(());
+    }
+    println!("Activation du service systemd...");
+    let status = std::process::Command::new("sudo").args(["systemctl", "enable", "--now", "mcmanager-server"]).status()?;
+    if status.success() {
+        println!("✓ Service installe : le controle a distance sera actif en permanence (port {port}) - tapez 'quit' ici, le service prend alors le relais.");
+        println!("  Etat : sudo systemctl status mcmanager-server   |   Logs : sudo journalctl -u mcmanager-server -f");
+        println!("  Tout desactiver : sudo systemctl disable --now mcmanager-server");
+    } else {
+        println!("Echec de l'activation (le paquet .deb est-il installe ? sinon le fichier .service n'existe pas).");
+        println!("Retentez a la main : sudo systemctl enable --now mcmanager-server");
+    }
+    Ok(())
+}
+
+// ───────────────────────── comptes web ─────────────────────────
+
+/// Reads a password without echoing it (Unix `stty`); falls back to plain
+/// input where that is unavailable.
+fn read_password(prompt: &str) -> anyhow::Result<String> {
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+    let _ = std::process::Command::new("stty").arg("-echo").status();
+    let mut line = String::new();
+    let res = std::io::stdin().read_line(&mut line);
+    let _ = std::process::Command::new("stty").arg("echo").status();
+    println!();
+    res?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+async fn cmd_user_list(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let auth = auth::AuthState::load(data_dir).await?;
+    let users = auth.list_users().await;
+    if users.is_empty() {
+        println!("Aucun compte (le premier demarrage en mode --daemon cree 'admin').");
+    }
+    for u in users {
+        println!("  {}{}  (cree le {})", u.username, if u.admin { " [admin]" } else { "" }, u.created_at.format("%Y-%m-%d"));
+    }
+    Ok(())
+}
+
+async fn cmd_user_set(data_dir: &std::path::Path, name: &str, admin: bool, replace: bool) -> anyhow::Result<()> {
+    let password = read_password("Mot de passe (8 caracteres minimum) : ")?;
+    let again = read_password("Confirmer : ")?;
+    if password != again {
+        anyhow::bail!("les mots de passe ne correspondent pas");
+    }
+    let auth = auth::AuthState::load(data_dir).await?;
+    auth.add_user(name, &password, admin, replace).await?;
+    println!("Compte '{name}' {}.", if replace { "mis a jour" } else { "cree" });
+    println!("(pris en compte immediatement par un daemon deja lance)");
+    Ok(())
+}
+
+async fn cmd_user_remove(data_dir: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let auth = auth::AuthState::load(data_dir).await?;
+    if auth.remove_user(name).await? {
+        println!("Compte '{name}' supprime.");
+    } else {
+        println!("Aucun compte de ce nom.");
+    }
     Ok(())
 }

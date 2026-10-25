@@ -6,7 +6,7 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// How MCManager ended up on disk. Determines whether replacing the running
 /// binary in place is safe (portable build) or would fight the system that
-/// manages it (package manager / Nix store) — see `install_kind()`.
+/// manages it (package manager) — see `install_kind()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallKind {
@@ -18,19 +18,13 @@ pub enum InstallKind {
     /// desyncs the package database and gets silently reverted or flagged by
     /// `dpkg -V` on the next audit.
     SystemPackage,
-    /// Installed via Nix (/nix/store/...). Store paths are read-only and
-    /// content-addressed by design - they cannot be written to, by anyone,
-    /// ever. Updates must go through Nix itself.
-    NixStore,
 }
 
 impl InstallKind {
     pub fn detect() -> Self {
         let Ok(exe) = std::env::current_exe() else { return InstallKind::Portable };
         let path = exe.to_string_lossy();
-        if path.starts_with("/nix/store/") {
-            InstallKind::NixStore
-        } else if path.starts_with("/usr/") {
+        if path.starts_with("/usr/") {
             InstallKind::SystemPackage
         } else {
             InstallKind::Portable
@@ -46,9 +40,6 @@ impl InstallKind {
             InstallKind::Portable => None,
             InstallKind::SystemPackage => Some(
                 "Installe via le paquet systeme (.deb) : la mise a jour automatique est desactivee pour ne pas casser dpkg/apt. Telechargez le nouveau .deb depuis GitHub Releases et lancez 'sudo dpkg -i mcmanager_X.Y.Z_amd64.deb', ou configurez un depot apt."
-            ),
-            InstallKind::NixStore => Some(
-                "Installe via Nix : le store Nix est en lecture seule par design, la mise a jour automatique est impossible depuis l'application. Mettez a jour avec 'nix flake update' (si vous utilisez un flake local) ou en relancant 'nix run github:yo-le-zz/MCmanager' qui recuperera la derniere version taguee."
             ),
         }
     }
@@ -128,9 +119,9 @@ pub async fn check_for_update(client: &reqwest::Client, repo: &str) -> Result<Up
 /// Downloads the new binary, moves the current executable aside and replaces it.
 /// The caller is responsible for restarting the process afterwards.
 ///
-/// Refuses outright for `.deb`/Nix installs (see `InstallKind`) instead of
+/// Refuses outright for `.deb` installs (see `InstallKind`) instead of
 /// silently failing on a permission error or, worse, succeeding and leaving
-/// the package manager / Nix store bookkeeping out of sync.
+/// the package manager bookkeeping out of sync.
 pub async fn apply_update(client: &reqwest::Client, download_url: &str) -> Result<()> {
     let kind = InstallKind::detect();
     if !kind.self_update_supported() {

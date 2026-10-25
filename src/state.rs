@@ -16,6 +16,10 @@ pub struct ServerRuntime {
     pub stdin: Option<ChildStdin>,
     pub tx: broadcast::Sender<String>,
     pub backlog: Vec<String>,
+    /// Total number of console lines ever pushed (monotonic, survives the
+    /// backlog being trimmed). Lets a remote reader ask "give me everything
+    /// after line N" - see the `console` action in `remote.rs`.
+    pub seq: u64,
     pub running: bool,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub pid: Option<u32>,
@@ -33,6 +37,7 @@ impl Default for ServerRuntime {
             stdin: None,
             tx,
             backlog: Vec::new(),
+            seq: 0,
             running: false,
             started_at: None,
             pid: None,
@@ -43,6 +48,7 @@ impl Default for ServerRuntime {
 
 impl ServerRuntime {
     pub fn push_line(&mut self, line: String) {
+        self.seq += 1;
         self.backlog.push(line.clone());
         if self.backlog.len() > CONSOLE_BACKLOG {
             let excess = self.backlog.len() - CONSOLE_BACKLOG;
@@ -79,6 +85,9 @@ pub struct AppStateInner {
     /// downloaded and started instantly.
     pub playit_backlog: RwLock<Vec<String>>,
     pub backup_progress: RwLock<HashMap<Uuid, BackupProgress>>,
+    /// Servers living on other paired MCManager instances, shown in this
+    /// instance's dashboard like local ones (see `hub.rs`).
+    pub hub: crate::hub::RemoteHub,
 }
 
 /// Live progress of a running backup, polled by the UI. `done` is shared
@@ -131,6 +140,7 @@ pub async fn build_state() -> anyhow::Result<AppState> {
         playit_tx,
         playit_backlog: RwLock::new(Vec::new()),
         backup_progress: RwLock::new(HashMap::new()),
+        hub: Default::default(),
     });
 
     Ok(state)
@@ -159,6 +169,7 @@ pub async fn build_state_for_test(data_dir: &std::path::Path) -> AppState {
         playit_tx,
         playit_backlog: RwLock::new(Vec::new()),
         backup_progress: RwLock::new(HashMap::new()),
+        hub: Default::default(),
     })
 }
 
@@ -172,7 +183,7 @@ fn default_config(data_dir: &PathBuf) -> AppConfig {
     }
 }
 
-fn resolve_data_dir() -> PathBuf {
+pub fn resolve_data_dir() -> PathBuf {
     if let Ok(custom) = std::env::var("MCMANAGER_DATA_DIR") {
         return PathBuf::from(custom);
     }
@@ -182,13 +193,13 @@ fn resolve_data_dir() -> PathBuf {
     PathBuf::from("./mcmanager-data")
 }
 
-/// Both binaries (`mcmanager`, the web app, and `mcmanager-headless`, the
+/// Both binaries (`mcmanager`, the web app, and `mcmanager-server`, the
 /// CLI-only one) supervise server processes purely in-memory - nothing about
 /// which PIDs belong to which server is shared between OS processes. Running
 /// two instances against the same data directory at once is a real risk of
 /// double-starting a server or corrupting `servers.json`, not just a
 /// theoretical one, since it's now easy to end up with one of each running
-/// (GUI on a desktop, headless on a server, both pointed at a synced/shared
+/// (GUI on a desktop, mcmanager-server on a server, both pointed at a synced/shared
 /// data dir). A simple exclusive lock file catches the common case.
 ///
 /// Not a full liveness check (no cross-platform PID-alive probe here) - if
@@ -200,7 +211,7 @@ enum LockState {
     /// No lock file at all - the common case.
     Free,
     /// The PID in the lock is alive and really is an MCManager process
-    /// (`mcmanager` or `mcmanager-headless`, matched by executable name) -
+    /// (`mcmanager` or `mcmanager-server`, matched by executable name) -
     /// a real conflict, never auto-resolved.
     HeldByMcManager { pid: u32 },
     /// The PID in the lock isn't running at all anymore - a stale lock left
@@ -227,10 +238,9 @@ fn inspect_lock(lock_path: &std::path::Path) -> LockState {
         None => LockState::Stale { pid },
         Some(proc_) => {
             let name = proc_.name().to_string();
-            let is_mcmanager = name.eq_ignore_ascii_case("mcmanager")
-                || name.eq_ignore_ascii_case("mcmanager.exe")
-                || name.eq_ignore_ascii_case("mcmanager-headless")
-                || name.eq_ignore_ascii_case("mcmanager-headless.exe");
+            // Prefix match on purpose: Linux truncates process names to 15
+            // characters, so `mcmanager-server` shows up as "mcmanager-serve".
+            let is_mcmanager = name.to_ascii_lowercase().starts_with("mcmanager");
             if is_mcmanager {
                 LockState::HeldByMcManager { pid }
             } else {
@@ -240,7 +250,7 @@ fn inspect_lock(lock_path: &std::path::Path) -> LockState {
     }
 }
 
-/// Both binaries (`mcmanager`, the web app, and `mcmanager-headless`) supervise
+/// Both binaries (`mcmanager`, the web app, and `mcmanager-server`) supervise
 /// server processes purely in-memory - nothing about which PIDs belong to
 /// which server is shared between OS processes. Running two instances
 /// against the same data directory at once is a real risk of double-starting

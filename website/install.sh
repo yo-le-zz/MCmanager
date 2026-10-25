@@ -18,7 +18,7 @@ err()  { printf "\033[1;31m[mcmanager]\033[0m %s\n" "$*" >&2; }
 if [ "${1:-}" = "--uninstall" ]; then
   log "Désinstallation de MCManager (installation portable ~/.local uniquement - si vous avez installé le .deb, utilisez 'sudo apt remove mcmanager')..."
   rm -rf "$INSTALL_DIR"
-  rm -f "$BIN_DIR/mcmanager" "$BIN_DIR/mcmanager-headless"
+  rm -f "$BIN_DIR/mcmanager" "$BIN_DIR/mcmanager-server"
   rm -f "$DESKTOP_FILE" "$ICON_FILE"
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
   log "MCManager désinstallé."
@@ -76,9 +76,9 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 cp -r "$SRC_DIR"/. "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/mcmanager"
 ln -sf "$INSTALL_DIR/mcmanager" "$BIN_DIR/mcmanager"
-if [ -f "$INSTALL_DIR/mcmanager-headless" ]; then
-  chmod +x "$INSTALL_DIR/mcmanager-headless"
-  ln -sf "$INSTALL_DIR/mcmanager-headless" "$BIN_DIR/mcmanager-headless"
+if [ -f "$INSTALL_DIR/mcmanager-server" ]; then
+  chmod +x "$INSTALL_DIR/mcmanager-server"
+  ln -sf "$INSTALL_DIR/mcmanager-server" "$BIN_DIR/mcmanager-server"
 fi
 
 # ---- Entrée dans le menu applications (touche Super sous GNOME/KDE etc) ----

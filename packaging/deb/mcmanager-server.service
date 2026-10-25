@@ -1,0 +1,30 @@
+[Unit]
+Description=MCManager (mode serveur) - interface web multi-utilisateurs + controle a distance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Configuration optionnelle (port, hote, compte admin initial...) - voir docs/SERVER.md
+EnvironmentFile=-/etc/mcmanager/server.env
+# --script execute les commandes de /etc/mcmanager/autostart.txt (ex: 'start <id>')
+# puis --daemon garde le process actif et sert l'interface web (connexion obligatoire)
+# ainsi que le controle a distance sur le meme port.
+ExecStart=/usr/bin/mcmanager-server --script /etc/mcmanager/autostart.txt --daemon
+Restart=on-failure
+RestartSec=5
+# Les serveurs Minecraft ne tournent pas en root : utilisateur dedie, donnees dans /var/lib/mcmanager.
+User=mcmanager
+Group=mcmanager
+StateDirectory=mcmanager
+Environment=MCMANAGER_DATA_DIR=/var/lib/mcmanager
+Environment=MCMANAGER_NO_BROWSER=1
+# Durcissement
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+# Laisse le temps aux serveurs Minecraft de s'arreter proprement (sauvegarde du monde).
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

@@ -1,4 +1,4 @@
-# CLI headless (gestion depuis un serveur distant sans navigateur)
+# CLI (gestion depuis un terminal, sans navigateur)
 
 MCManager expose une petite CLI qui parle à une instance déjà en cours
 d'exécution (ex: lancée via systemd sur un VPS) — pratique pour gérer un
@@ -32,3 +32,15 @@ mcmanager cli status <id>
 
 L'`id` d'un serveur s'obtient via `mcmanager cli list` ou dans l'interface
 web (URL ou onglet Fichiers).
+
+## Instance avec connexion (`mcmanager-server`, Docker)
+
+Une instance protégée par connexion exige un jeton d'API. `mcmanager cli` le lit
+tout seul dans `<dossier de données>/api_token` (lisible uniquement par le compte qui
+fait tourner MCManager) ou dans la variable `MCMANAGER_TOKEN` — par exemple :
+
+```bash
+MCMANAGER_PORT=7777 mcmanager cli list
+```
+
+(L'image Docker ne contient que `mcmanager-server`, pas `mcmanager cli` : utilisez l'interface web ou un jeton avec `curl -H "Authorization: Bearer $(cat /data/api_token)"`.)

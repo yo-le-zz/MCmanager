@@ -34,10 +34,3 @@ Démarrer et enregistre la désinstallation dans "Applications installées"
 - Installation silencieuse : `iex "& { $(irm mcmanager.pages.dev/install.ps1) } -Silent"`
 - Désinstaller : `iex "& { $(irm mcmanager.pages.dev/install.ps1) } -Uninstall"`
   (ou Paramètres Windows → Applications installées → MCManager → Désinstaller)
-
-## NixOS / GLF OS
-
-Pas de script séparé — la commande sur le site (`nix run
-github:yo-le-zz/MCmanager`) utilise directement le flake du dépôt
-(`flake.nix` à la racine), qui expose aussi un module NixOS
-(`services.mcmanager.enable = true;`).

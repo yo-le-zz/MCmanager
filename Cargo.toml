@@ -1,6 +1,6 @@
 [package]
 name = "mcmanager"
-version = "1.0.7"
+version = "1.0.8"
 edition = "2021"
 authors = ["yolezz"]
 license = "MIT"
@@ -12,14 +12,14 @@ name = "mcmanager"
 path = "src/main.rs"
 
 [[bin]]
-name = "mcmanager-headless"
-path = "src/bin/headless.rs"
+name = "mcmanager-server"
+path = "src/bin/server.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws", "multipart"] }
 tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -40,6 +40,8 @@ dirs = "5"
 rand = "0.8"
 sha2 = { version = "0.10", features = ["oid"] }
 aes-gcm = "0.10"
+pbkdf2 = "0.12"
+subtle = "2.5"
 rsa = "0.9"
 base64 = "0.22"
 # Pinned: base64ct >=1.7 requires edition2024, which isn't available on
@@ -64,6 +66,11 @@ rayon-core = "=1.12.1"
 
 [build-dependencies]
 winres = "0.1"
+
+# Debug builds of the crypto crates are painfully slow (RSA key generation
+# in tests takes tens of seconds unoptimized) - optimize dependencies only.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 3

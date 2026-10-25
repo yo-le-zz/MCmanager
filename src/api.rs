@@ -8,7 +8,6 @@ use axum::http::header;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -80,7 +79,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/playit/status", get(playit_status))
         .route("/api/playit/detect-local", post(playit_use_local))
         .route("/api/playit/ws", get(ws::playit_ws))
-        .with_state(state)
+        .route("/api/remote/hub", get(remote_hub_status))
+        .with_state(state.clone())
+        // axum's default is 2 MB, which silently rejected mods, schematics and
+        // world archives; the same ceiling as the remote tunnel keeps both consistent.
+        .layer(axum::extract::DefaultBodyLimit::max(crate::remote::TUNNEL_BODY_MAX))
+        // Requests for servers that live on another paired instance are
+        // relayed there (see hub.rs) before reaching any local handler.
+        .layer(axum::middleware::from_fn_with_state(state, crate::hub::proxy_middleware))
 }
 
 // ───────────────────────── misc ─────────────────────────
@@ -153,9 +159,19 @@ fn parse_loader(s: &str) -> AppResult<Loader> {
 
 // ───────────────────────── servers ─────────────────────────
 
-async fn list_servers(State(state): State<AppState>) -> Json<Vec<ServerEntry>> {
-    let servers = state.servers.read().await;
-    Json(servers.values().cloned().collect())
+async fn list_servers(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Json<Vec<serde_json::Value>> {
+    let mut list: Vec<serde_json::Value> = {
+        let servers = state.servers.read().await;
+        servers.values().filter_map(|s| serde_json::to_value(s).ok()).collect()
+    };
+    // Servers of paired instances appear alongside the local ones, tagged
+    // with `remote`. Not when the request itself came through a tunnel:
+    // instances never re-export each other's servers (no chains/loops).
+    if !headers.contains_key(remote::TUNNEL_HEADER) {
+        list.extend(crate::hub::remote_servers_json(&state).await);
+    }
+    list.sort_by(|a, b| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase()));
+    Json(list)
 }
 
 async fn get_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<ServerEntry>> {
@@ -505,7 +521,7 @@ async fn write_file(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Jso
 /// Opens a folder inside the server's own directory in the host OS's native
 /// file explorer (Explorer/Finder/the desktop's file manager). Only useful
 /// when MCManager is being driven from a browser on the same machine as the
-/// server (its normal desktop use case) - on a headless remote Ubuntu box
+/// server (its normal desktop use case) - on a remote Ubuntu box with no screen
 /// there is no desktop to open, and the underlying command will simply fail,
 /// which we report back rather than silently ignore.
 async fn open_in_explorer(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Query(q): Query<PathQuery>) -> AppResult<Json<serde_json::Value>> {
@@ -1165,11 +1181,11 @@ async fn test_ntfy(State(state): State<AppState>) -> AppResult<Json<serde_json::
     Ok(Json(json!({ "ok": true })))
 }
 
-// ───────────────────────── controle a distance (piloter une instance mcmanager-headless) ─────────────────────────
+// ───────────────────────── controle a distance (piloter une instance mcmanager-server) ─────────────────────────
 //
 // The desktop app acts as just another client of the RSA/AES-encrypted
 // remote protocol implemented in `remote.rs` (and already exercised by
-// `mcmanager-headless`'s own `remote pair`/`remote list`/etc REPL
+// `mcmanager-server`'s own `remote pair`/`remote list`/etc REPL
 // commands) - the browser never touches any crypto, it talks plain HTTP
 // to this backend, which does the encrypted round-trip to the actual
 // remote instance on the browser's behalf.
@@ -1188,11 +1204,22 @@ struct RemotePairBody {
 async fn remote_pair(State(state): State<AppState>, Json(body): Json<RemotePairBody>) -> AppResult<Json<serde_json::Value>> {
     let identity = remote::load_or_create_identity(&state.data_dir).await?;
     remote::client_pair(&state.http, &state.data_dir, &identity, &body.host, &body.label, &body.code).await?;
+    // Show the new instance's servers right away instead of after the next background pass.
+    if let Some(target) = crate::hub::target_by_label(&state, &body.label).await {
+        crate::hub::refresh_target(&state, &target).await;
+    }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Live state of every paired instance (reachable or not, latency, last
+/// error, how many servers it contributes) - what the Remote tab displays.
+async fn remote_hub_status(State(state): State<AppState>) -> Json<Vec<crate::hub::TargetStatus>> {
+    Json(crate::hub::status_snapshot(&state).await)
 }
 
 async fn remote_forget_target(State(state): State<AppState>, AxPath(label): AxPath<String>) -> AppResult<Json<serde_json::Value>> {
     let removed = remote::forget_target(&state.data_dir, &label).await?;
+    state.hub.forget(&label).await;
     Ok(Json(json!({ "ok": removed })))
 }
 
@@ -1202,7 +1229,7 @@ async fn remote_forget_target(State(state): State<AppState>, AxPath(label): AxPa
 /// `remote::dispatch_action`), so the frontend can drive every remote
 /// action through one endpoint instead of one route per action.
 async fn remote_call(State(state): State<AppState>, AxPath(label): AxPath<String>, Json(action): Json<serde_json::Value>) -> AppResult<Json<serde_json::Value>> {
-    let identity = remote::load_or_create_identity(&state.data_dir).await?;
+    let identity = crate::hub::identity(&state).await?;
     let targets = remote::load_targets(&state.data_dir).await;
     let target = targets.iter().find(|t| t.label == label).ok_or_else(|| anyhow::anyhow!("instance distante \"{label}\" inconnue"))?;
     let result = remote::client_call(&state.http, &identity, target, action).await?;
@@ -1210,9 +1237,10 @@ async fn remote_call(State(state): State<AppState>, AxPath(label): AxPath<String
 }
 
 /// "Envoyer ce serveur vers une instance distante" - zips the local
-/// server and ships it to the remote instance's `import_server` action.
-/// See that action's own doc comment in `remote.rs` for the size caveat
-/// (fine for typical setups, not chunked/resumable for huge worlds).
+/// server and ships it to the remote instance through the chunked blob
+/// store, then registers it there with `import_server`. Since v1.0.8 the
+/// archive is no longer base64-embedded in one giant request: it streams in
+/// 2 MB encrypted chunks (still buffered in memory, capped at 512 MB).
 async fn remote_deploy(State(state): State<AppState>, AxPath((label, server_id)): AxPath<(String, Uuid)>) -> AppResult<Json<serde_json::Value>> {
     let entry = state.servers.read().await.get(&server_id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
     let root = PathBuf::from(&entry.folder);
@@ -1220,11 +1248,13 @@ async fn remote_deploy(State(state): State<AppState>, AxPath((label, server_id))
         .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
     let zip_bytes = tokio::fs::read(&zip_path).await?;
     tokio::fs::remove_file(&zip_path).await.ok();
-    let zip_b64 = base64::engine::general_purpose::STANDARD.encode(&zip_bytes);
+    if zip_bytes.len() > remote::TUNNEL_BODY_MAX {
+        return Err(anyhow::anyhow!("archive trop volumineuse pour le transfert ({} Mo, maximum {} Mo) - utilisez rsync/scp pour ce serveur", zip_bytes.len() / (1024 * 1024), remote::TUNNEL_BODY_MAX / (1024 * 1024)).into());
+    }
 
-    let identity = remote::load_or_create_identity(&state.data_dir).await?;
-    let targets = remote::load_targets(&state.data_dir).await;
-    let target = targets.iter().find(|t| t.label == label).ok_or_else(|| anyhow::anyhow!("instance distante \"{label}\" inconnue"))?;
+    let identity = crate::hub::identity(&state).await?;
+    let target = crate::hub::target_by_label(&state, &label).await.ok_or_else(|| anyhow::anyhow!("instance distante \"{label}\" inconnue"))?;
+    let zip_ref = remote::client_blob_upload(&state.http, &identity, &target, &zip_bytes).await?;
 
     let action = json!({
         "action": "import_server",
@@ -1232,9 +1262,10 @@ async fn remote_deploy(State(state): State<AppState>, AxPath((label, server_id))
         "loader": entry.loader,
         "mc_version": entry.mc_version,
         "port": entry.port,
-        "zip_base64": zip_b64,
+        "zip_ref": zip_ref,
     });
-    let result = remote::client_call(&state.http, &identity, target, action).await?;
+    let result = remote::client_call_timeout(&state.http, &identity, &target, action, std::time::Duration::from_secs(300)).await?;
+    crate::hub::refresh_target(&state, &target).await;
     Ok(Json(result))
 }
 

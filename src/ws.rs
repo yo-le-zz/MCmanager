@@ -10,7 +10,49 @@ pub async fn console_ws(
     Path(id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // A server living on another paired instance: bridge to its console
+    // through the encrypted tunnel instead of the (non-existent) local runtime.
+    if let Some(label) = state.hub.label_for_server(id).await {
+        return ws.on_upgrade(move |socket| handle_remote_socket(state, id, label, socket));
+    }
     ws.on_upgrade(move |socket| handle_socket(state, id, socket))
+}
+
+async fn handle_remote_socket(state: AppState, id: Uuid, label: String, mut socket: WebSocket) {
+    let (backlog, mut rx) = crate::hub::console_subscribe(&state, id, &label).await;
+    for line in backlog {
+        if socket.send(Message::Text(line)).await.is_err() {
+            return;
+        }
+    }
+    loop {
+        tokio::select! {
+            line = rx.recv() => {
+                match line {
+                    Ok(line) => {
+                        if socket.send(Message::Text(line)).await.is_err() {
+                            break;
+                        }
+                    }
+                    // This viewer fell behind and missed some lines: keep going rather than hang up.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Err(e) = crate::hub::console_send(&state, &label, id, &text).await {
+                            let _ = socket.send(Message::Text(format!("[MCManager] Commande non envoyee : {e}"))).await;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 async fn handle_socket(state: AppState, id: Uuid, mut socket: WebSocket) {

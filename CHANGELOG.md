@@ -3,6 +3,58 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.0.8] - 2026-10-25 (serveurs distants intégrés, mode serveur, Docker, correctifs critiques)
+### Serveurs distants comme des serveurs locaux
+- **Tout serveur d'une instance jumelée apparaît dans le tableau de bord, la liste des serveurs et le
+  sélecteur**, avec une étiquette « 🖧 distant · <nom> » (ou « hors ligne » si la machine ne répond plus). On peut
+  les sélectionner, ouvrir la **console en direct**, **déposer des schematics**, **modifier les plugins/mods**,
+  éditer les fichiers, utiliser le marketplace, les sauvegardes, les propriétés, démarrer/arrêter/redémarrer :
+  l'action est exécutée sur la machine distante. Aucune fonction n'a été réécrite « en version distante » : un
+  **tunnel HTTP chiffré** exécute la vraie API de l'instance distante (`src/hub.rs`, action `http` de `remote.rs`).
+- **Création directe sur une machine distante** : « Héberger sur » dans l'assistant de création et d'import.
+- Onglet *Contrôle à distance* refait : état de chaque liaison (en ligne, latence, dernière erreur, nombre de
+  serveurs), génération du code de jumelage depuis l'interface de la machine distante, liste des machines
+  autorisées (avec sessions actives) et révocation.
+- Envoi d'un serveur local vers une instance : transfert **par blocs chiffrés** (plus de gros JSON unique).
+- Refusé volontairement pour un serveur distant : « ouvrir dans l'explorateur ». Plafond de 512 Mo par transfert.
+### Corrections critiques
+- **`remote enable` mourait dès la fermeture du terminal** : quitter alors qu'il est actif demande confirmation
+  et `remote install-permanent [port]` installe le service permanent (voir ci-dessous).
+- **Plusieurs utilisateurs/appareils connectés en même temps cassaient la session des autres** : chaque appel
+  remplaçait l'unique clé de session du client, donc deux requêtes simultanées (deux onglets, rafraîchissement +
+  console...) s'invalidaient. Les sessions ont maintenant un identifiant propre, en nombre illimité (64 par client),
+  mises en cache et rouvertes automatiquement si la machine distante les a oubliées (redémarrage, inactivité).
+- **Rejeu de requêtes** : une requête capturée pouvait être rejouée pendant 60 s. Chaque requête porte maintenant
+  un nonce à usage unique inclus dans la signature ; l'ouverture de session est elle aussi signée (un tiers
+  connaissant l'empreinte d'un client ne peut plus ouvrir de sessions en son nom).
+- **Import/téléversement de fichiers > 2 Mo refusé** (limite par défaut d'axum) : mods, schematics et archives
+  jusqu'à 512 Mo passent maintenant, en local comme en distant.
+- **Faux message « pid réutilisé »** : Linux tronque les noms de processus à 15 caractères, le verrou d'instance ne
+  reconnaissait donc pas `mcmanager-server` déjà lancé.
+- La liste des clients autorisés n'est plus relue/réécrite à chaque requête (relecture seulement si le fichier change,
+  écriture de « dernière activité » au plus toutes les 30 s).
+### Mode serveur (`mcmanager-headless` devient `mcmanager-server`)
+- **Renommage** du binaire, du service systemd (`mcmanager-server.service`), de `docs/HEADLESS.md` → `docs/SERVER.md`.
+  Le paquet désactive l'ancien service `mcmanager-headless` à l'installation. Le fichier d'autostart interne est
+  `server_autostart.json` (l'ancien `headless_autostart.json` n'est plus lu : relancez `autostart add`).
+- `mcmanager-server --daemon` sert maintenant **l'interface web complète**, identique à la locale, avec **connexion
+  obligatoire** et **plusieurs utilisateurs simultanés** (onglet *Utilisateurs* : sessions actives, déconnexion,
+  mot de passe, comptes), et le contrôle à distance sur le même port. `--no-web` pour s'en passer.
+- Comptes : PBKDF2-SHA256, cookie `HttpOnly`/`SameSite=Strict`, blocage après 8 échecs, contrôle d'origine,
+  jeton d'API (`api_token`) pour `mcmanager cli`. `mcmanager-server user list|add|passwd|remove` fonctionne même
+  pendant que le service tourne. Premier démarrage : compte `admin` + mot de passe aléatoire affiché une fois,
+  ou `MCMANAGER_ADMIN_USER` / `MCMANAGER_ADMIN_PASSWORD`.
+- **Service systemd** durci : utilisateur dédié `mcmanager`, données dans `/var/lib/mcmanager`, configuration dans
+  `/etc/mcmanager/server.env`, arrêt propre des serveurs Minecraft (90 s).
+- **Docker** : `Dockerfile` (build multi-étapes, Java 21 + 17, `tini`, healthcheck `/healthz`), `docker-compose.yml`,
+  image publiée sur ghcr.io par le workflow de release.
+- Plus de CORS permissif sur l'interface (elle est same-origin) : une page web quelconque ne peut plus piloter une
+  instance locale depuis le navigateur.
+### Retiré
+- **Support Nix** (flake, module NixOS, `packaging/nix`, tuto GLF OS, tâche CI et `build.sh nix`) : on se concentre sur Linux.
+### Déjà présent dans cette version (publié plus tôt)
+- Durée du code de jumelage configurable (`remote pairing-code [minutes]`, max 60), `last_used_at` par client.
+
 ## [1.0.7] - 2026-08-27 (onglet Controle a distance dans l'interface web, theme du site)
 ### Ajouts
 - **Onglet "Contrôle à distance" dans l'interface web** (`mcmanager`, pas

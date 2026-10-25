@@ -1,4 +1,4 @@
-//! Headless CLI, mainly useful when MCManager runs on a remote machine
+//! Command-line client, mainly useful when MCManager runs on a remote machine
 //! (a VPS, a home server reached over SSH...) where opening a browser isn't
 //! convenient. It talks to an *already running* `mcmanager serve` instance
 //! over its own REST API - it does not touch the JSON store directly, so it
@@ -16,6 +16,26 @@
 //!   mcmanager --help               show this help
 
 use serde_json::Value;
+
+/// Client that presents the instance's API token when there is one - needed
+/// when the target runs with login enabled (`mcmanager-server`, Docker).
+/// Looked up in `MCMANAGER_TOKEN`, else in `<data dir>/api_token` (readable
+/// only by the account running MCManager, so this works for that account).
+fn authed_client() -> reqwest::Client {
+    let token = std::env::var("MCMANAGER_TOKEN").ok().filter(|t| !t.is_empty()).or_else(|| {
+        let dir = std::env::var("MCMANAGER_DATA_DIR").map(std::path::PathBuf::from).ok().or_else(|| dirs::data_dir().map(|d| d.join("mcmanager")))?;
+        std::fs::read_to_string(dir.join("api_token")).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+    });
+    let mut builder = reqwest::Client::builder();
+    if let Some(token) = token {
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")) {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+            builder = builder.default_headers(headers);
+        }
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+}
 
 fn base_url() -> String {
     let host = std::env::var("MCMANAGER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -67,7 +87,7 @@ pub async fn try_dispatch(args: &[String]) -> Option<i32> {
 }
 
 async fn run_cli(args: &[String]) -> i32 {
-    let client = reqwest::Client::new();
+    let client = authed_client();
     let base = base_url();
 
     let result = match args.first().map(String::as_str) {

@@ -11,7 +11,7 @@ cargo build --release
 
 ## `build.sh`
 
-`./build.sh [all|linux|windows|nix|installer]` — voir le script pour le
+`./build.sh [all|linux|windows|installer]` — voir le script pour le
 détail. Tous les artefacts sont produits dans `./dist/`.
 
 ### Linux → `.deb`
@@ -20,17 +20,9 @@ Debian/Ubuntu). Le script construit une arborescence `usr/bin`,
 `usr/share/mcmanager/web`, un service systemd optionnel
 (`usr/lib/systemd/user/mcmanager.service`) puis appelle `dpkg-deb --build`.
 
-### NixOS / GLF OS
-`flake.nix` (à la **racine** du dépôt — important pour que
-`nix run github:yo-le-zz/MCmanager` fonctionne sans préciser de sous-dossier)
-fournit :
-- un paquet (`nix build`/`nix run`),
-- un module NixOS (`services.mcmanager.enable = true;`).
-
-`packaging/nix/default.nix` est fourni pour les installations Nix sans flakes.
-Si l'environnement de build ne dispose pas de `nix`, `build.sh nix` se
-contente de regrouper ces fichiers (ils sont ensuite construits directement
-sur une machine NixOS/GLF OS, ce qui est l'usage normal d'un flake).
+### Docker
+`docker build -t mcmanager .` construit l'image du mode serveur (Dockerfile à la racine, build multi-étapes,
+Java 21 + 17 dans l'image finale). `docker compose up -d` la lance avec un volume de données.
 
 ### Windows
 Deux façons d'obtenir un binaire Windows :
@@ -71,6 +63,5 @@ environnement Windows/WiX pour être généré fiablement.
 ## CI recommandée (GitHub Actions)
 
 Une matrice `ubuntu-latest` / `windows-latest` avec `cargo build --release`
-sur chaque OS, plus une étape Nix sur `ubuntu-latest` avec
-`cachix/install-nix-action`, reproduit fidèlement tout ce que `build.sh` fait
+sur chaque OS, plus une étape Docker publiant l'image sur ghcr.io, reproduit fidèlement tout ce que `build.sh` fait
 localement, sans les limitations de cross-compilation.

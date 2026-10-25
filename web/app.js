@@ -21,17 +21,92 @@ function toast(msg, kind = "info") {
 }
 
 async function api(path, opts = {}) {
+  const { headers: extraHeaders, ...rest } = opts;
   const res = await fetch(`/api${path}`, {
-    headers: opts.body ? { "Content-Type": "application/json" } : {},
-    ...opts,
+    ...rest,
+    headers: { ...(opts.body ? { "Content-Type": "application/json" } : {}), ...(extraHeaders || {}) },
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && state.authRequired) {
+    showLogin();
+    throw new Error(data.error || "Connexion requise.");
+  }
   if (!res.ok) {
     const msg = data.error || `Erreur ${res.status}`;
     toast(msg, "error");
     throw new Error(msg);
   }
   return data;
+}
+
+// ───────────────────────── connexion (mode serveur) ─────────────────────────
+//
+// Only present when MCManager is served with login enabled (mcmanager-server,
+// Docker). The desktop app has no /auth endpoints: /auth/me then falls back to
+// index.html, which is how "no login needed" is detected.
+
+async function authBoot() {
+  try {
+    const res = await fetch("/auth/me");
+    const isJson = (res.headers.get("content-type") || "").includes("json");
+    if (!isJson) return true; // no login layer
+    state.authRequired = true;
+    if (res.ok) {
+      state.me = await res.json();
+      setupAuthChrome();
+      return true;
+    }
+    showLogin();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function setupAuthChrome() {
+  const side = $(".sidebar");
+  if ($("#auth-chip")) return;
+  const chip = document.createElement("div");
+  chip.id = "auth-chip";
+  chip.className = "auth-chip";
+  chip.innerHTML = `<span>👤 ${escapeHtml(state.me.username)}${state.me.admin ? " · admin" : ""}</span><button class="btn-ghost" id="logout-btn">Déconnexion</button>`;
+  side.appendChild(chip);
+  $("#logout-btn").addEventListener("click", async () => {
+    await fetch("/auth/logout", { method: "POST" });
+    location.reload();
+  });
+  $("#nav-users")?.classList.remove("hidden");
+}
+
+function showLogin() {
+  if ($("#login-overlay")) return;
+  const ov = document.createElement("div");
+  ov.id = "login-overlay";
+  ov.className = "login-overlay";
+  ov.innerHTML = `
+    <div class="login-box">
+      <img src="assets/icon-256.png" alt="" class="login-icon">
+      <h1>MCManager</h1>
+      <div class="subtitle">Connectez-vous pour accéder à vos serveurs.</div>
+      <div class="form-row"><label>Utilisateur</label><input id="lg-user" autocomplete="username" autofocus></div>
+      <div class="form-row"><label>Mot de passe</label><input id="lg-pass" type="password" autocomplete="current-password"></div>
+      <button class="btn-blue" id="lg-submit" style="width:100%">Se connecter</button>
+      <div id="lg-error" class="login-error"></div>
+    </div>`;
+  document.body.appendChild(ov);
+  const submit = async () => {
+    $("#lg-error").textContent = "";
+    const res = await fetch("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: $("#lg-user").value.trim(), password: $("#lg-pass").value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) location.reload();
+    else $("#lg-error").textContent = data.error || "Échec de la connexion.";
+  };
+  $("#lg-submit").addEventListener("click", submit);
+  $("#lg-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 }
 
 function currentServer() {
@@ -60,11 +135,20 @@ function setupNav() {
   });
 }
 
+// Servers that live on a paired remote instance carry `s.remote = {label, host, online}`.
+function remoteTag(s) {
+  if (!s.remote) return "";
+  return s.remote.online
+    ? `<span class="badge badge-mauve" title="Hébergé sur ${escapeHtml(s.remote.host)}">🖧 distant · ${escapeHtml(s.remote.label)}</span>`
+    : `<span class="badge badge-red" title="Instance injoignable : les actions échoueront jusqu'au retour de la connexion">🖧 ${escapeHtml(s.remote.label)} · hors ligne</span>`;
+}
+
 async function refreshServerList(selectId) {
   state.servers = await api("/servers");
+  try { state.remoteTargets = await api("/remote/hub"); } catch { state.remoteTargets = []; }
   const sel = $("#server-select");
   sel.innerHTML = `<option value="">${t("nav.none")}</option>` +
-    state.servers.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.mc_version})</option>`).join("");
+    state.servers.map((s) => `<option value="${s.id}">${s.remote ? "🖧 " : ""}${escapeHtml(s.name)} (${s.mc_version})${s.remote ? " · " + escapeHtml(s.remote.label) : ""}</option>`).join("");
   if (selectId) {
     state.currentServerId = selectId;
   }
@@ -189,6 +273,7 @@ async function render() {
       case "stats": return renderStats();
       case "network": return renderNetwork();
       case "remote": return renderRemote();
+      case "users": return renderUsers();
       case "docs": return renderDocs();
       case "assistant": return renderAssistant();
       case "settings": return renderSettings();
@@ -229,7 +314,7 @@ async function renderDashboard() {
         <tbody>
           ${rows.map(({ s, status }) => `
             <tr>
-              <td><b>${escapeHtml(s.name)}</b></td>
+              <td><b>${escapeHtml(s.name)}</b> ${remoteTag(s)}</td>
               <td>${s.loader}</td>
               <td>${s.mc_version}</td>
               <td>${status?.running ? '<span class="badge badge-green">En ligne</span>' : '<span class="badge badge-red">Arrêté</span>'}</td>
@@ -260,6 +345,19 @@ async function renderDashboard() {
   }));
 }
 
+// Where to create/import a server: here, or on a paired remote instance.
+function hostingSelectHtml(id) {
+  const targets = (state.remoteTargets || []).filter((x) => x.online);
+  if (!targets.length) return "";
+  return `<div class="form-row"><label>Héberger sur</label>
+    <select id="${id}"><option value="">Cette machine (local)</option>${targets.map((x) => `<option value="${escapeHtml(x.label)}">🖧 ${escapeHtml(x.label)} (${escapeHtml(x.host)})</option>`).join("")}</select>
+    <div style="font-size:11px;color:var(--overlay0);margin-top:4px">Sur une machine distante, le chemin d'un dossier à importer est celui de <b>cette machine-là</b>.</div></div>`;
+}
+function hostingHeaders(id) {
+  const v = $("#" + id)?.value;
+  return v ? { "x-mcm-target": v } : {};
+}
+
 // ───────────────────────── servers (list + create wizard) ─────────────────────────
 
 async function renderServers() {
@@ -284,9 +382,10 @@ async function renderServers() {
       <div class="stat-card">
         <div class="label">${s.loader.toUpperCase()} · ${s.mc_version}</div>
         <div class="value" style="font-size:16px">${escapeHtml(s.name)}</div>
+        ${s.remote ? `<div style="margin-top:6px">${remoteTag(s)}</div>` : ""}
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
-          <button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>
+          ${s.remote ? "" : `<button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>`}
           <button class="btn-red" data-del="${s.id}">${t('common.delete')}</button>
         </div>
       </div>
@@ -306,7 +405,9 @@ async function renderServers() {
       }
     }));
     $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {
-      if (!confirm("Supprimer définitivement ce serveur et tous ses fichiers (y compris les sauvegardes) ?")) return;
+      const rs = state.servers.find((x) => x.id === b.dataset.del);
+      const where = rs?.remote ? ` sur la machine distante « ${rs.remote.label} »` : "";
+      if (!confirm(`Supprimer définitivement ce serveur${where} et tous ses fichiers (y compris les sauvegardes) ?`)) return;
       const result = await api(`/servers/${b.dataset.del}`, { method: "DELETE" });
       if (result.warnings && result.warnings.length) {
         toast("Serveur retiré, mais : " + result.warnings.join(" / "), "error");
@@ -332,8 +433,9 @@ async function openImportForm() {
   form.classList.remove("hidden");
   form.innerHTML = `
     <h2>Importer un serveur existant</h2>
-    <div class="subtitle">Pour un serveur déjà présent sur cette machine (dossier avec un .jar dedans).</div>
+    <div class="subtitle">Pour un serveur déjà présent sur la machine choisie (dossier avec un .jar dedans).</div>
     <div class="form-grid">
+      ${hostingSelectHtml("i-host")}
       <div class="form-row"><label>Nom</label><input id="i-name" placeholder="Mon serveur importé"></div>
       <div class="form-row">
         <label>Type de serveur</label>
@@ -368,7 +470,7 @@ async function openImportForm() {
         jar_name: $("#i-jar").value || null,
         auto_restart: $("#i-autorestart").checked,
       };
-      const server = await api("/servers/import", { method: "POST", body: JSON.stringify(body) });
+      const server = await api("/servers/import", { method: "POST", headers: hostingHeaders("i-host"), body: JSON.stringify(body) });
       toast(`Serveur "${server.name}" importé !`, "success");
       renderServers();
     } catch (e) {
@@ -384,6 +486,7 @@ async function openWizard() {
   wizard.classList.remove("hidden");
   wizard.innerHTML = `
     <h2>Nouveau serveur</h2>
+    ${hostingSelectHtml("w-host")}
     <div class="form-row">
       <label>Nom du serveur</label>
       <input id="w-name" placeholder="Mon super serveur">
@@ -510,7 +613,7 @@ async function openWizard() {
         extra_args: extraArgs ? extraArgs.split(/\s+/) : [],
         auto_backup_minutes: autoBackup ? parseInt(autoBackup, 10) : null,
       };
-      const server = await api("/servers", { method: "POST", body: JSON.stringify(body) });
+      const server = await api("/servers", { method: "POST", headers: hostingHeaders("w-host"), body: JSON.stringify(body) });
       toast(`Serveur "${server.name}" créé !`, "success");
       state.currentServerId = server.id;
       renderServers();
@@ -1426,67 +1529,83 @@ async function renderNetwork() {
   $("#pl-stop").addEventListener("click", async () => { await api("/playit/stop", { method: "POST" }); renderNetwork(); });
 }
 
-// ───────────────────────── controle a distance (piloter une instance mcmanager-headless) ─────────────────────────
+// ───────────────────────── controle a distance ─────────────────────────
 //
 // The browser only ever talks plain HTTP to this app's own backend - all
-// the RSA/AES encryption to reach the actual remote instance happens
-// server-side (see src/remote.rs and the /api/remote/* routes).
+// the RSA/AES encryption to reach a remote instance happens server-side
+// (see src/remote.rs, src/hub.rs). Once paired, an instance's servers show
+// up in the normal dashboard / server list with a "distant" tag and work
+// like local ones: this tab is only for pairing and for the health of the links.
 
-let remoteSelectedTarget = null;
+function fmtDate(iso) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+}
 
 async function renderRemote() {
   const content = $("#content");
-  const targets = await api("/remote/targets");
-  if (!remoteSelectedTarget || !targets.some((t) => t.label === remoteSelectedTarget)) {
-    remoteSelectedTarget = targets[0]?.label || null;
-  }
+  const hub = await api("/remote/hub");
+  let info = null;
+  try { info = await api("/server/info"); } catch {}
 
   content.innerHTML = `
     <h1>🖧 ${t('view.remote')}</h1>
-    <div class="subtitle">Pilotez une autre instance MCManager (mode <code>mcmanager-headless</code>, typiquement sur un VPS) depuis cette interface — connexion chiffrée et authentifiée par échange de clés RSA.</div>
+    <div class="subtitle">Ajoutez d'autres machines MCManager (VPS, serveur maison, Raspberry Pi...) : leurs serveurs apparaissent ici <b>comme les vôtres</b>, avec une étiquette « distant ». Console, fichiers, mods/plugins, schematics, sauvegardes : tout fonctionne à l'identique, les actions sont exécutées sur la machine distante. Connexion chiffrée et authentifiée par échange de clés RSA.</div>
+
+    <div class="card">
+      <h2>Instances jumelées</h2>
+      ${hub.length ? `<table><thead><tr><th>Nom</th><th>Adresse</th><th>État</th><th>Serveurs</th><th>Latence</th><th></th></tr></thead><tbody>
+        ${hub.map((h) => `<tr>
+          <td><b>${escapeHtml(h.label)}</b></td>
+          <td>${escapeHtml(h.host)}</td>
+          <td>${h.online ? '<span class="badge badge-green">En ligne</span>' : `<span class="badge badge-red" title="${escapeHtml(h.last_error || "")}">Injoignable</span>`}${h.online ? "" : `<div style="font-size:11px;color:var(--overlay0);max-width:320px">${escapeHtml(h.last_error || "")}</div>`}</td>
+          <td>${h.server_count}</td>
+          <td>${h.latency_ms != null ? h.latency_ms + " ms" : "—"}</td>
+          <td><button class="btn-red" data-rm-forget="${escapeHtml(h.label)}">Oublier</button></td>
+        </tr>`).join("")}</tbody></table>
+        <p style="color:var(--overlay0);font-size:12px;margin-top:10px">Leurs serveurs sont dans le <b>Tableau de bord</b> et la liste des <b>Serveurs</b> (étiquette 🖧 distant). Pour en créer un directement sur une instance, choisissez « Héberger sur » dans l'assistant de création.</p>`
+        : '<div class="empty-state">Aucune instance jumelée pour l\'instant.</div>'}
+    </div>
 
     <div class="card">
       <h2>Jumeler une nouvelle instance</h2>
       <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
-        Sur la machine distante : <code>mcmanager-headless</code> → <code>remote enable &lt;port&gt;</code> puis <code>remote pairing-code</code> pour obtenir un code à usage unique (valide 10 minutes). Vérifiez que l'empreinte affichée ici correspond bien à celle donnée là-bas avant de valider.
+        Sur la machine distante (<code>mcmanager-server</code>) : ouvrez son interface web → onglet <i>Contrôle à distance</i> → <b>Générer un code de jumelage</b> (ou, en SSH : <code>remote pairing-code</code>). L'adresse est celle de son interface web (ex. <code>mon-vps:7777</code>) ; en mode <code>remote enable</code> c'est le port dédié (7778 par défaut). Comparez l'empreinte affichée après le jumelage avec celle de la machine distante.
       </p>
       <div class="form-grid">
-        <div class="form-row"><label>Adresse (hôte:port)</label><input id="rm-host" placeholder="192.168.1.42:7778"></div>
+        <div class="form-row"><label>Adresse (hôte:port)</label><input id="rm-host" placeholder="192.168.1.42:7777"></div>
         <div class="form-row"><label>Nom pour cette instance</label><input id="rm-label" placeholder="mon-vps"></div>
         <div class="form-row"><label>Code de jumelage</label><input id="rm-code" placeholder="03847680"></div>
       </div>
       <button class="btn-green" id="rm-pair">🔗 Jumeler</button>
+      <span id="rm-pair-status" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
 
+    ${hub.length ? `
     <div class="card">
-      <h2>Instances jumelées</h2>
-      ${targets.length ? `
-        <div class="form-row"><label>Instance</label>
-          <select id="rm-target-select">
-            ${targets.map((t) => `<option value="${escapeHtml(t.label)}" ${t.label === remoteSelectedTarget ? "selected" : ""}>${escapeHtml(t.label)} (${escapeHtml(t.host)})</option>`).join("")}
-          </select>
-        </div>
-        <button class="btn-red" id="rm-forget">Oublier cette instance</button>
-      ` : '<div class="empty-state">Aucune instance jumelée pour l\'instant.</div>'}
-    </div>
-
-    ${remoteSelectedTarget ? `
-    <div class="card">
-      <h2>Serveurs sur "${escapeHtml(remoteSelectedTarget)}"</h2>
-      <div id="rm-servers"><div class="empty-state">Chargement…</div></div>
-    </div>
-    <div class="card">
-      <h2>Envoyer un serveur local vers "${escapeHtml(remoteSelectedTarget)}"</h2>
-      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">Copie le dossier complet du serveur choisi vers l'instance distante et l'y enregistre comme nouveau serveur. Adapté à des serveurs de taille raisonnable — un très gros monde peut prendre du temps (un seul transfert, non repris en cas de coupure).</p>
+      <h2>Envoyer un serveur local vers une instance</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">Copie le dossier complet du serveur local choisi vers l'instance distante et l'y enregistre comme nouveau serveur (la copie locale reste en place). Transfert par blocs chiffrés, limité à 512 Mo : pour un très gros monde, préférez rsync/scp.</p>
       <div style="display:flex;gap:8px">
+        <select id="rm-deploy-target">${hub.map((h) => `<option value="${escapeHtml(h.label)}">${escapeHtml(h.label)}</option>`).join("")}</select>
         <select id="rm-deploy-select" style="flex:1">
-          ${state.servers.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.loader} ${s.mc_version})</option>`).join("")}
+          ${state.servers.filter((s) => !s.remote).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.loader} ${s.mc_version})</option>`).join("")}
         </select>
         <button class="btn-mauve" id="rm-deploy">📤 Envoyer</button>
       </div>
       <div id="rm-deploy-result" style="margin-top:8px;font-size:13px"></div>
-    </div>
-    ` : ""}
+    </div>` : ""}
+
+    ${info ? `
+    <div class="card">
+      <h2>Cette instance accepte le contrôle à distance</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">Empreinte (à comparer côté client) : <code>${escapeHtml(info.fingerprint)}</code></p>
+      <button class="btn-blue" id="rm-gen-code">🔑 Générer un code de jumelage (10 min, usage unique)</button>
+      <div id="rm-code-out" style="margin-top:10px;font-size:15px"></div>
+      <h2 style="margin-top:18px">Machines autorisées</h2>
+      ${info.clients.length ? `<table><thead><tr><th>Nom</th><th>Jumelée le</th><th>Dernière activité</th><th>Connectée</th><th></th></tr></thead><tbody>
+        ${info.clients.map((c) => `<tr><td><b>${escapeHtml(c.label)}</b><div style="font-size:11px;color:var(--overlay0)">${escapeHtml(c.id.slice(0, 23))}…</div></td><td>${fmtDate(c.paired_at)}</td><td>${fmtDate(c.last_used_at)}</td><td>${c.live_sessions > 0 ? `<span class="badge badge-green">${c.live_sessions} session(s)</span>` : "—"}</td><td><button class="btn-red" data-rm-revoke="${escapeHtml(c.id)}">Révoquer</button></td></tr>`).join("")}</tbody></table>`
+        : '<div class="empty-state">Aucune machine jumelée à cette instance.</div>'}
+    </div>` : ""}
   `;
 
   $("#rm-pair").addEventListener("click", async () => {
@@ -1494,81 +1613,124 @@ async function renderRemote() {
     const label = $("#rm-label").value.trim();
     const code = $("#rm-code").value.trim();
     if (!host || !label || !code) { toast("Renseignez l'adresse, le nom et le code.", "error"); return; }
+    $("#rm-pair-status").textContent = "Jumelage…";
     try {
       await api("/remote/targets", { method: "POST", body: JSON.stringify({ host, label, code }) });
-      toast(`Jumelé avec "${label}".`, "success");
-      remoteSelectedTarget = label;
+      toast(`Jumelé avec "${label}" : ses serveurs apparaissent dans le tableau de bord.`, "success");
       renderRemote();
     } catch (e) {
-      toast(e.message || "Échec du jumelage.", "error");
+      $("#rm-pair-status").textContent = e.message || "Échec du jumelage.";
     }
   });
 
-  if (targets.length) {
-    $("#rm-target-select").addEventListener("change", (e) => { remoteSelectedTarget = e.target.value; renderRemote(); });
-    $("#rm-forget").addEventListener("click", async () => {
-      if (!confirm(`Oublier l'instance "${remoteSelectedTarget}" ?`)) return;
-      await api(`/remote/targets/${encodeURIComponent(remoteSelectedTarget)}`, { method: "DELETE" });
-      remoteSelectedTarget = null;
-      renderRemote();
-    });
-  }
+  $$("[data-rm-forget]").forEach((b) => b.addEventListener("click", async () => {
+    const label = b.dataset.rmForget;
+    if (!confirm(`Oublier l'instance "${label}" ? Ses serveurs disparaissent d'ici (ils ne sont pas supprimés là-bas).`)) return;
+    await api(`/remote/targets/${encodeURIComponent(label)}`, { method: "DELETE" });
+    renderRemote();
+  }));
 
-  if (!remoteSelectedTarget) return;
-
-  const serversEl = $("#rm-servers");
-  try {
-    const result = await api(`/remote/${encodeURIComponent(remoteSelectedTarget)}/call`, { method: "POST", body: JSON.stringify({ action: "list" }) });
-    const servers = result.servers || [];
-    serversEl.innerHTML = servers.length ? servers.map((s) => `
-      <div class="mod-row">
-        <div>
-          <div class="name">${escapeHtml(s.name)}</div>
-          <div class="meta">${escapeHtml(s.loader)} · ${escapeHtml(s.mc_version)} · ${s.running ? '<span class="badge badge-green">En ligne</span>' : '<span class="badge badge-red">Arrêté</span>'}</div>
-        </div>
-        <div class="mod-actions">
-          <button class="btn-green" data-rm-start="${s.id}" ${s.running ? "disabled" : ""}>▶</button>
-          <button class="btn-red" data-rm-stop="${s.id}" ${s.running ? "" : "disabled"}>⏹</button>
-          <button class="btn-ghost" data-rm-restart="${s.id}">⟳</button>
-        </div>
-      </div>
-    `).join("") : '<div class="empty-state">Aucun serveur enregistré sur cette instance.</div>';
-
-    const callRemote = async (action, id) => {
-      try {
-        await api(`/remote/${encodeURIComponent(remoteSelectedTarget)}/call`, { method: "POST", body: JSON.stringify({ action, server_id: id }) });
-        toast("Commande envoyée.", "success");
-        renderRemote();
-      } catch (e) {
-        toast(e.message || "Échec.", "error");
-      }
-    };
-    $$("[data-rm-start]", serversEl).forEach((b) => b.addEventListener("click", () => callRemote("start", b.dataset.rmStart)));
-    $$("[data-rm-stop]", serversEl).forEach((b) => b.addEventListener("click", () => callRemote("stop", b.dataset.rmStop)));
-    $$("[data-rm-restart]", serversEl).forEach((b) => b.addEventListener("click", () => callRemote("restart", b.dataset.rmRestart)));
-  } catch (e) {
-    serversEl.innerHTML = `<div class="empty-state">Impossible de contacter cette instance : ${escapeHtml(e.message || "erreur inconnue")}</div>`;
-  }
+  $("#rm-gen-code")?.addEventListener("click", async () => {
+    const r = await api("/server/pairing-code", { method: "POST", body: JSON.stringify({}) });
+    $("#rm-code-out").innerHTML = `Code : <b style="font-size:20px;letter-spacing:2px">${escapeHtml(r.code)}</b> <span style="color:var(--overlay0);font-size:12px">(valide ${r.minutes} min, usage unique — ne le partagez que par un canal sûr)</span>`;
+  });
+  $$("[data-rm-revoke]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Révoquer cette machine ? Elle perdra immédiatement l'accès.")) return;
+    await api(`/server/clients/${encodeURIComponent(b.dataset.rmRevoke)}`, { method: "DELETE" });
+    renderRemote();
+  }));
 
   $("#rm-deploy")?.addEventListener("click", async () => {
     const serverId = $("#rm-deploy-select").value;
+    const label = $("#rm-deploy-target").value;
     if (!serverId) return;
     const btn = $("#rm-deploy");
     btn.disabled = true;
     btn.textContent = "Envoi en cours…";
     try {
-      const result = await api(`/remote/${encodeURIComponent(remoteSelectedTarget)}/deploy/${serverId}`, { method: "POST" });
+      const result = await api(`/remote/${encodeURIComponent(label)}/deploy/${serverId}`, { method: "POST" });
       $("#rm-deploy-result").textContent = result.server_id ? `Envoyé avec succès (id distant : ${result.server_id}).` : (result.error || "Terminé.");
       toast("Serveur envoyé.", "success");
-      renderRemote();
     } catch (e) {
       $("#rm-deploy-result").textContent = e.message || "Échec de l'envoi.";
-      toast(e.message || "Échec de l'envoi.", "error");
     } finally {
       btn.disabled = false;
       btn.textContent = "📤 Envoyer";
     }
   });
+}
+
+// ───────────────────────── utilisateurs & connexions (mode serveur) ─────────────────────────
+
+async function renderUsers() {
+  const content = $("#content");
+  const sessions = await (await fetch("/auth/sessions")).json().catch(() => []);
+  const isAdmin = state.me?.admin;
+  const users = isAdmin ? await (await fetch("/auth/users")).json().catch(() => []) : [];
+
+  content.innerHTML = `
+    <h1>👥 ${t('view.users')}</h1>
+    <div class="subtitle">Plusieurs personnes peuvent être connectées en même temps, chacune avec son compte et autant d'appareils qu'elle veut. Les modifications de fichiers sont « dernier enregistrement gagnant » : évitez d'éditer le même fichier à deux.</div>
+
+    <div class="card">
+      <h2>Connexions actives</h2>
+      <table><thead><tr><th>Utilisateur</th><th>Adresse</th><th>Navigateur</th><th>Dernière activité</th><th></th></tr></thead><tbody>
+        ${sessions.map((s) => `<tr>
+          <td><b>${escapeHtml(s.username)}</b> ${s.current ? '<span class="badge badge-blue">vous</span>' : ""}</td>
+          <td>${escapeHtml(s.ip)}</td>
+          <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s.user_agent)}">${escapeHtml(s.user_agent || "—")}</td>
+          <td>${fmtDate(s.last_seen)}</td>
+          <td>${s.current ? "" : `<button class="btn-red" data-kick="${escapeHtml(s.id)}">Déconnecter</button>`}</td>
+        </tr>`).join("")}
+      </tbody></table>
+    </div>
+
+    <div class="card">
+      <h2>Mon mot de passe</h2>
+      <div class="form-grid">
+        <div class="form-row"><label>Mot de passe actuel</label><input id="pw-cur" type="password" autocomplete="current-password"></div>
+        <div class="form-row"><label>Nouveau (8 caractères min.)</label><input id="pw-new" type="password" autocomplete="new-password"></div>
+      </div>
+      <button class="btn-blue" id="pw-save">Changer (déconnecte tous mes appareils)</button>
+    </div>
+
+    ${isAdmin ? `
+    <div class="card">
+      <h2>Comptes</h2>
+      <table><thead><tr><th>Utilisateur</th><th>Rôle</th><th>Créé le</th><th></th></tr></thead><tbody>
+        ${users.map((u) => `<tr><td><b>${escapeHtml(u.username)}</b></td><td>${u.admin ? "administrateur" : "utilisateur"}</td><td>${fmtDate(u.created_at)}</td><td><button class="btn-red" data-deluser="${escapeHtml(u.username)}">Supprimer</button></td></tr>`).join("")}
+      </tbody></table>
+      <h2 style="margin-top:16px">Ajouter un compte</h2>
+      <div class="form-grid">
+        <div class="form-row"><label>Nom</label><input id="nu-name" autocomplete="off"></div>
+        <div class="form-row"><label>Mot de passe</label><input id="nu-pass" type="password" autocomplete="new-password"></div>
+        <div class="form-row"><label><input type="checkbox" id="nu-admin"> Administrateur (comptes, jumelage de machines)</label></div>
+      </div>
+      <button class="btn-green" id="nu-add">Créer</button>
+    </div>` : ""}
+  `;
+
+  const post = async (url, body, method = "POST") => {
+    const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { toast(d.error || `Erreur ${r.status}`, "error"); throw new Error(d.error); }
+    return d;
+  };
+  $$("[data-kick]").forEach((b) => b.addEventListener("click", async () => { await post(`/auth/sessions/${b.dataset.kick}`, null, "DELETE"); renderUsers(); }));
+  $("#pw-save").addEventListener("click", async () => {
+    await post("/auth/password", { current: $("#pw-cur").value, new: $("#pw-new").value });
+    location.reload();
+  });
+  $("#nu-add")?.addEventListener("click", async () => {
+    await post("/auth/users", { username: $("#nu-name").value.trim(), password: $("#nu-pass").value, admin: $("#nu-admin").checked });
+    toast("Compte créé.", "success");
+    renderUsers();
+  });
+  $$("[data-deluser]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`Supprimer le compte « ${b.dataset.deluser} » ?`)) return;
+    await post(`/auth/users/${encodeURIComponent(b.dataset.deluser)}`, null, "DELETE");
+    renderUsers();
+  }));
 }
 
 // ───────────────────────── docs ─────────────────────────
@@ -2075,6 +2237,9 @@ async function checkUpdateBanner() {
 
 applyConsoleAppearance();
 setupNav();
-refreshServerList().then(render);
-checkUpdateBanner();
-setInterval(() => { if (state.view === "dashboard") renderDashboard(); }, 10000);
+authBoot().then((ok) => {
+  if (!ok) return; // login screen is showing; a successful login reloads the page
+  refreshServerList().then(render);
+  checkUpdateBanner();
+  setInterval(() => { if (state.view === "dashboard") renderDashboard(); }, 10000);
+});

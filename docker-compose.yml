@@ -1,0 +1,22 @@
+services:
+  mcmanager:
+    build: .
+    # image: ghcr.io/yo-le-zz/mcmanager:latest   # ou l'image publiee
+    container_name: mcmanager
+    restart: unless-stopped
+    ports:
+      - "7777:7777"          # interface web + controle a distance
+      - "25565:25565"        # un serveur Minecraft ; ajoutez une ligne par serveur/port cree
+    volumes:
+      - mcmanager-data:/data # serveurs, sauvegardes, comptes, cles : a sauvegarder
+    environment:
+      # Compte administrateur cree au premier demarrage (sinon mot de passe aleatoire dans `docker logs`)
+      MCMANAGER_ADMIN_USER: admin
+      MCMANAGER_ADMIN_PASSWORD: changez-moi-vite
+      # Derriere un reverse proxy HTTPS (Caddy, nginx, Traefik) :
+      # MCMANAGER_TRUST_PROXY: "1"
+      # MCMANAGER_COOKIE_SECURE: "1"
+    stop_grace_period: 90s   # laisse les serveurs Minecraft sauvegarder le monde
+
+volumes:
+  mcmanager-data:
