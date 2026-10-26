@@ -258,7 +258,7 @@ pub async fn proxy_middleware(State(state): State<AppState>, req: Request, next:
             Ok(id) => state.hub.label_for_server(id).await,
             Err(_) => None,
         }
-    } else if method == axum::http::Method::POST && (path == "/api/servers" || path == "/api/servers/import") {
+    } else if method == axum::http::Method::POST && (path == "/api/servers" || path == "/api/servers/import" || path == "/api/servers/import-zip") {
         match req.headers().get(TARGET_HEADER).and_then(|v| v.to_str().ok()) {
             Some(l) if !l.is_empty() && l != "local" => Some(l.to_string()),
             _ => None,

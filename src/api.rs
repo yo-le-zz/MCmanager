@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/presets", get(list_presets))
         .route("/api/servers", get(list_servers).post(create_server))
         .route("/api/servers/import", post(import_server))
+        .route("/api/servers/import-zip", post(import_server_zip))
         .route("/api/servers/:id", get(get_server).put(update_server).delete(delete_server))
         .route("/api/servers/:id/java/test", post(test_java))
         .route("/api/servers/:id/start", post(start_server))
@@ -319,6 +320,88 @@ async fn import_server(State(state): State<AppState>, Json(req): Json<ImportServ
         let mut servers = state.servers.write().await;
         servers.insert(id, entry.clone());
     }
+    save_servers(&state).await?;
+    Ok(Json(entry))
+}
+
+/// "Importer un serveur depuis une archive .zip" : crée un nouveau serveur géré
+/// à partir d'un .zip (export MCManager - onglet Fichiers -, sauvegarde, ou
+/// dossier de serveur zippé à la main). Contrairement à `import_server`, qui
+/// référence un dossier déjà présent sur la machine, les fichiers sont copiés
+/// dans le dossier de données de MCManager : il faut donc pouvoir l'envoyer
+/// depuis un navigateur, y compris vers une instance distante.
+/// Champs multipart : `file` (le .zip), `name`, `loader`, `mc_version`.
+async fn import_server_zip(State(state): State<AppState>, mut multipart: Multipart) -> AppResult<Json<ServerEntry>> {
+    let mut zip_bytes: Option<Vec<u8>> = None;
+    let (mut name, mut loader, mut mc_version) = (None::<String>, None::<String>, None::<String>);
+    while let Some(field) = multipart.next_field().await.map_err(|e| anyhow::anyhow!("envoi invalide: {e}"))? {
+        match field.name().unwrap_or("") {
+            "file" => zip_bytes = Some(field.bytes().await.map_err(|e| anyhow::anyhow!("lecture de l'archive impossible: {e}"))?.to_vec()),
+            "name" => name = Some(field.text().await.unwrap_or_default()),
+            "loader" => loader = Some(field.text().await.unwrap_or_default()),
+            "mc_version" => mc_version = Some(field.text().await.unwrap_or_default()),
+            _ => {}
+        }
+    }
+    let zip_bytes = zip_bytes.ok_or_else(|| anyhow::anyhow!("aucune archive .zip reçue"))?;
+    let loader: Loader = serde_json::from_value(serde_json::Value::String(loader.unwrap_or_default().to_lowercase()))
+        .map_err(|_| anyhow::anyhow!("type de serveur (loader) manquant ou inconnu"))?;
+    let mc_version = mc_version.filter(|v| !v.trim().is_empty()).ok_or_else(|| anyhow::anyhow!("version de Minecraft manquante"))?;
+    let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Serveur importé".to_string());
+
+    let id = Uuid::new_v4();
+    let folder = state.data_dir.join("servers").join(id.to_string());
+    tokio::fs::create_dir_all(&folder).await?;
+    let (folder2, bytes2) = (folder.clone(), zip_bytes);
+    let extracted = tokio::task::spawn_blocking(move || files::import_zip(&folder2, "", &bytes2))
+        .await
+        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))?;
+    if let Err(e) = extracted {
+        let _ = tokio::fs::remove_dir_all(&folder).await;
+        return Err(AppError(e));
+    }
+
+    // Archives zippées « à la main » : tout est souvent dans UN dossier racine.
+    // Si aucun .jar n'est à la racine mais qu'un seul sous-dossier existe, on le remonte d'un niveau.
+    if detect_jar(&folder).await.is_none() {
+        let mut subdirs = Vec::new();
+        if let Ok(mut rd) = tokio::fs::read_dir(&folder).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                if e.path().is_dir() {
+                    subdirs.push(e.path());
+                }
+            }
+        }
+        if subdirs.len() == 1 && detect_jar(&subdirs[0]).await.is_some() {
+            let inner = subdirs.remove(0);
+            if let Ok(mut rd) = tokio::fs::read_dir(&inner).await {
+                while let Ok(Some(e)) = rd.next_entry().await {
+                    let _ = tokio::fs::rename(e.path(), folder.join(e.file_name())).await;
+                }
+            }
+            let _ = tokio::fs::remove_dir(&inner).await;
+        }
+    }
+    let Some(jar_name) = detect_jar(&folder).await else {
+        let _ = tokio::fs::remove_dir_all(&folder).await;
+        return Err(AppError(anyhow::anyhow!("aucun .jar de serveur trouvé dans cette archive (server.jar, paper-*.jar, fabric-server-launch.jar...)")));
+    };
+
+    let java_path = state.config.read().await.java_path.clone();
+    let port = read_port_from_properties(&folder).await.unwrap_or(25565);
+    let eula_accepted = read_eula_accepted(&folder).await;
+    let entry = ServerEntry {
+        id, name, loader, mc_version, loader_version: None,
+        folder: folder.to_string_lossy().to_string(),
+        jar_name, java_path, xms_mb: 1024, xmx_mb: 2048, port,
+        extra_args: vec![], eula_accepted,
+        auto_backup_minutes: None, backup_retention: None,
+        auto_restart: false, auto_restart_delay_secs: 5,
+        scheduled_restart_minutes: None, stop_when_empty_minutes: None,
+        aikar_flags: false, managed_addons: vec![], dynamic_server: false,
+        created_at: chrono::Utc::now(),
+    };
+    state.servers.write().await.insert(id, entry.clone());
     save_servers(&state).await?;
     Ok(Json(entry))
 }

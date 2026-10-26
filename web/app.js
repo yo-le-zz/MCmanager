@@ -39,6 +39,34 @@ async function api(path, opts = {}) {
   return data;
 }
 
+
+// ───────────────────────── boîte de confirmation intégrée ─────────────────────────
+//
+// Remplace window.confirm(). Les navigateurs proposent « empêcher cette page de créer
+// d'autres boîtes de dialogue » ; une fois coché, confirm() renvoie toujours false et
+// tous les boutons protégés (arrêt, forcer l'arrêt, redémarrage...) deviennent muets.
+// Cette fenêtre fait partie de la page : le navigateur ne peut pas la bloquer.
+
+function confirmDialog(message, { confirmLabel = "Confirmer", cancelLabel = "Annuler" } = {}) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "login-overlay";
+    ov.style.zIndex = 1100;
+    ov.innerHTML = `<div class="login-box" role="dialog" aria-modal="true">
+      <div style="white-space:pre-wrap;line-height:1.5">${escapeHtml(String(message))}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+        <button class="btn-ghost" data-r="0">${escapeHtml(cancelLabel)}</button>
+        <button class="btn-blue" data-r="1">${escapeHtml(confirmLabel)}</button>
+      </div></div>`;
+    const done = (v) => { document.removeEventListener("keydown", onKey, true); ov.remove(); resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); done(false); } else if (e.key === "Enter") { e.stopPropagation(); done(true); } };
+    ov.addEventListener("click", (e) => { const r = e.target.dataset?.r; if (r !== undefined) done(r === "1"); else if (e.target === ov) done(false); });
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(ov);
+    ov.querySelector('[data-r="1"]').focus();
+  });
+}
+
 // ───────────────────────── connexion (mode serveur) ─────────────────────────
 //
 // Only present when MCManager is served with login enabled (mcmanager-server,
@@ -338,7 +366,7 @@ async function renderDashboard() {
     renderDashboard();
   }));
   $$("[data-stop]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Arrêter ce serveur ? Les joueurs connectés seront déconnectés.")) return;
+    if (!await confirmDialog("Arrêter ce serveur ? Les joueurs connectés seront déconnectés.")) return;
     await api(`/servers/${b.dataset.stop}/stop`, { method: "POST" });
     toast("Arrêt demandé.", "success");
     renderDashboard();
@@ -386,6 +414,7 @@ async function renderServers() {
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
           ${s.remote ? "" : `<button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>`}
+          <a class="btn-ghost" style="text-decoration:none;display:inline-flex;align-items:center" href="/api/servers/${s.id}/files/export?path=" title="Télécharger tout le serveur en .zip (réimportable via « Importer un serveur existant »)">📤 Exporter</a>
           <button class="btn-red" data-del="${s.id}">${t('common.delete')}</button>
         </div>
       </div>
@@ -407,7 +436,7 @@ async function renderServers() {
     $$("[data-del]").forEach((b) => b.addEventListener("click", async () => {
       const rs = state.servers.find((x) => x.id === b.dataset.del);
       const where = rs?.remote ? ` sur la machine distante « ${rs.remote.label} »` : "";
-      if (!confirm(`Supprimer définitivement ce serveur${where} et tous ses fichiers (y compris les sauvegardes) ?`)) return;
+      if (!await confirmDialog(`Supprimer définitivement ce serveur${where} et tous ses fichiers (y compris les sauvegardes) ?`)) return;
       const result = await api(`/servers/${b.dataset.del}`, { method: "DELETE" });
       if (result.warnings && result.warnings.length) {
         toast("Serveur retiré, mais : " + result.warnings.join(" / "), "error");
@@ -433,7 +462,7 @@ async function openImportForm() {
   form.classList.remove("hidden");
   form.innerHTML = `
     <h2>Importer un serveur existant</h2>
-    <div class="subtitle">Pour un serveur déjà présent sur la machine choisie (dossier avec un .jar dedans).</div>
+    <div class="subtitle">Deux façons : envoyer une archive .zip (le serveur est copié dans MCManager), ou indiquer un dossier déjà présent sur la machine choisie (il est utilisé sur place).</div>
     <div class="form-grid">
       ${hostingSelectHtml("i-host")}
       <div class="form-row"><label>Nom</label><input id="i-name" placeholder="Mon serveur importé"></div>
@@ -451,7 +480,8 @@ async function openImportForm() {
         </select>
       </div>
       <div class="form-row"><label>Version de Minecraft</label><input id="i-version" placeholder="1.21.11"></div>
-      <div class="form-row"><label>Dossier du serveur (chemin absolu sur cette machine)</label><input id="i-path" placeholder="/home/moi/serveurs/survie"></div>
+      <div class="form-row"><label>Archive .zip du serveur <span style="color:var(--overlay0)">(depuis votre ordinateur : export MCManager, sauvegarde, dossier zippé)</span></label><input id="i-zip" type="file" accept=".zip"></div>
+      <div class="form-row"><label>…ou dossier du serveur (chemin absolu sur la machine choisie)</label><input id="i-path" placeholder="/home/moi/serveurs/survie"></div>
       <div class="form-row"><label>Nom du .jar (optionnel, auto-détecté sinon)</label><input id="i-jar" placeholder="server.jar"></div>
       <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input id="i-autorestart" type="checkbox" style="width:auto"> Redémarrage automatique en cas de crash</label></div>
     </div>
@@ -462,6 +492,23 @@ async function openImportForm() {
     const status = $("#i-status");
     $("#i-submit").disabled = true;
     try {
+      const zipFile = $("#i-zip").files[0];
+      if (zipFile) {
+        // Import depuis une archive : envoi multipart, le serveur est créé dans le dossier de données.
+        status.textContent = "Envoi de l'archive…";
+        const fd = new FormData();
+        fd.append("name", $("#i-name").value || zipFile.name.replace(/\.zip$/i, ""));
+        fd.append("loader", $("#i-loader").value);
+        fd.append("mc_version", $("#i-version").value);
+        fd.append("file", zipFile);
+        const res = await fetch("/api/servers/import-zip", { method: "POST", headers: hostingHeaders("i-host"), body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
+        toast(`Serveur "${data.name}" importé depuis l'archive !`, "success");
+        await refreshServerList();
+        renderServers();
+        return;
+      }
       const body = {
         name: $("#i-name").value || "Serveur importé",
         loader: $("#i-loader").value,
@@ -675,7 +722,7 @@ function renderConsole() {
 
   async function sendOne(cmd) {
     if (DANGEROUS_COMMANDS.includes(cmd.toLowerCase())) {
-      if (!confirm(`Cette commande ("${cmd}") va arrêter ou recharger le serveur. Confirmer ?`)) return false;
+      if (!await confirmDialog(`Cette commande ("${cmd}") va arrêter ou recharger le serveur. Confirmer ?`)) return false;
     }
     if (ws.readyState === 1) ws.send(cmd);
     else await api(`/servers/${s.id}/command`, { method: "POST", body: JSON.stringify({ cmd }) });
@@ -715,12 +762,12 @@ function renderConsole() {
 
   $("#c-start").addEventListener("click", async () => { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Démarrage…", "success"); });
   $("#c-stop").addEventListener("click", async () => {
-    if (!confirm("Arrêter ce serveur ? Les joueurs connectés seront déconnectés.")) return;
+    if (!await confirmDialog("Arrêter ce serveur ? Les joueurs connectés seront déconnectés.")) return;
     await api(`/servers/${s.id}/stop`, { method: "POST" }); toast("Arrêt demandé.", "success");
   });
-  $("#c-kill").addEventListener("click", async () => { if (confirm("Forcer l'arrêt immédiat ? Risque de corruption du monde en cours de sauvegarde.")) { await api(`/servers/${s.id}/kill`, { method: "POST" }); } });
+  $("#c-kill").addEventListener("click", async () => { if (await confirmDialog("Forcer l'arrêt immédiat ? Risque de corruption du monde en cours de sauvegarde.")) { await api(`/servers/${s.id}/kill`, { method: "POST" }); } });
   $("#c-restart").addEventListener("click", async () => {
-    if (!confirm("Redémarrer ce serveur ? Les joueurs connectés seront déconnectés puis pourront se reconnecter.")) return;
+    if (!await confirmDialog("Redémarrer ce serveur ? Les joueurs connectés seront déconnectés puis pourront se reconnecter.")) return;
     try { await api(`/servers/${s.id}/stop`, { method: "POST" }); } catch {}
     setTimeout(async () => { try { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Redémarrage…", "success"); } catch {} }, 4000);
   });
@@ -731,7 +778,7 @@ function renderConsole() {
   // this same console via the WebSocket above, the toast at the end just
   // gives the final verdict.
   $("#c-debug").addEventListener("click", async () => {
-    if (!confirm(
+    if (!await confirmDialog(
       "Ce diagnostic va arrêter le serveur s'il tourne, désactiver temporairement tous les mods/plugins, " +
       "puis les tester un par un en redémarrant le serveur à chaque fois (ça peut prendre plusieurs minutes). " +
       "Tout sera remis dans l'état d'origine à la fin. Continuer ?"
@@ -835,7 +882,7 @@ async function renderFiles(path = "") {
   $("#f-import").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (!confirm(`Extraire "${file.name}" dans ${path ? "/" + path : "le dossier racine du serveur"} ? Les fichiers de même nom seront écrasés.`)) {
+    if (!await confirmDialog(`Extraire "${file.name}" dans ${path ? "/" + path : "le dossier racine du serveur"} ? Les fichiers de même nom seront écrasés.`)) {
       e.target.value = "";
       return;
     }
@@ -935,7 +982,7 @@ async function renderAddons() {
     renderAddons();
   }));
   $$("[data-remove]", modList).forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Supprimer ce fichier ?")) return;
+    if (!await confirmDialog("Supprimer ce fichier ?")) return;
     await api(`/servers/${s.id}/addons/${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
     renderAddons();
   }));
@@ -1211,7 +1258,7 @@ async function renderBackups() {
     renderBackups();
   });
   $$("[data-restore]", rows).forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Restaurer cette sauvegarde ? Le contenu actuel du serveur sera remplacé. Le serveur doit être arrêté.")) return;
+    if (!await confirmDialog("Restaurer cette sauvegarde ? Le contenu actuel du serveur sera remplacé. Le serveur doit être arrêté.")) return;
     await api(`/servers/${s.id}/backups/${encodeURIComponent(b.dataset.restore)}/restore`, { method: "POST" });
     toast("Sauvegarde restaurée.", "success");
   }));
@@ -1625,7 +1672,7 @@ async function renderRemote() {
 
   $$("[data-rm-forget]").forEach((b) => b.addEventListener("click", async () => {
     const label = b.dataset.rmForget;
-    if (!confirm(`Oublier l'instance "${label}" ? Ses serveurs disparaissent d'ici (ils ne sont pas supprimés là-bas).`)) return;
+    if (!await confirmDialog(`Oublier l'instance "${label}" ? Ses serveurs disparaissent d'ici (ils ne sont pas supprimés là-bas).`)) return;
     await api(`/remote/targets/${encodeURIComponent(label)}`, { method: "DELETE" });
     renderRemote();
   }));
@@ -1635,7 +1682,7 @@ async function renderRemote() {
     $("#rm-code-out").innerHTML = `Code : <b style="font-size:20px;letter-spacing:2px">${escapeHtml(r.code)}</b> <span style="color:var(--overlay0);font-size:12px">(valide ${r.minutes} min, usage unique — ne le partagez que par un canal sûr)</span>`;
   });
   $$("[data-rm-revoke]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("Révoquer cette machine ? Elle perdra immédiatement l'accès.")) return;
+    if (!await confirmDialog("Révoquer cette machine ? Elle perdra immédiatement l'accès.")) return;
     await api(`/server/clients/${encodeURIComponent(b.dataset.rmRevoke)}`, { method: "DELETE" });
     renderRemote();
   }));
@@ -1727,7 +1774,7 @@ async function renderUsers() {
     renderUsers();
   });
   $$("[data-deluser]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm(`Supprimer le compte « ${b.dataset.deluser} » ?`)) return;
+    if (!await confirmDialog(`Supprimer le compte « ${b.dataset.deluser} » ?`)) return;
     await post(`/auth/users/${encodeURIComponent(b.dataset.deluser)}`, null, "DELETE");
     renderUsers();
   }));
@@ -2221,7 +2268,7 @@ async function checkUpdateBanner() {
         $("#update-text").textContent = `Mise à jour ${info.latest_version} disponible !`;
         $("#update-apply-btn").classList.remove("hidden");
         $("#update-apply-btn").onclick = async () => {
-          if (!confirm("Télécharger et installer la mise à jour ? Redémarrez MCManager ensuite.")) return;
+          if (!await confirmDialog("Télécharger et installer la mise à jour ? Redémarrez MCManager ensuite.")) return;
           await api("/update/apply", { method: "POST" });
           toast("Mise à jour installée. Redémarrez MCManager.", "success");
         };

@@ -50,6 +50,20 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
   image publiée sur ghcr.io par le workflow de release.
 - Plus de CORS permissif sur l'interface (elle est same-origin) : une page web quelconque ne peut plus piloter une
   instance locale depuis le navigateur.
+### Builds ARM, installateurs, import/export
+- **Linux ARM64** (Raspberry Pi 4/5, serveurs et VPS ARM) : `./build.sh linux-arm64` produit `.deb` arm64 + archive portable
+  (cross-compilation via zig, compatible glibc 2.29+ : Raspberry Pi OS Bookworm, Ubuntu 20.04+).
+- **Windows ARM64** et **installateurs Inno Setup** : un installateur `.exe` par architecture (x86_64 et ARM64).
+- `./build.sh all` compile tout ce qui est possible sur la machine (Linux x86_64 + ARM64, Windows x86_64 + ARM64,
+  installateurs) et signale clairement ce qui manque ; le workflow GitHub compile chaque cible **nativement**
+  (runners `ubuntu-24.04-arm` et `windows-11-arm` inclus) et publie une image Docker multi-architecture (amd64 + arm64).
+- `Cargo.toml` : `autobins = false` (un ancien `src/bin/*.rs` oublié n'est plus compilé par erreur).
+- **Importer un serveur depuis une archive .zip** (nouveau, formulaire « Importer un serveur existant » : fonctionne aussi
+  vers une instance distante) et bouton **📤 Exporter** sur chaque serveur (zip complet, réimportable).
+- Interface : les 14 boîtes `confirm()` natives sont remplacées par une fenêtre intégrée. Quand le navigateur bloquait les
+  dialogues (« empêcher cette page de créer d'autres boîtes de dialogue »), Arrêter / Forcer l'arrêt / Redémarrer et la
+  commande `stop` de la console ne faisaient plus rien.
+
 ### Retiré
 - **Support Nix** (flake, module NixOS, `packaging/nix`, tuto GLF OS, tâche CI et `build.sh nix`) : on se concentre sur Linux.
 ### Déjà présent dans cette version (publié plus tôt)

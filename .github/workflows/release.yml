@@ -8,75 +8,87 @@ on:
 
 # Required for softprops/action-gh-release to create/update a GitHub Release
 # with the default GITHUB_TOKEN. Without this, the publish job fails with
-# "403 Resource not accessible by integration" even though the workflow
-# otherwise runs fine - the token defaults to read-only content access on
-# repos where that's the org/repo setting.
+# "403 Resource not accessible by integration".
 permissions:
   contents: write
 
 jobs:
+  # ---------------------------------------------------------------- Linux
+  # Chaque architecture est compilee NATIVEMENT sur son propre runner
+  # (aucune cross-compilation : meme resultat que sur la machine cible).
   linux:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            task: linux
+          - arch: aarch64
+            runner: ubuntu-24.04-arm   # Raspberry Pi 4/5, serveurs et VPS ARM64
+            task: linux-arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y dpkg-dev
-      # NOTE: `build.sh installer` (the Windows Inno Setup step) is NOT run
-      # here - Inno Setup only exists on Windows, so ISCC.exe is never
-      # available on this ubuntu-latest runner and the .exe was silently
-      # never produced. That step now runs in the windows job below, where
-      # the compiled .exe files it needs to package actually exist.
-      - run: chmod +x build.sh && ./build.sh linux
+      # Sur le runner ARM la compilation est native (build.sh ne cross-compile
+      # que lorsque le CPU de la machine differe de la cible).
+      - run: chmod +x build.sh && ./build.sh ${{ matrix.task }}
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-artifacts
+          name: linux-${{ matrix.arch }}-artifacts
           path: |
             dist/*.deb
             dist/*.tar.gz
-            dist/install-linux.sh
 
+  # -------------------------------------------------------------- Windows
   windows:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm     # Windows sur ARM (Surface, PC Copilot+)
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      # --bins: build every [[bin]] target (mcmanager + mcmanager-server),
-      # not just the default one. A plain `cargo build --release` happens to
-      # also build both here since there's no workspace default-members
-      # override, but being explicit keeps this in sync with build.sh's
-      # Linux/Windows steps instead of silently diverging if that ever
-      # changes.
+      # --bins: build every [[bin]] target (mcmanager + mcmanager-server).
       - run: cargo build --release --bins
-      - run: |
-          mkdir dist
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
           $ver = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches.Groups[1].Value
-          $out = "dist/mcmanager-$ver-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path $out
+          $out = "dist/mcmanager-$ver-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
           Copy-Item target/release/mcmanager.exe $out/
           Copy-Item target/release/mcmanager-server.exe $out/
           Copy-Item -Recurse web $out/web
           Copy-Item README.md,LICENSE,CHANGELOG.md $out/
-          Compress-Archive -Path $out -DestinationPath "dist/mcmanager-$ver-windows-x86_64.zip"
-        shell: pwsh
-      # Produces dist/mcmanager-<version>-setup.exe. Needs the two binaries
-      # already built above (build.sh's install script embeds them via the
-      # generated .iss [Files] section, matching the folder just created).
+          Compress-Archive -Path $out -DestinationPath "dist/mcmanager-$ver-windows-${{ matrix.arch }}.zip"
+      # Installateur .exe (Suivant > Suivant > Installer), un par architecture.
       - name: Install Inno Setup
+        shell: pwsh
         run: choco install innosetup -y --no-progress
-        shell: pwsh
       - name: Add Inno Setup to PATH
-        run: echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: pwsh
+        run: echo "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build Windows installer (.exe)
-        run: bash build.sh installer
         shell: bash
+        run: bash build.sh installer
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-artifacts
+          name: windows-${{ matrix.arch }}-artifacts
           path: |
             dist/*.zip
-            dist/*.exe
+            dist/mcmanager-*-setup.exe
 
+  # --------------------------------------------------------------- Docker
+  # Image multi-architecture (amd64 + arm64) : `docker pull` choisit seul.
   docker:
     runs-on: ubuntu-latest
     permissions:
@@ -84,6 +96,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -95,11 +108,13 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/mcmanager:${{ steps.meta.outputs.tag }}
             ghcr.io/${{ github.repository_owner }}/mcmanager:latest
 
+  # -------------------------------------------------------------- Publish
   publish:
     needs: [linux, windows, docker]
     runs-on: ubuntu-latest
@@ -107,12 +122,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
-      - name: Download release artifacts
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
-          pattern: "*-artifacts"
           path: artifacts
-          merge-multiple: false
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:

@@ -34,7 +34,7 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Serveurs distants intégrés** : jumelez une autre machine MCManager (VPS, serveur maison, Raspberry Pi) et **ses serveurs apparaissent dans votre tableau de bord comme les vôtres**, avec une étiquette « distant » — console en direct, fichiers, mods/plugins, schematics, sauvegardes, démarrage/arrêt, création directe là-bas. Chiffrement RSA + AES-256-GCM, requêtes signées et non rejouables, plusieurs machines et sessions simultanées.
 - **Service permanent et Docker** : `systemctl enable --now mcmanager-server` (utilisateur dédié, redémarrage automatique) ou `docker compose up -d`. Le contrôle à distance ne s'éteint plus à la fermeture d'un terminal.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
-- **Plateformes** : Linux (.deb, script d'installation, Docker) et Windows (installateur / zip portable).
+- **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : .deb, archive portable, Docker multi-arch) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). `./build.sh all` ou le workflow GitHub compilent tout.
 
 ### Mise à jour automatique selon le type d'installation
 | Installation | Comportement |

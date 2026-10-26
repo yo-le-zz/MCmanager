@@ -411,4 +411,69 @@ mod tests {
         assert_eq!(call(&app, bad).await.status(), StatusCode::UNAUTHORIZED);
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
+
+    /// Import d'un serveur depuis une archive : zip « fait à la main » avec un dossier racine,
+    /// jar auto-détecté, port lu dans server.properties, fichiers remontés à la racine.
+    #[tokio::test]
+    async fn import_server_from_zip_archive() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("mcmanager-zip-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let state = crate::state::build_state_for_test(&dir).await;
+        let app = build_app(state.clone(), WebOptions { web_dir: dir.to_string_lossy().to_string(), auth: None, remote: None });
+
+        let mut zip_bytes = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+            let opts: zip::write::FileOptions = zip::write::FileOptions::default();
+            zw.start_file("mon-serveur/paper-1.21.4-100.jar", opts).unwrap();
+            zw.write_all(b"fake jar").unwrap();
+            zw.start_file("mon-serveur/server.properties", opts).unwrap();
+            zw.write_all(b"server-port=25599\n").unwrap();
+            zw.start_file("mon-serveur/world/level.dat", opts).unwrap();
+            zw.write_all(b"data").unwrap();
+            zw.finish().unwrap();
+        }
+        let boundary = "XBOUNDARYX";
+        let mut body: Vec<u8> = Vec::new();
+        for (k, v) in [("name", "Importé"), ("loader", "paper"), ("mc_version", "1.21.4")] {
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+        }
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"s.zip\"\r\nContent-Type: application/zip\r\n\r\n").as_bytes());
+        body.extend_from_slice(&zip_bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let req = Request::builder().method("POST").uri("/api/servers/import-zip")
+            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}")).body(Body::from(body)).unwrap();
+        let resp = call(&app, req).await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        let entry: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(entry["jar_name"], "paper-1.21.4-100.jar");
+        assert_eq!(entry["port"], 25599);
+        let folder = std::path::PathBuf::from(entry["folder"].as_str().unwrap());
+        assert!(folder.join("world/level.dat").exists(), "files must be flattened out of the wrapper directory");
+        assert!(folder.join("paper-1.21.4-100.jar").exists());
+
+        // Archive sans .jar : refusée proprement, rien ne reste sur disque.
+        let mut bad = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut bad));
+            zw.start_file("readme.txt", zip::write::FileOptions::default()).unwrap();
+            zw.write_all(b"x").unwrap();
+            zw.finish().unwrap();
+        }
+        let mut body2: Vec<u8> = Vec::new();
+        for (k, v) in [("loader", "paper"), ("mc_version", "1.21.4")] {
+            body2.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+        }
+        body2.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"s.zip\"\r\n\r\n").as_bytes());
+        body2.extend_from_slice(&bad);
+        body2.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let req = Request::builder().method("POST").uri("/api/servers/import-zip")
+            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}")).body(Body::from(body2)).unwrap();
+        assert_ne!(call(&app, req).await.status(), StatusCode::OK);
+        assert_eq!(state.servers.read().await.len(), 1);
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
 }
