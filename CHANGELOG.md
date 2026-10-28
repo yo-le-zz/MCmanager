@@ -50,6 +50,20 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
   image publiée sur ghcr.io par le workflow de release.
 - Plus de CORS permissif sur l'interface (elle est same-origin) : une page web quelconque ne peut plus piloter une
   instance locale depuis le navigateur.
+### Bot Discord (nouveau, voir docs/DISCORD.md)
+- **Notifications** (embed dans un salon, ou simple webhook sans bot) : démarrage, serveur prêt, arrêt, crash, sauvegarde,
+  redémarrage programmé, arrêt automatique, connexion/déconnexion de joueur ; chaque type s'active séparément.
+- **Commandes slash** `/mc liste | statut | joueurs | demarrer | arreter | redemarrer | commande` avec autocomplétion du
+  serveur, y compris pour les serveurs des instances distantes jumelées. Connexion sortante vers la passerelle Discord :
+  aucun port ni domaine à ouvrir.
+- Sécurité : refus par défaut (aucun opérateur = aucun pilotage), commandes limitées à votre serveur Discord, token et
+  webhook chiffrés sur disque, actions journalisées. Testé contre un faux Discord (passerelle WebSocket + REST) : identification,
+  battements de cœur, reprise de session, enregistrement des commandes, permissions.
+- Nouveaux évènements « démarrage », « prêt » et « arrêt volontaire » (aussi disponibles pour de futurs canaux).
+### Domaines et redirections (nouveau, voir docs/DOMAINS.md)
+- Onglet **🔗 Domaines** : un domaine par serveur (et pour l'interface), génération des enregistrements DNS (A / SRV), de la
+  config nginx (proxy TCP `stream`, reverse proxy web avec WebSocket + HTTPS certbot) et d'un Caddyfile. Rien n'est appliqué
+  automatiquement. Domaine affiché sur les cartes de serveur. Valeurs validées (pas d'injection de directives).
 ### Builds ARM, installateurs, import/export
 - **Linux ARM64** (Raspberry Pi 4/5, serveurs et VPS ARM) : `./build.sh linux-arm64` produit `.deb` arm64 + archive portable
   (cross-compilation via zig, compatible glibc 2.29+ : Raspberry Pi OS Bookworm, Ubuntu 20.04+).

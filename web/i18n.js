@@ -63,6 +63,8 @@ const TRANSLATIONS = {
     "view.network": "Réseau",
     "view.remote": "Contrôle à distance",
     "view.users": "Utilisateurs et connexions",
+    "nav.domains": "🔗 Domaines",
+    "view.domains": "Domaines et redirections",
     "view.assistant": "Assistant IA",
     "view.settings": "Paramètres",
 
@@ -132,6 +134,8 @@ const TRANSLATIONS = {
     "view.network": "Network",
     "view.remote": "Remote control",
     "view.users": "Users and connections",
+    "nav.domains": "🔗 Domains",
+    "view.domains": "Domains and redirects",
     "view.assistant": "AI Assistant",
     "view.settings": "Settings",
 
@@ -201,6 +205,8 @@ const TRANSLATIONS = {
     "view.network": "Red",
     "view.remote": "Control remoto",
     "view.users": "Usuarios y conexiones",
+    "nav.domains": "🔗 Dominios",
+    "view.domains": "Dominios y redirecciones",
     "view.assistant": "Asistente IA",
     "view.settings": "Ajustes",
 

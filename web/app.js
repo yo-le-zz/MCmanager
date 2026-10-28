@@ -302,6 +302,7 @@ async function render() {
       case "network": return renderNetwork();
       case "remote": return renderRemote();
       case "users": return renderUsers();
+      case "domains": return renderDomains();
       case "docs": return renderDocs();
       case "assistant": return renderAssistant();
       case "settings": return renderSettings();
@@ -411,6 +412,7 @@ async function renderServers() {
         <div class="label">${s.loader.toUpperCase()} · ${s.mc_version}</div>
         <div class="value" style="font-size:16px">${escapeHtml(s.name)}</div>
         ${s.remote ? `<div style="margin-top:6px">${remoteTag(s)}</div>` : ""}
+        ${s.domain ? `<div style="margin-top:6px;font-size:12px;color:var(--subtext1)" title="Domaine configuré dans l'onglet Réseau">🌐 ${escapeHtml(s.domain)}${s.public_port && s.public_port !== 25565 ? ":" + s.public_port : ""}</div>` : ""}
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
           ${s.remote ? "" : `<button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>`}
@@ -1707,6 +1709,90 @@ async function renderRemote() {
   });
 }
 
+// ───────────────────────── réseau : domaines, DNS, nginx ─────────────────────────
+//
+// MCManager ne modifie jamais nginx ni le DNS : il génère la configuration à
+// relire et appliquer soi-même (voir src/network.rs pour le pourquoi de chaque mode).
+
+async function renderDomains() {
+  const content = $("#content");
+  const data = await api("/network");
+  const cfg = data.config;
+  const g = data.generated;
+
+  const block = (id, title, text) => text ? `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">${title}</h2><button class="btn-ghost" data-copy="${id}">📋 Copier</button></div>
+      <pre id="${id}" style="margin-top:10px;white-space:pre-wrap;word-break:break-all;background:var(--crust);padding:12px;border-radius:8px;font-size:12px;max-height:340px;overflow:auto">${escapeHtml(text)}</pre>
+    </div>` : "";
+
+  content.innerHTML = `
+    <h1>🔗 Domaines et redirections</h1>
+    <div class="subtitle">Donnez un nom à vos serveurs (<code>play.exemple.fr</code>) et à l'interface web (<code>mc.exemple.fr</code>). MCManager <b>génère</b> les enregistrements DNS et les configurations nginx / Caddy ; vous les relisez et les appliquez vous-même (rien n'est modifié automatiquement).</div>
+
+    <div class="card">
+      <h2>Interface web</h2>
+      <div class="form-grid">
+        <div class="form-row"><label>Domaine de l'interface (facultatif)</label><input id="nw-web" placeholder="mc.exemple.fr" value="${escapeHtml(cfg.web_domain)}"></div>
+        <div class="form-row"><label>Port de l'interface</label><input id="nw-webport" type="number" value="${cfg.web_port}"></div>
+        <div class="form-row"><label>IP publique (pour pré-remplir le DNS)</label>
+          <div style="display:flex;gap:6px"><input id="nw-ip" placeholder="203.0.113.7" value="${escapeHtml(cfg.public_ip)}"><button class="btn-ghost" id="nw-detect" title="Interroge api.ipify.org">Détecter</button></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Domaine de chaque serveur</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
+        <b>DNS seul (SRV)</b> — recommandé : les joueurs tapent le domaine sans port, même si le serveur écoute sur un autre port. Aucune machine intermédiaire.<br>
+        <b>Proxy nginx</b> — pour un port public différent, ou cacher la machine qui héberge réellement le serveur (serveur d'une instance distante, VPS en façade). Un port public par serveur : nginx ne lit pas l'adresse du handshake Minecraft.
+      </p>
+      ${data.servers.length ? `<table><thead><tr><th>Serveur</th><th>Port</th><th>Domaine</th><th>Mode</th><th>Port public</th></tr></thead><tbody>
+        ${data.servers.map((sv) => {
+          const sd = cfg.servers[sv.id] || {};
+          return `<tr data-nw-row="${sv.id}">
+            <td><b>${escapeHtml(sv.name)}</b> ${sv.remote ? `<span class="badge badge-mauve">🖧 ${escapeHtml(sv.remote)}</span>` : ""}</td>
+            <td>${sv.port}</td>
+            <td><input data-nw="domain" placeholder="play.exemple.fr" value="${escapeHtml(sd.domain || "")}"></td>
+            <td><select data-nw="mode"><option value="srv" ${sd.mode !== "proxy" ? "selected" : ""}>DNS seul (SRV)</option><option value="proxy" ${sd.mode === "proxy" ? "selected" : ""}>Proxy nginx</option></select></td>
+            <td><input data-nw="public_port" type="number" style="width:90px" value="${sd.public_port || 25565}"></td>
+          </tr>`;
+        }).join("")}</tbody></table>` : '<div class="empty-state">Aucun serveur.</div>'}
+      <div style="margin-top:12px"><button class="btn-green" id="nw-save">Enregistrer et générer</button><span id="nw-msg" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span></div>
+    </div>
+
+    ${block("nw-dns", "Enregistrements DNS (chez votre registrar)", g.dns)}
+    ${block("nw-stream", "nginx — proxy TCP des serveurs Minecraft", g.nginx_stream)}
+    ${block("nw-web-conf", "nginx — interface web (HTTP + WebSocket)", g.nginx_web)}
+    ${block("nw-caddy", "Caddy — interface web (HTTPS automatique, plus simple)", g.caddy)}
+    ${g.notes.length ? `<div class="card"><h2>À savoir</h2><ul style="margin:0;padding-left:18px;color:var(--subtext1);font-size:13px;line-height:1.6">${g.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul></div>` : ""}
+  `;
+
+  $$("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText($("#" + b.dataset.copy).textContent); toast("Copié.", "success"); }
+    catch { toast("Copie impossible : sélectionnez le texte à la main.", "error"); }
+  }));
+  $("#nw-detect").addEventListener("click", async () => {
+    try { $("#nw-ip").value = (await api("/network/detect-ip", { method: "POST" })).ip; } catch {}
+  });
+  $("#nw-save").addEventListener("click", async () => {
+    const servers = {};
+    $$("[data-nw-row]").forEach((row) => {
+      const domain = row.querySelector('[data-nw="domain"]').value.trim().toLowerCase();
+      if (!domain) return;
+      servers[row.dataset.nwRow] = { domain, mode: row.querySelector('[data-nw="mode"]').value, public_port: parseInt(row.querySelector('[data-nw="public_port"]').value, 10) || 25565 };
+    });
+    await api("/network", { method: "PUT", body: JSON.stringify({
+      web_domain: $("#nw-web").value.trim().toLowerCase(),
+      web_port: parseInt($("#nw-webport").value, 10) || 7777,
+      public_ip: $("#nw-ip").value.trim(),
+      servers,
+    }) });
+    toast("Réseau enregistré.", "success");
+    await refreshServerList();
+    renderDomains();
+  });
+}
+
 // ───────────────────────── utilisateurs & connexions (mode serveur) ─────────────────────────
 
 async function renderUsers() {
@@ -2030,6 +2116,8 @@ async function renderSettings() {
   const cfg = await api("/settings");
   const s = currentServer();
   const appearance = getConsoleAppearance();
+  let discordCfg, discordStatus = { state: "disabled", detail: "" };
+  try { discordCfg = await api("/discord/config"); discordStatus = await api("/discord/status"); } catch { discordCfg = { enabled: false, has_token: false, has_webhook: false, guild_id: "", channel_id: "", operator_user_ids: "", operator_role_ids: "", viewer_role_ids: "", notify_started: true, notify_ready: true, notify_stopped: true, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   let ntfyCfg;
   try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   content.innerHTML = `
@@ -2089,6 +2177,35 @@ async function renderSettings() {
         <button class="btn-green" id="nt-save">${t('common.save')}</button>
         <button class="btn-ghost" id="nt-test">📨 Envoyer un test</button>
       </div>
+    </div>
+    <div class="card">
+      <h2>🤖 Bot Discord</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
+        Notifications dans un salon (démarrage, serveur prêt, arrêt, crash, sauvegarde…) <b>et</b> commandes <code>/mc liste</code>, <code>/mc statut</code>, <code>/mc demarrer</code>, <code>/mc arreter</code>, <code>/mc redemarrer</code>, <code>/mc commande</code> directement depuis Discord. Le bot se connecte <i>vers</i> Discord : aucun port à ouvrir, aucun domaine nécessaire. Pour de simples notifications sans bot, un <b>webhook</b> suffit.
+        <br><b>Mise en place :</b> 1) <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a> → New Application → Bot → copiez le token. 2) Invitez le bot sur votre serveur avec les portées <code>bot</code> + <code>applications.commands</code> (permission « Envoyer des messages »). 3) Activez le mode développeur de Discord (Paramètres → Avancé) pour copier les identifiants (clic droit → Copier l'identifiant).
+      </p>
+      <div style="margin-bottom:10px">État : ${discordStatus.state === "connected" ? `<span class="badge badge-green">Connecté</span> ${escapeHtml(discordStatus.detail || "")}${discordStatus.commands_registered ? " · commandes enregistrées" : " · enregistrement des commandes…"}` : discordStatus.state === "connecting" ? '<span class="badge badge-mauve">Connexion…</span>' : discordStatus.state === "error" ? `<span class="badge badge-red">Erreur</span> ${escapeHtml(discordStatus.detail || "")}` : '<span class="badge">Inactif</span>'}</div>
+      <div class="form-grid">
+        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="dc-enabled" style="width:auto" ${discordCfg.enabled ? "checked" : ""}> Activer</label></div>
+        <div class="form-row"><label>Token du bot ${discordCfg.has_token ? '<span class="meta">(configuré)</span>' : ""}</label><input id="dc-token" type="password" autocomplete="off" placeholder="${discordCfg.has_token ? "Laisser vide pour conserver" : "MTE2…"}"></div>
+        <div class="form-row"><label>Identifiant du serveur Discord (guilde)</label><input id="dc-guild" placeholder="123456789012345678" value="${escapeHtml(discordCfg.guild_id)}"></div>
+        <div class="form-row"><label>Salon des notifications (identifiant)</label><input id="dc-channel" placeholder="123456789012345678" value="${escapeHtml(discordCfg.channel_id)}"></div>
+        <div class="form-row"><label>…ou URL de webhook (sans bot) ${discordCfg.has_webhook ? '<span class="meta">(configuré, « - » pour supprimer)</span>' : ""}</label><input id="dc-webhook" type="password" autocomplete="off" placeholder="${discordCfg.has_webhook ? "Laisser vide pour conserver" : "https://discord.com/api/webhooks/…"}"></div>
+      </div>
+      <h2 style="margin-top:14px">Qui peut piloter ?</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px"><b>Opérateurs</b> : démarrer, arrêter, redémarrer, envoyer des commandes. <b>Par défaut personne</b> : renseignez au moins un utilisateur ou un rôle. Les commandes de lecture (liste, statut, joueurs) sont ouvertes à tous les membres, sauf si vous indiquez des rôles de lecture. Identifiants séparés par des virgules.</p>
+      <div class="form-grid">
+        <div class="form-row"><label>Opérateurs — utilisateurs</label><input id="dc-op-users" value="${escapeHtml(discordCfg.operator_user_ids)}"></div>
+        <div class="form-row"><label>Opérateurs — rôles</label><input id="dc-op-roles" value="${escapeHtml(discordCfg.operator_role_ids)}"></div>
+        <div class="form-row"><label>Rôles autorisés en lecture (vide = tous)</label><input id="dc-view-roles" value="${escapeHtml(discordCfg.viewer_role_ids)}"></div>
+      </div>
+      <h2 style="margin-top:14px">Notifications</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:12px">
+        ${[["started","Démarrage"],["ready","Serveur prêt"],["stopped","Arrêt"],["crash","Crash"],["backup","Sauvegarde"],["scheduled_restart","Redémarrage programmé"],["auto_stop","Arrêt auto (inactif)"],["player_join_leave","Connexion/déconnexion joueur"]].map(([k, label]) => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="dc-n-${k}" style="width:auto" ${discordCfg["notify_" + k] ? "checked" : ""}> ${label}</label>`).join("")}
+      </div>
+      <button class="btn-green" id="dc-save">${t('common.save')}</button>
+      <button class="btn-ghost" id="dc-test">📨 Envoyer un test</button>
+      <span id="dc-msg" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
     <div class="card">
       <h2>Général</h2>
@@ -2178,6 +2295,35 @@ async function renderSettings() {
       toast(e.message || "Échec de l'enregistrement.", "error");
     }
   });
+  const discordBody = () => ({
+    enabled: $("#dc-enabled").checked,
+    bot_token: $("#dc-token").value,
+    webhook_url: $("#dc-webhook").value,
+    guild_id: $("#dc-guild").value,
+    channel_id: $("#dc-channel").value,
+    operator_user_ids: $("#dc-op-users").value,
+    operator_role_ids: $("#dc-op-roles").value,
+    viewer_role_ids: $("#dc-view-roles").value,
+    ...Object.fromEntries(["started", "ready", "stopped", "crash", "backup", "scheduled_restart", "auto_stop", "player_join_leave"].map((k) => ["notify_" + k, $("#dc-n-" + k).checked])),
+  });
+  $("#dc-save").addEventListener("click", async () => {
+    await api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
+    toast("Réglages Discord enregistrés.", "success");
+    // Le bot se (re)connecte en quelques secondes : on relit l'état avant de réafficher.
+    setTimeout(renderSettings, 2500);
+  });
+  $("#dc-test").addEventListener("click", async () => {
+    $("#dc-msg").textContent = "Envoi…";
+    try {
+      await api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
+      await api("/discord/test", { method: "POST" });
+      $("#dc-msg").textContent = "";
+      toast("Message de test envoyé sur Discord.", "success");
+    } catch (e) {
+      $("#dc-msg").textContent = "";
+    }
+  });
+
   $("#nt-test").addEventListener("click", async () => {
     try {
       await api("/ntfy/test", { method: "POST" });

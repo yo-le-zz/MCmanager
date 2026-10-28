@@ -65,6 +65,11 @@ pub async fn start_server(state: &AppState, id: Uuid) -> Result<()> {
     }
 
     crate::history::record_boot_start(&state.data_dir, id).await;
+    {
+        let name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
+        let st = state.clone();
+        tokio::spawn(async move { crate::discord::notify(&st, crate::discord::Event::Started, &name, "Le serveur est en cours de démarrage…").await; });
+    }
 
     if let Some(stdout) = stdout {
         spawn_reader(state.clone(), id, stdout);
@@ -108,11 +113,23 @@ fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(state: AppStat
     tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            // "Done (3.2s)! For help, type "help"" : le serveur accepte les joueurs.
+            if line.contains("Done (") && line.contains("For help") {
+                let st = state.clone();
+                tokio::spawn(async move {
+                    let name = st.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
+                    crate::discord::notify(&st, crate::discord::Event::Ready, &name, "Le serveur est prêt : les joueurs peuvent se connecter.").await;
+                });
+            }
             if let Some((player, joined)) = parse_join_leave(&line) {
                 let state = state.clone();
                 tokio::spawn(async move {
                     let name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
                     let verb = if joined { "a rejoint" } else { "a quitte" };
+                    crate::discord::notify(
+                        &state, if joined { crate::discord::Event::PlayerJoin } else { crate::discord::Event::PlayerLeave },
+                        &name, &format!("**{player}** {verb} le serveur."),
+                    ).await;
                     crate::ntfy::notify(
                         &state.http, &state.data_dir, crate::ntfy::Event::PlayerJoinLeave,
                         &format!("{name} : joueur {}", if joined { "connecte" } else { "deconnecte" }),
@@ -177,10 +194,14 @@ fn spawn_watcher(state: AppState, id: Uuid) {
             crate::history::record_boot_end(&state.data_dir, id, !intentional).await;
 
             if intentional {
+                let name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
+                crate::discord::notify(&state, crate::discord::Event::Stopped, &name, "Le serveur a été arrêté.").await;
                 break;
             }
 
             let server_name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
+            crate::discord::notify(&state, crate::discord::Event::Crash, &server_name,
+                "Le processus s'est terminé sans demande d'arrêt (crash, manque de mémoire, kill externe…). Utilisez le diagnostic de crash dans la Console.").await;
             crate::ntfy::notify(
                 &state.http, &state.data_dir, crate::ntfy::Event::Crash,
                 &format!("🔴 {server_name} s'est arrete de facon inattendue"),
@@ -292,6 +313,7 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
                             rt.push_line("[MCManager] Redemarrage programme du serveur...".to_string());
                         }
                     }
+                    crate::discord::notify(&state, crate::discord::Event::ScheduledRestart, &entry.name, "Redémarrage programmé en cours (maintenance régulière).").await;
                     crate::ntfy::notify(
                         &state.http, &state.data_dir, crate::ntfy::Event::ScheduledRestart,
                         &format!("🔄 {} : redemarrage programme", entry.name),
@@ -326,6 +348,7 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
                                     rt.push_line(format!("[MCManager] Aucun joueur depuis {minutes} min - arret automatique."));
                                 }
                             }
+                            crate::discord::notify(&state, crate::discord::Event::AutoStop, &entry.name, &format!("Aucun joueur depuis {minutes} minutes : serveur arrêté automatiquement.")).await;
                             crate::ntfy::notify(
                                 &state.http, &state.data_dir, crate::ntfy::Event::AutoStop,
                                 &format!("⏸ {} : arret automatique", entry.name),

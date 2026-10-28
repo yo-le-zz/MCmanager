@@ -78,3 +78,8 @@ Hors préfixe `/api` : `POST /auth/login` `{username,password}` · `POST /auth/l
 - `GET /server/info` → empreinte, machines jumelées et sessions actives ; `POST /server/pairing-code`
   `{minutes?}` ; `DELETE /server/clients/:id` (administrateurs).
 - `POST /remote/info|pair|session|api` : protocole machine à machine signé RSA, voir `src/remote.rs`.
+
+## Discord et domaines (v1.0.8)
+- `GET|POST /discord/config` (token/webhook jamais renvoyés : `has_token`, `has_webhook`) · `GET /discord/status` · `POST /discord/test`
+- `GET|PUT /network` : domaines par serveur + configuration générée (DNS, nginx stream, nginx web, Caddy) · `POST /network/detect-ip`
+- `GET /servers` ajoute `domain` / `public_port` aux serveurs ayant un domaine.

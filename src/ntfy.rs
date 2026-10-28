@@ -1,7 +1,7 @@
 //! Push notifications via [ntfy](https://ntfy.sh) - a plain HTTP POST to a
 //! topic URL, no bot account, no OAuth app, no webhook signing secret to
-//! manage. Chosen over a Discord bot specifically for that simplicity: ntfy
-//! needs nothing more than a topic name (and, for a self-hosted or
+//! manage. Kept as the zero-setup option (a Discord bot, see `discord.rs`, is also
+//! available since 1.0.8): ntfy needs nothing more than a topic name (and, for a self-hosted or
 //! protected server, an optional auth token) to start receiving pushes on
 //! a phone or desktop.
 //!

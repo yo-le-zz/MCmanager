@@ -172,6 +172,7 @@ pub async fn after_backup_created(state: &crate::state::AppState, id: uuid::Uuid
         }
     }
 
+    crate::discord::notify(state, crate::discord::Event::Backup, &entry.name, &format!("Nouvelle sauvegarde créée : `{backup_name}`.")).await;
     crate::ntfy::notify(
         &state.http, &state.data_dir, crate::ntfy::Event::Backup,
         &format!("💾 {} : sauvegarde terminee", entry.name),

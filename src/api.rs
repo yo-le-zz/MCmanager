@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, backup, debug, downloader, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
+use crate::{ai, backup, debug, discord, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -81,6 +81,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/playit/detect-local", post(playit_use_local))
         .route("/api/playit/ws", get(ws::playit_ws))
         .route("/api/remote/hub", get(remote_hub_status))
+        .route("/api/network", get(get_network).put(save_network))
+        .route("/api/network/detect-ip", post(detect_public_ip))
+        .route("/api/discord/config", get(get_discord_config).post(save_discord_config))
+        .route("/api/discord/status", get(get_discord_status))
+        .route("/api/discord/test", post(test_discord))
         .with_state(state.clone())
         // axum's default is 2 MB, which silently rejected mods, schematics and
         // world archives; the same ceiling as the remote tunnel keeps both consistent.
@@ -170,6 +175,14 @@ async fn list_servers(State(state): State<AppState>, headers: axum::http::Header
     // instances never re-export each other's servers (no chains/loops).
     if !headers.contains_key(remote::TUNNEL_HEADER) {
         list.extend(crate::hub::remote_servers_json(&state).await);
+    }
+    // Domaine personnalisé configuré dans l'onglet Réseau (affiché sur les cartes).
+    let net = network::load(&state.data_dir).await;
+    for s in list.iter_mut() {
+        if let Some(sd) = s["id"].as_str().and_then(|x| Uuid::parse_str(x).ok()).and_then(|id| net.servers.get(&id)) {
+            s["domain"] = json!(sd.domain);
+            s["public_port"] = json!(sd.public_port);
+        }
     }
     list.sort_by(|a, b| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase()));
     Json(list)
@@ -1261,6 +1274,184 @@ async fn save_ntfy_config(State(state): State<AppState>, Json(body): Json<SaveNt
 async fn test_ntfy(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
     let cfg = ntfy::load_config(&state.data_dir).await;
     ntfy::send_test(&state.http, &cfg).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ───────────────────────── Réseau : domaines, nginx, DNS ─────────────────────────
+
+/// Tous les serveurs connus (locaux + instances jumelées) avec la machine qui les héberge vue d'ici.
+async fn known_servers(state: &AppState) -> Vec<(network::KnownServer, Option<String>)> {
+    let mut out = Vec::new();
+    for (id, s) in state.servers.read().await.iter() {
+        out.push((network::KnownServer { id: *id, name: s.name.clone(), port: s.port, backend_host: "127.0.0.1".into() }, None));
+    }
+    for st in crate::hub::status_snapshot(state).await {
+        let host = st.host.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_else(|| st.host.clone());
+        for sv in &st.servers {
+            if let (Some(id), Some(port)) = (sv["id"].as_str().and_then(|x| Uuid::parse_str(x).ok()), sv["port"].as_u64()) {
+                out.push((network::KnownServer { id, name: sv["name"].as_str().unwrap_or("?").to_string(), port: port as u16, backend_host: host.clone() }, Some(st.label.clone())));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase()));
+    out
+}
+
+async fn network_view(state: &AppState, cfg: &network::NetworkConfig) -> serde_json::Value {
+    let known = known_servers(state).await;
+    let servers: Vec<network::KnownServer> = known.iter().map(|(k, _)| k.clone()).collect();
+    let generated = network::generate(cfg, &servers);
+    json!({
+        "config": cfg,
+        "servers": known.iter().map(|(k, remote)| json!({ "id": k.id, "name": k.name, "port": k.port, "remote": remote })).collect::<Vec<_>>(),
+        "generated": generated,
+    })
+}
+
+async fn get_network(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cfg = network::load(&state.data_dir).await;
+    Json(network_view(&state, &cfg).await)
+}
+
+async fn save_network(State(state): State<AppState>, Json(cfg): Json<network::NetworkConfig>) -> AppResult<Json<serde_json::Value>> {
+    network::save(&state.data_dir, &cfg).await?;
+    Ok(Json(network_view(&state, &cfg).await))
+}
+
+/// Détecte l'IP publique via un service tiers (ipify). Uniquement à la demande de l'utilisateur.
+async fn detect_public_ip(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    let ip = state.http.get("https://api.ipify.org").timeout(std::time::Duration::from_secs(6)).send().await
+        .map_err(|e| anyhow::anyhow!("détection impossible : {e}"))?
+        .text().await.map_err(|e| anyhow::anyhow!("réponse illisible : {e}"))?;
+    let ip = ip.trim().to_string();
+    if ip.parse::<std::net::IpAddr>().is_err() {
+        return Err(anyhow::anyhow!("réponse inattendue du service de détection").into());
+    }
+    Ok(Json(json!({ "ip": ip })))
+}
+
+// ───────────────────────── Discord ─────────────────────────
+
+#[derive(Serialize)]
+struct DiscordConfigView {
+    enabled: bool,
+    has_token: bool,
+    has_webhook: bool,
+    guild_id: String,
+    channel_id: String,
+    operator_user_ids: String,
+    operator_role_ids: String,
+    viewer_role_ids: String,
+    notify_started: bool,
+    notify_ready: bool,
+    notify_stopped: bool,
+    notify_crash: bool,
+    notify_backup: bool,
+    notify_scheduled_restart: bool,
+    notify_auto_stop: bool,
+    notify_player_join_leave: bool,
+}
+
+fn discord_view(c: &discord::DiscordConfig) -> DiscordConfigView {
+    DiscordConfigView {
+        enabled: c.enabled,
+        has_token: !c.bot_token.is_empty(),
+        has_webhook: !c.webhook_url.is_empty(),
+        guild_id: c.guild_id.clone(),
+        channel_id: c.channel_id.clone(),
+        operator_user_ids: c.operator_user_ids.join(", "),
+        operator_role_ids: c.operator_role_ids.join(", "),
+        viewer_role_ids: c.viewer_role_ids.join(", "),
+        notify_started: c.notify_started,
+        notify_ready: c.notify_ready,
+        notify_stopped: c.notify_stopped,
+        notify_crash: c.notify_crash,
+        notify_backup: c.notify_backup,
+        notify_scheduled_restart: c.notify_scheduled_restart,
+        notify_auto_stop: c.notify_auto_stop,
+        notify_player_join_leave: c.notify_player_join_leave,
+    }
+}
+
+/// Liste d'identifiants Discord saisie à la main : séparée par virgules/espaces,
+/// uniquement des chiffres (un identifiant Discord est un entier de 17 à 20 chiffres).
+fn parse_discord_ids(raw: &str, what: &str) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for part in raw.split(|c: char| c == ',' || c == ';' || c.is_whitespace()).filter(|p| !p.is_empty()) {
+        if !part.chars().all(|c| c.is_ascii_digit()) || part.len() < 15 || part.len() > 22 {
+            anyhow::bail!("{what} : « {part} » n'est pas un identifiant Discord valide (suite de 17 à 20 chiffres)");
+        }
+        out.push(part.to_string());
+    }
+    Ok(out)
+}
+
+async fn get_discord_config(State(state): State<AppState>) -> Json<DiscordConfigView> {
+    Json(discord_view(&discord::load_config(&state.data_dir).await))
+}
+
+async fn get_discord_status() -> Json<discord::BotStatus> {
+    Json(discord::status())
+}
+
+#[derive(Deserialize)]
+struct SaveDiscordBody {
+    enabled: bool,
+    /// Vide = conserver le token enregistré.
+    bot_token: String,
+    /// Vide = conserver ; "-" = supprimer.
+    webhook_url: String,
+    guild_id: String,
+    channel_id: String,
+    operator_user_ids: String,
+    operator_role_ids: String,
+    viewer_role_ids: String,
+    notify_started: bool,
+    notify_ready: bool,
+    notify_stopped: bool,
+    notify_crash: bool,
+    notify_backup: bool,
+    notify_scheduled_restart: bool,
+    notify_auto_stop: bool,
+    notify_player_join_leave: bool,
+}
+
+async fn save_discord_config(State(state): State<AppState>, Json(b): Json<SaveDiscordBody>) -> AppResult<Json<DiscordConfigView>> {
+    let mut cfg = discord::load_config(&state.data_dir).await;
+    cfg.enabled = b.enabled;
+    if !b.bot_token.trim().is_empty() {
+        cfg.bot_token = b.bot_token.trim().trim_start_matches("Bot ").to_string();
+    }
+    match b.webhook_url.trim() {
+        "" => {}
+        "-" => cfg.webhook_url.clear(),
+        url => {
+            if !url.starts_with("https://") || !url.contains("/api/webhooks/") {
+                return Err(AppError(anyhow::anyhow!("l'URL du webhook doit ressembler à https://discord.com/api/webhooks/…")));
+            }
+            cfg.webhook_url = url.to_string();
+        }
+    }
+    cfg.guild_id = parse_discord_ids(&b.guild_id, "serveur Discord")?.into_iter().next().unwrap_or_default();
+    cfg.channel_id = parse_discord_ids(&b.channel_id, "salon")?.into_iter().next().unwrap_or_default();
+    cfg.operator_user_ids = parse_discord_ids(&b.operator_user_ids, "opérateurs (utilisateurs)")?;
+    cfg.operator_role_ids = parse_discord_ids(&b.operator_role_ids, "opérateurs (rôles)")?;
+    cfg.viewer_role_ids = parse_discord_ids(&b.viewer_role_ids, "rôles de lecture")?;
+    cfg.notify_started = b.notify_started;
+    cfg.notify_ready = b.notify_ready;
+    cfg.notify_stopped = b.notify_stopped;
+    cfg.notify_crash = b.notify_crash;
+    cfg.notify_backup = b.notify_backup;
+    cfg.notify_scheduled_restart = b.notify_scheduled_restart;
+    cfg.notify_auto_stop = b.notify_auto_stop;
+    cfg.notify_player_join_leave = b.notify_player_join_leave;
+    discord::save_config(&state.data_dir, &cfg).await?;
+    Ok(Json(discord_view(&cfg)))
+}
+
+async fn test_discord(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    let cfg = discord::load_config(&state.data_dir).await;
+    discord::send_test(&state.http, &cfg).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

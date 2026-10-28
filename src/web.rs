@@ -222,7 +222,9 @@ async fn server_revoke_client(State(ctx): State<ServerCtx>, user: Option<Extensi
 pub fn spawn_background_tasks(state: AppState) {
     background_update_checker(state.clone());
     background_auto_backup(state.clone());
-    hub::spawn_refresher(state);
+    hub::spawn_refresher(state.clone());
+    // Bot Discord : reste inactif tant qu'il n'est pas configuré/activé dans les réglages.
+    crate::discord::spawn(state);
 }
 
 fn background_update_checker(state: AppState) {
