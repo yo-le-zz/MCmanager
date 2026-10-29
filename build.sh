@@ -77,6 +77,9 @@ build_linux() {
   ok "archive portable: dist/${APP_NAME}-${VERSION}-linux-${arch_name}.tar.gz"
 
   build_deb "$bin" "$bin_server" "$deb_arch"
+  local rpm_arch="x86_64"
+  [ "$arch_name" = "aarch64" ] && rpm_arch="aarch64"
+  build_rpm "$bin" "$bin_server" "$rpm_arch"
 }
 
 # Cross-compilation vers ARM64 depuis une machine x86_64 : cible rustup + un
@@ -100,6 +103,59 @@ setup_arm_cross() {
   else
     err "aucun linker ARM64 : installez 'pip install ziglang' ou 'apt install gcc-aarch64-linux-gnu'"; return 1
   fi
+}
+
+# ------------------------------------------------------------------------------
+# Paquet .rpm (Fedora, RHEL/Rocky/Alma, openSUSE) : MÊMES binaires, MÊMES fichiers que le .deb.
+# $1 binaire mcmanager  $2 binaire mcmanager-server  $3 architecture rpm (x86_64 | aarch64)
+build_rpm() {
+  local bin="$1" bin_server="${2:-}" rpm_arch="${3:-x86_64}"
+  if ! command -v rpmbuild >/dev/null 2>&1; then
+    warn "rpmbuild introuvable, paquet .rpm ignoré (Debian/Ubuntu : sudo apt install rpm ; Fedora : sudo dnf install rpm-build)."
+    return 0
+  fi
+  if [ -z "$bin_server" ] || [ ! -f "$bin_server" ]; then
+    warn "binaire mcmanager-server absent : paquet .rpm ignoré."
+    return 0
+  fi
+  log "Construction du paquet .rpm (${rpm_arch})…"
+  local top="$DIST_DIR/rpm-build" payload="$DIST_DIR/rpm-payload"
+  rm -rf "$top" "$payload"
+  mkdir -p "$top"/{BUILD,RPMS,SOURCES,SPECS,SRPMS} \
+           "$payload/usr/bin" "$payload/usr/share/mcmanager" \
+           "$payload/usr/lib/systemd/user" "$payload/usr/lib/systemd/system" \
+           "$payload/etc/mcmanager" "$payload/usr/share/doc/mcmanager" \
+           "$payload/usr/share/applications" "$payload/usr/share/icons/hicolor/256x256/apps"
+  cp "$bin" "$payload/usr/bin/mcmanager"
+  cp "$bin_server" "$payload/usr/bin/mcmanager-server"
+  cp -r web "$payload/usr/share/mcmanager/web"
+  cp packaging/deb/mcmanager.service "$payload/usr/lib/systemd/user/mcmanager.service"
+  cp packaging/deb/mcmanager-server.service "$payload/usr/lib/systemd/system/mcmanager-server.service"
+  : > "$payload/etc/mcmanager/autostart.txt"
+  cat > "$payload/etc/mcmanager/server.env" <<'ENVEOF'
+# Configuration du service mcmanager-server (lue par systemd).
+# MCMANAGER_PORT=7777
+# MCMANAGER_HOST=0.0.0.0
+# Compte administrateur créé au premier démarrage (sinon : 'admin' + mot de passe aléatoire dans les logs) :
+# MCMANAGER_ADMIN_USER=admin
+# MCMANAGER_ADMIN_PASSWORD=changez-moi
+# Derrière un reverse proxy HTTPS :
+# MCMANAGER_TRUST_PROXY=1
+# MCMANAGER_COOKIE_SECURE=1
+ENVEOF
+  cp packaging/deb/mcmanager.desktop "$payload/usr/share/applications/mcmanager.desktop"
+  cp web/assets/icon-256.png "$payload/usr/share/icons/hicolor/256x256/apps/mcmanager.png"
+  cp README.md LICENSE CHANGELOG.md "$payload/usr/share/doc/mcmanager/" 2>/dev/null || true
+
+  sed -e "s/__VERSION__/${VERSION}/" -e "s/__ARCH__/${rpm_arch}/" -e "s#__PAYLOAD__#${payload}#" \
+    packaging/rpm/mcmanager.spec.in > "$top/SPECS/mcmanager.spec"
+  if rpmbuild -bb --quiet --target "${rpm_arch}-linux" --define "_topdir $top" "$top/SPECS/mcmanager.spec"; then
+    cp "$top"/RPMS/*/*.rpm "$DIST_DIR/"
+    ok "paquet RPM: dist/${APP_NAME}-${VERSION}-1.${rpm_arch}.rpm"
+  else
+    warn "échec de la construction du .rpm"
+  fi
+  rm -rf "$top" "$payload"
 }
 
 # ------------------------------------------------------------------------------

@@ -3,7 +3,50 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
-## [1.0.8] - 2026-10-25 (serveurs distants intégrés, mode serveur, Docker, correctifs critiques)
+## [1.0.9] - 2026-10-30 (bot Discord, domaines personnalisés, import/export, paquets .rpm)
+### Bot Discord (nouveau, voir docs/DISCORD.md · docs/DISCORD.en.md)
+- **Une catégorie par serveur Minecraft** créée par le bot, avec trois salons : **statut** (notifications de CE serveur),
+  **console** (sortie en direct, et envoi de commandes depuis Discord par les rôles autorisés) et **chat** (pont
+  Minecraft ⇄ Discord dans les deux sens). Les salons sont invisibles pour `@everyone` et réservés aux rôles choisis ;
+  « Mettre à jour » réapplique les droits, un salon supprimé à la main est recréé. Fonctionne aussi pour les serveurs
+  des instances distantes jumelées.
+- **Détection automatique** : bouton « Détecter » (serveurs Discord où se trouve le bot, lien d'invitation avec les bonnes
+  permissions, rôles en cases à cocher colorées, salons en menu) : plus d'identifiants à recopier.
+- **Version anglaise** : bot (notifications, réponses, noms et descriptions des commandes) et réglages en français/anglais.
+  Les commandes sont déclarées en anglais (`/mc list|status|players|start|stop|restart|command`) et affichées en
+  français (`liste`, `statut`...) aux clients Discord en français ; les réponses suivent la langue de l'utilisateur.
+- **Pont de chat** : les messages des joueurs apparaissent dans Discord ; ceux de Discord apparaissent en jeu (`tellraw`).
+  Le texte est construit en JSON par `serde_json` (impossible de casser le JSON ou d'injecter une 2e commande),
+  retours à la ligne et codes `§` retirés, aucune mention (`@everyone`...) ne peut partir du bot.
+- **Console dans Discord** : lots toutes les 2 s, blocs de code, couleurs ANSI retirées, 3 messages maximum par lot
+  (limites de débit). Les droits sont revérifiés par MCManager à chaque message (pas seulement ceux du salon Discord).
+- Sans l'intention privilégiée « Message Content », les notifications et commandes slash continuent de marcher ; seuls la
+  console et le chat dans Discord sont indisponibles, et l'interface l'explique.
+- Notifications : démarrage, serveur prêt, arrêt, crash, sauvegarde, redémarrage programmé, arrêt automatique,
+  connexion/déconnexion de joueur ; token et webhook chiffrés sur disque ; refus par défaut (aucun opérateur = aucun pilotage).
+- Gestion des limites de débit Discord (429) avec une nouvelle tentative.
+### Domaines et redirections (nouveau, voir docs/DOMAINS.md)
+- Onglet **🔗 Domaines** : un domaine par serveur (et pour l'interface), génération des enregistrements DNS (A / SRV), de la
+  config nginx (proxy TCP `stream`, reverse proxy web avec WebSocket + HTTPS certbot) et d'un Caddyfile. Rien n'est appliqué
+  automatiquement. Domaine affiché sur les cartes de serveur. Valeurs validées (pas d'injection de directives).
+### Paquets `.rpm` (Fedora, RHEL / Rocky / AlmaLinux, openSUSE)
+- `./build.sh linux` et `linux-arm64` produisent maintenant un `.rpm` (x86_64 et aarch64) **en plus** du `.deb` : mêmes binaires,
+  mêmes fichiers, même service systemd `mcmanager-server`, utilisateur dédié `mcmanager`, fichiers de configuration conservés
+  à la mise à jour. Java en dépendance recommandée (`java-21-openjdk-headless`). Le workflow GitHub les publie aussi.
+- Le `.deb` ne dépend plus de `libssl` (MCManager embarque rustls : la dépendance pouvait bloquer l'installation).
+### Import / export de serveurs
+- **Importer un serveur depuis une archive .zip** (nouveau, formulaire « Importer un serveur existant » : fonctionne aussi
+  vers une instance distante) et bouton **📤 Exporter** sur chaque serveur (zip complet, réimportable).
+- Interface : les 14 boîtes `confirm()` natives sont remplacées par une fenêtre intégrée. Quand le navigateur bloquait les
+  dialogues (« empêcher cette page de créer d'autres boîtes de dialogue »), Arrêter / Forcer l'arrêt / Redémarrer et la
+  commande `stop` de la console ne faisaient plus rien.
+
+### Corrections
+- **Publication GitHub** : le job `publish` échouait en tentant de télécharger l'artefact de trace `*.dockerbuild` ; il ne
+  télécharge plus que les artefacts MCManager et la trace n'est plus créée.
+- Une ligne de chat contenant un retour à la ligne collait les mots (`salut\nstop` → `salutstop`) avant relais en jeu.
+
+## [1.0.8] - 2026-10-25 (serveurs distants intégrés, mode serveur, Docker, builds ARM, correctifs critiques)
 ### Serveurs distants comme des serveurs locaux
 - **Tout serveur d'une instance jumelée apparaît dans le tableau de bord, la liste des serveurs et le
   sélecteur**, avec une étiquette « 🖧 distant · <nom> » (ou « hors ligne » si la machine ne répond plus). On peut
@@ -50,21 +93,7 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
   image publiée sur ghcr.io par le workflow de release.
 - Plus de CORS permissif sur l'interface (elle est same-origin) : une page web quelconque ne peut plus piloter une
   instance locale depuis le navigateur.
-### Bot Discord (nouveau, voir docs/DISCORD.md)
-- **Notifications** (embed dans un salon, ou simple webhook sans bot) : démarrage, serveur prêt, arrêt, crash, sauvegarde,
-  redémarrage programmé, arrêt automatique, connexion/déconnexion de joueur ; chaque type s'active séparément.
-- **Commandes slash** `/mc liste | statut | joueurs | demarrer | arreter | redemarrer | commande` avec autocomplétion du
-  serveur, y compris pour les serveurs des instances distantes jumelées. Connexion sortante vers la passerelle Discord :
-  aucun port ni domaine à ouvrir.
-- Sécurité : refus par défaut (aucun opérateur = aucun pilotage), commandes limitées à votre serveur Discord, token et
-  webhook chiffrés sur disque, actions journalisées. Testé contre un faux Discord (passerelle WebSocket + REST) : identification,
-  battements de cœur, reprise de session, enregistrement des commandes, permissions.
-- Nouveaux évènements « démarrage », « prêt » et « arrêt volontaire » (aussi disponibles pour de futurs canaux).
-### Domaines et redirections (nouveau, voir docs/DOMAINS.md)
-- Onglet **🔗 Domaines** : un domaine par serveur (et pour l'interface), génération des enregistrements DNS (A / SRV), de la
-  config nginx (proxy TCP `stream`, reverse proxy web avec WebSocket + HTTPS certbot) et d'un Caddyfile. Rien n'est appliqué
-  automatiquement. Domaine affiché sur les cartes de serveur. Valeurs validées (pas d'injection de directives).
-### Builds ARM, installateurs, import/export
+### Builds ARM et installateurs
 - **Linux ARM64** (Raspberry Pi 4/5, serveurs et VPS ARM) : `./build.sh linux-arm64` produit `.deb` arm64 + archive portable
   (cross-compilation via zig, compatible glibc 2.29+ : Raspberry Pi OS Bookworm, Ubuntu 20.04+).
 - **Windows ARM64** et **installateurs Inno Setup** : un installateur `.exe` par architecture (x86_64 et ARM64).
@@ -72,11 +101,6 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
   installateurs) et signale clairement ce qui manque ; le workflow GitHub compile chaque cible **nativement**
   (runners `ubuntu-24.04-arm` et `windows-11-arm` inclus) et publie une image Docker multi-architecture (amd64 + arm64).
 - `Cargo.toml` : `autobins = false` (un ancien `src/bin/*.rs` oublié n'est plus compilé par erreur).
-- **Importer un serveur depuis une archive .zip** (nouveau, formulaire « Importer un serveur existant » : fonctionne aussi
-  vers une instance distante) et bouton **📤 Exporter** sur chaque serveur (zip complet, réimportable).
-- Interface : les 14 boîtes `confirm()` natives sont remplacées par une fenêtre intégrée. Quand le navigateur bloquait les
-  dialogues (« empêcher cette page de créer d'autres boîtes de dialogue »), Arrêter / Forcer l'arrêt / Redémarrer et la
-  commande `stop` de la console ne faisaient plus rien.
 
 ### Retiré
 - **Support Nix** (flake, module NixOS, `packaging/nix`, tuto GLF OS, tâche CI et `build.sh nix`) : on se concentre sur Linux.

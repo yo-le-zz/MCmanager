@@ -32,7 +32,7 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Import de serveurs existants** : pointez MCManager vers un dossier de serveur déjà présent sur la machine.
 - **Deux binaires** : `mcmanager` (application de bureau, interface web locale sans connexion) et **`mcmanager-server`** (mode serveur : même interface web, connexion multi-utilisateurs, accessible à distance, déployable via Docker ou service systemd — voir [docs/SERVER.md](docs/SERVER.md)).
 - **Serveurs distants intégrés** : jumelez une autre machine MCManager (VPS, serveur maison, Raspberry Pi) et **ses serveurs apparaissent dans votre tableau de bord comme les vôtres**, avec une étiquette « distant » — console en direct, fichiers, mods/plugins, schematics, sauvegardes, démarrage/arrêt, création directe là-bas. Chiffrement RSA + AES-256-GCM, requêtes signées et non rejouables, plusieurs machines et sessions simultanées.
-- **Bot Discord** : notifications (démarrage, prêt, arrêt, crash, sauvegarde…) et commandes `/mc` (liste, statut, démarrer, arrêter, redémarrer, commande) — [docs/DISCORD.md](docs/DISCORD.md).
+- **Bot Discord** : une catégorie par serveur Minecraft (statut, **console en direct** avec envoi de commandes par rôle, **chat Minecraft ⇄ Discord**), détection automatique des rôles, commandes `/mc`, français/anglais — [docs/DISCORD.md](docs/DISCORD.md) · [English](docs/DISCORD.en.md).
 - **Domaines personnalisés** : DNS (SRV), nginx et Caddy générés pour vos serveurs et l'interface web — [docs/DOMAINS.md](docs/DOMAINS.md).
 - **Service permanent et Docker** : `systemctl enable --now mcmanager-server` (utilisateur dédié, redémarrage automatique) ou `docker compose up -d`. Le contrôle à distance ne s'éteint plus à la fermeture d'un terminal.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
@@ -78,6 +78,13 @@ Ou via le script universel : `./install-linux.sh`.
 docker compose up -d      # interface web sur http://<machine>:7777 ; mot de passe admin dans `docker logs mcmanager`
 ```
 Voir [docs/SERVER.md](docs/SERVER.md) (volumes, ports Minecraft, comptes, HTTPS).
+
+### Fedora / RHEL / Rocky / AlmaLinux / openSUSE (.rpm)
+```bash
+sudo dnf install ./mcmanager-*.x86_64.rpm      # ou ...aarch64.rpm sur ARM (Raspberry Pi, VPS ARM)
+sudo systemctl enable --now mcmanager-server   # mode serveur (facultatif)
+sudo firewall-cmd --permanent --add-port=7777/tcp && sudo firewall-cmd --reload   # accès depuis une autre machine
+```
 
 ### Mode serveur (VPS, Raspberry Pi)
 ```bash

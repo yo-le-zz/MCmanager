@@ -1,6 +1,6 @@
 [package]
 name = "mcmanager"
-version = "1.0.8"
+version = "1.0.9"
 edition = "2021"
 # Seuls les [[bin]] declares ci-dessous sont compiles (evite qu'un vieux fichier
 # src/bin/*.rs oublie ne soit construit par erreur).

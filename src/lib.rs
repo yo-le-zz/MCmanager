@@ -20,6 +20,7 @@ pub mod backup;
 pub mod cli;
 pub mod debug;
 pub mod discord;
+pub mod discord_bridge;
 pub mod downloader;
 pub mod error;
 pub mod files;

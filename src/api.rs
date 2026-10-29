@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, backup, debug, discord, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
+use crate::{ai, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -86,6 +86,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/discord/config", get(get_discord_config).post(save_discord_config))
         .route("/api/discord/status", get(get_discord_status))
         .route("/api/discord/test", post(test_discord))
+        .route("/api/discord/detect", post(detect_discord))
+        .route("/api/discord/guild/:id", get(detect_discord_guild))
+        .route("/api/discord/servers/:id/setup", post(setup_discord_server).delete(teardown_discord_server))
         .with_state(state.clone())
         // axum's default is 2 MB, which silently rejected mods, schematics and
         // world archives; the same ceiling as the remote tunnel keeps both consistent.
@@ -1335,13 +1338,17 @@ async fn detect_public_ip(State(state): State<AppState>) -> AppResult<Json<serde
 #[derive(Serialize)]
 struct DiscordConfigView {
     enabled: bool,
+    language: String,
     has_token: bool,
     has_webhook: bool,
     guild_id: String,
     channel_id: String,
-    operator_user_ids: String,
-    operator_role_ids: String,
-    viewer_role_ids: String,
+    operator_user_ids: Vec<String>,
+    operator_role_ids: Vec<String>,
+    viewer_role_ids: Vec<String>,
+    console_view_role_ids: Vec<String>,
+    chat_role_ids: Vec<String>,
+    servers: std::collections::HashMap<Uuid, discord::ServerChannels>,
     notify_started: bool,
     notify_ready: bool,
     notify_stopped: bool,
@@ -1355,13 +1362,17 @@ struct DiscordConfigView {
 fn discord_view(c: &discord::DiscordConfig) -> DiscordConfigView {
     DiscordConfigView {
         enabled: c.enabled,
+        language: c.language.clone(),
         has_token: !c.bot_token.is_empty(),
         has_webhook: !c.webhook_url.is_empty(),
         guild_id: c.guild_id.clone(),
         channel_id: c.channel_id.clone(),
-        operator_user_ids: c.operator_user_ids.join(", "),
-        operator_role_ids: c.operator_role_ids.join(", "),
-        viewer_role_ids: c.viewer_role_ids.join(", "),
+        operator_user_ids: c.operator_user_ids.clone(),
+        operator_role_ids: c.operator_role_ids.clone(),
+        viewer_role_ids: c.viewer_role_ids.clone(),
+        console_view_role_ids: c.console_view_role_ids.clone(),
+        chat_role_ids: c.chat_role_ids.clone(),
+        servers: c.servers.clone(),
         notify_started: c.notify_started,
         notify_ready: c.notify_ready,
         notify_stopped: c.notify_stopped,
@@ -1373,15 +1384,16 @@ fn discord_view(c: &discord::DiscordConfig) -> DiscordConfigView {
     }
 }
 
-/// Liste d'identifiants Discord saisie à la main : séparée par virgules/espaces,
-/// uniquement des chiffres (un identifiant Discord est un entier de 17 à 20 chiffres).
-fn parse_discord_ids(raw: &str, what: &str) -> anyhow::Result<Vec<String>> {
+/// Identifiants Discord : uniquement des chiffres (17 à 20, entier 64 bits).
+fn validate_discord_ids(list: &[String], what: &str) -> anyhow::Result<Vec<String>> {
     let mut out = Vec::new();
-    for part in raw.split(|c: char| c == ',' || c == ';' || c.is_whitespace()).filter(|p| !p.is_empty()) {
+    for part in list.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
         if !part.chars().all(|c| c.is_ascii_digit()) || part.len() < 15 || part.len() > 22 {
             anyhow::bail!("{what} : « {part} » n'est pas un identifiant Discord valide (suite de 17 à 20 chiffres)");
         }
-        out.push(part.to_string());
+        if !out.iter().any(|x| x == part) {
+            out.push(part.to_string());
+        }
     }
     Ok(out)
 }
@@ -1397,15 +1409,21 @@ async fn get_discord_status() -> Json<discord::BotStatus> {
 #[derive(Deserialize)]
 struct SaveDiscordBody {
     enabled: bool,
+    #[serde(default)]
+    language: String,
     /// Vide = conserver le token enregistré.
     bot_token: String,
     /// Vide = conserver ; "-" = supprimer.
     webhook_url: String,
     guild_id: String,
     channel_id: String,
-    operator_user_ids: String,
-    operator_role_ids: String,
-    viewer_role_ids: String,
+    operator_user_ids: Vec<String>,
+    operator_role_ids: Vec<String>,
+    viewer_role_ids: Vec<String>,
+    #[serde(default)]
+    console_view_role_ids: Vec<String>,
+    #[serde(default)]
+    chat_role_ids: Vec<String>,
     notify_started: bool,
     notify_ready: bool,
     notify_stopped: bool,
@@ -1419,6 +1437,9 @@ struct SaveDiscordBody {
 async fn save_discord_config(State(state): State<AppState>, Json(b): Json<SaveDiscordBody>) -> AppResult<Json<DiscordConfigView>> {
     let mut cfg = discord::load_config(&state.data_dir).await;
     cfg.enabled = b.enabled;
+    if matches!(b.language.as_str(), "fr" | "en") {
+        cfg.language = b.language.clone();
+    }
     if !b.bot_token.trim().is_empty() {
         cfg.bot_token = b.bot_token.trim().trim_start_matches("Bot ").to_string();
     }
@@ -1432,11 +1453,13 @@ async fn save_discord_config(State(state): State<AppState>, Json(b): Json<SaveDi
             cfg.webhook_url = url.to_string();
         }
     }
-    cfg.guild_id = parse_discord_ids(&b.guild_id, "serveur Discord")?.into_iter().next().unwrap_or_default();
-    cfg.channel_id = parse_discord_ids(&b.channel_id, "salon")?.into_iter().next().unwrap_or_default();
-    cfg.operator_user_ids = parse_discord_ids(&b.operator_user_ids, "opérateurs (utilisateurs)")?;
-    cfg.operator_role_ids = parse_discord_ids(&b.operator_role_ids, "opérateurs (rôles)")?;
-    cfg.viewer_role_ids = parse_discord_ids(&b.viewer_role_ids, "rôles de lecture")?;
+    cfg.guild_id = validate_discord_ids(&[b.guild_id], "serveur Discord")?.into_iter().next().unwrap_or_default();
+    cfg.channel_id = validate_discord_ids(&[b.channel_id], "salon")?.into_iter().next().unwrap_or_default();
+    cfg.operator_user_ids = validate_discord_ids(&b.operator_user_ids, "opérateurs (utilisateurs)")?;
+    cfg.operator_role_ids = validate_discord_ids(&b.operator_role_ids, "opérateurs (rôles)")?;
+    cfg.viewer_role_ids = validate_discord_ids(&b.viewer_role_ids, "rôles de lecture")?;
+    cfg.console_view_role_ids = validate_discord_ids(&b.console_view_role_ids, "rôles de la console (lecture)")?;
+    cfg.chat_role_ids = validate_discord_ids(&b.chat_role_ids, "rôles du chat")?;
     cfg.notify_started = b.notify_started;
     cfg.notify_ready = b.notify_ready;
     cfg.notify_stopped = b.notify_stopped;
@@ -1452,6 +1475,63 @@ async fn save_discord_config(State(state): State<AppState>, Json(b): Json<SaveDi
 async fn test_discord(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
     let cfg = discord::load_config(&state.data_dir).await;
     discord::send_test(&state.http, &cfg).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize, Default)]
+struct DetectBody {
+    /// Token saisi mais pas encore enregistré ; vide = celui déjà enregistré.
+    #[serde(default)]
+    bot_token: String,
+}
+
+/// « Détecter » : serveurs Discord où le bot est présent + lien d'invitation, pour choisir dans un
+/// menu au lieu de recopier des identifiants.
+async fn detect_discord(State(state): State<AppState>, body: Option<Json<DetectBody>>) -> AppResult<Json<serde_json::Value>> {
+    let cfg = discord::load_config(&state.data_dir).await;
+    let typed = body.map(|b| b.0.bot_token.trim().trim_start_matches("Bot ").to_string()).unwrap_or_default();
+    let token = if typed.is_empty() { cfg.bot_token.clone() } else { typed };
+    if token.is_empty() {
+        return Err(AppError(anyhow::anyhow!("saisissez d'abord le token du bot")));
+    }
+    let guilds = discord_bridge::detect_guilds(&state.http, discord::API_BASE, &token).await.map_err(|e| anyhow::anyhow!("détection impossible (token valide ?) : {e}"))?;
+    let app_id = discord_bridge::application_id(&state.http, discord::API_BASE, &token).await.ok();
+    Ok(Json(json!({
+        "guilds": guilds,
+        "application_id": app_id,
+        "invite_url": app_id.as_deref().map(discord_bridge::invite_url),
+    })))
+}
+
+async fn detect_discord_guild(State(state): State<AppState>, AxPath(guild_id): AxPath<String>) -> AppResult<Json<serde_json::Value>> {
+    validate_discord_ids(&[guild_id.clone()], "serveur Discord")?;
+    let cfg = discord::load_config(&state.data_dir).await;
+    if cfg.bot_token.is_empty() {
+        return Err(AppError(anyhow::anyhow!("enregistrez d'abord le token du bot")));
+    }
+    Ok(Json(discord_bridge::detect_guild(&state.http, discord::API_BASE, &cfg.bot_token, &guild_id).await?))
+}
+
+async fn setup_discord_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(opts): Json<discord_bridge::SetupOptions>) -> AppResult<Json<discord::ServerChannels>> {
+    let name = known_servers(&state).await.into_iter().find(|(k, _)| k.id == id).map(|(k, _)| k.name).ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    let mut cfg = discord::load_config(&state.data_dir).await;
+    let mut opts = opts;
+    opts.command_role_ids = validate_discord_ids(&opts.command_role_ids, "rôles autorisés à envoyer des commandes")?;
+    let sc = discord_bridge::setup_server_channels(&state.http, discord::API_BASE, &mut cfg, id, &name, &opts).await?;
+    discord::save_config(&state.data_dir, &cfg).await?;
+    Ok(Json(sc))
+}
+
+#[derive(Deserialize, Default)]
+struct TeardownQuery {
+    #[serde(default)]
+    delete_channels: bool,
+}
+
+async fn teardown_discord_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Query(q): Query<TeardownQuery>) -> AppResult<Json<serde_json::Value>> {
+    let mut cfg = discord::load_config(&state.data_dir).await;
+    discord_bridge::teardown_server_channels(&state.http, discord::API_BASE, &mut cfg, id, q.delete_channels).await?;
+    discord::save_config(&state.data_dir, &cfg).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

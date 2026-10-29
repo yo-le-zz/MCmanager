@@ -2111,13 +2111,28 @@ function renderDocs() {
 
 // ───────────────────────── settings ─────────────────────────
 
-async function renderSettings() {
+let dcDetect = { guilds: [], roles: [], channels: [], invite_url: "" };
+const dcT = (en, fr) => (state.lang === "fr" ? fr : en);
+
+// Choix de rôles : cases à cocher colorées si les rôles ont été détectés, sinon saisie d'identifiants.
+function dcPicker(name, selected, roles, compact = false) {
+  selected = selected || [];
+  if (!roles.length) return `<input id="${name}" placeholder="123456789012345678, …" value="${escapeHtml(selected.join(", "))}">`;
+  return `<div style="display:flex;flex-wrap:wrap;gap:${compact ? 4 : 8}px 12px;max-height:${compact ? 90 : 130}px;overflow:auto">${roles.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" data-picker="${name}" value="${escapeHtml(r.id)}" style="width:auto" ${selected.includes(r.id) ? "checked" : ""}><span style="width:9px;height:9px;border-radius:50%;background:${r.color === "#000000" ? "var(--overlay0)" : escapeHtml(r.color)};display:inline-block"></span>${escapeHtml(r.name)}</label>`).join("")}</div>`;
+}
+
+async function renderSettings(keepDetect = false) {
   const content = $("#content");
   const cfg = await api("/settings");
   const s = currentServer();
   const appearance = getConsoleAppearance();
   let discordCfg, discordStatus = { state: "disabled", detail: "" };
-  try { discordCfg = await api("/discord/config"); discordStatus = await api("/discord/status"); } catch { discordCfg = { enabled: false, has_token: false, has_webhook: false, guild_id: "", channel_id: "", operator_user_ids: "", operator_role_ids: "", viewer_role_ids: "", notify_started: true, notify_ready: true, notify_stopped: true, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
+  try { discordCfg = await api("/discord/config"); discordStatus = await api("/discord/status"); } catch { discordCfg = { enabled: false, language: "fr", has_token: false, has_webhook: false, guild_id: "", channel_id: "", operator_user_ids: [], operator_role_ids: [], viewer_role_ids: [], console_view_role_ids: [], chat_role_ids: [], servers: {}, notify_started: true, notify_ready: true, notify_stopped: true, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
+  // Rôles/salons Discord détectés (menus plutôt que des identifiants à recopier) : rechargés si le bot est déjà configuré.
+  if (!keepDetect) { dcDetect = { guilds: [], roles: [], channels: [], invite_url: "" }; }
+  if (!dcDetect.roles.length && discordCfg.has_token && discordCfg.guild_id) {
+    try { const g = await api(`/discord/guild/${discordCfg.guild_id}`); dcDetect.roles = g.roles; dcDetect.channels = g.channels; } catch {}
+  }
   let ntfyCfg;
   try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   content.innerHTML = `
@@ -2179,32 +2194,62 @@ async function renderSettings() {
       </div>
     </div>
     <div class="card">
-      <h2>🤖 Bot Discord</h2>
+      <h2>🤖 ${dcT("Discord bot", "Bot Discord")}</h2>
       <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
-        Notifications dans un salon (démarrage, serveur prêt, arrêt, crash, sauvegarde…) <b>et</b> commandes <code>/mc liste</code>, <code>/mc statut</code>, <code>/mc demarrer</code>, <code>/mc arreter</code>, <code>/mc redemarrer</code>, <code>/mc commande</code> directement depuis Discord. Le bot se connecte <i>vers</i> Discord : aucun port à ouvrir, aucun domaine nécessaire. Pour de simples notifications sans bot, un <b>webhook</b> suffit.
-        <br><b>Mise en place :</b> 1) <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a> → New Application → Bot → copiez le token. 2) Invitez le bot sur votre serveur avec les portées <code>bot</code> + <code>applications.commands</code> (permission « Envoyer des messages »). 3) Activez le mode développeur de Discord (Paramètres → Avancé) pour copier les identifiants (clic droit → Copier l'identifiant).
+        ${dcT(
+          "Notifications, <code>/mc</code> commands, and for each Minecraft server a dedicated <b>category</b> with a <b>status</b> channel, a live <b>console</b> channel (type commands there if your role allows it) and a <b>chat</b> channel linked to the in-game chat. The bot connects <i>out</i> to Discord: no port to open, no domain needed.",
+          "Notifications, commandes <code>/mc</code> et, pour chaque serveur Minecraft, une <b>catégorie</b> dédiée avec un salon de <b>statut</b>, une <b>console</b> en direct (tapez des commandes si votre rôle le permet) et un salon de <b>chat</b> relié au chat du jeu. Le bot se connecte <i>vers</i> Discord : aucun port à ouvrir, aucun domaine nécessaire."
+        )}
       </p>
-      <div style="margin-bottom:10px">État : ${discordStatus.state === "connected" ? `<span class="badge badge-green">Connecté</span> ${escapeHtml(discordStatus.detail || "")}${discordStatus.commands_registered ? " · commandes enregistrées" : " · enregistrement des commandes…"}` : discordStatus.state === "connecting" ? '<span class="badge badge-mauve">Connexion…</span>' : discordStatus.state === "error" ? `<span class="badge badge-red">Erreur</span> ${escapeHtml(discordStatus.detail || "")}` : '<span class="badge">Inactif</span>'}</div>
+      <div style="margin-bottom:10px">${dcT("State", "État")} : ${discordStatus.state === "connected" ? `<span class="badge badge-green">${dcT("Connected", "Connecté")}</span> ${escapeHtml(discordStatus.detail || "")}${discordStatus.commands_registered ? " · " + dcT("commands registered", "commandes enregistrées") : " · " + dcT("registering commands…", "enregistrement des commandes…")}` : discordStatus.state === "connecting" ? `<span class="badge badge-mauve">${dcT("Connecting…", "Connexion…")}</span>` : discordStatus.state === "error" ? `<span class="badge badge-red">${dcT("Error", "Erreur")}</span> ${escapeHtml(discordStatus.detail || "")}` : `<span class="badge">${dcT("Inactive", "Inactif")}</span>`}</div>
+      ${discordStatus.message_content_missing ? `<div class="badge badge-red" style="display:block;margin-bottom:10px;white-space:normal">⚠ ${dcT("Console and chat in Discord are unavailable: enable <b>Message Content Intent</b> in the Discord developer portal (Bot → Privileged Gateway Intents), then save again. Notifications and slash commands already work.", "Console et chat dans Discord indisponibles : activez <b>Message Content Intent</b> dans le portail développeur Discord (Bot → Privileged Gateway Intents), puis enregistrez à nouveau. Les notifications et commandes slash fonctionnent déjà.")}</div>` : ""}
+
+      <h3 style="margin:14px 0 6px">1. ${dcT("Connection", "Connexion")}</h3>
       <div class="form-grid">
-        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="dc-enabled" style="width:auto" ${discordCfg.enabled ? "checked" : ""}> Activer</label></div>
-        <div class="form-row"><label>Token du bot ${discordCfg.has_token ? '<span class="meta">(configuré)</span>' : ""}</label><input id="dc-token" type="password" autocomplete="off" placeholder="${discordCfg.has_token ? "Laisser vide pour conserver" : "MTE2…"}"></div>
-        <div class="form-row"><label>Identifiant du serveur Discord (guilde)</label><input id="dc-guild" placeholder="123456789012345678" value="${escapeHtml(discordCfg.guild_id)}"></div>
-        <div class="form-row"><label>Salon des notifications (identifiant)</label><input id="dc-channel" placeholder="123456789012345678" value="${escapeHtml(discordCfg.channel_id)}"></div>
-        <div class="form-row"><label>…ou URL de webhook (sans bot) ${discordCfg.has_webhook ? '<span class="meta">(configuré, « - » pour supprimer)</span>' : ""}</label><input id="dc-webhook" type="password" autocomplete="off" placeholder="${discordCfg.has_webhook ? "Laisser vide pour conserver" : "https://discord.com/api/webhooks/…"}"></div>
+        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="dc-enabled" style="width:auto" ${discordCfg.enabled ? "checked" : ""}> ${dcT("Enable", "Activer")}</label></div>
+        <div class="form-row"><label>${dcT("Language of the bot", "Langue du bot")}</label><select id="dc-lang"><option value="fr" ${discordCfg.language !== "en" ? "selected" : ""}>Français</option><option value="en" ${discordCfg.language === "en" ? "selected" : ""}>English</option></select></div>
+        <div class="form-row"><label>${dcT("Bot token", "Token du bot")} ${discordCfg.has_token ? `<span class="meta">(${dcT("configured", "configuré")})</span>` : ""}</label>
+          <div style="display:flex;gap:6px"><input id="dc-token" type="password" autocomplete="off" placeholder="${discordCfg.has_token ? dcT("Leave empty to keep", "Laisser vide pour conserver") : "MTE2…"}"><button class="btn-ghost" id="dc-detect" title="${dcT("Find the Discord servers where the bot is", "Trouver les serveurs Discord où se trouve le bot")}">🔍 ${dcT("Detect", "Détecter")}</button></div></div>
+        <div class="form-row"><label>${dcT("Discord server", "Serveur Discord")}</label>
+          ${dcDetect.guilds.length ? `<select id="dc-guild">${dcDetect.guilds.map((g) => `<option value="${escapeHtml(g.id)}" ${g.id === discordCfg.guild_id ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join("")}</select>` : `<input id="dc-guild" placeholder="${dcT("Click Detect, or paste the server ID", "Cliquez sur Détecter, ou collez l'identifiant")}" value="${escapeHtml(discordCfg.guild_id)}">`}</div>
+        <div class="form-row"><label>${dcT("General notifications channel", "Salon des notifications générales")}</label>
+          ${dcDetect.channels.length ? `<select id="dc-channel"><option value="">—</option>${dcDetect.channels.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === discordCfg.channel_id ? "selected" : ""}>#${escapeHtml(c.name)}</option>`).join("")}</select>` : `<input id="dc-channel" placeholder="123456789012345678" value="${escapeHtml(discordCfg.channel_id)}">`}</div>
+        <div class="form-row"><label>${dcT("…or webhook URL (no bot)", "…ou URL de webhook (sans bot)")} ${discordCfg.has_webhook ? `<span class="meta">(${dcT("configured, “-” to remove", "configuré, « - » pour supprimer")})</span>` : ""}</label><input id="dc-webhook" type="password" autocomplete="off" placeholder="${discordCfg.has_webhook ? dcT("Leave empty to keep", "Laisser vide pour conserver") : "https://discord.com/api/webhooks/…"}"></div>
       </div>
-      <h2 style="margin-top:14px">Qui peut piloter ?</h2>
-      <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px"><b>Opérateurs</b> : démarrer, arrêter, redémarrer, envoyer des commandes. <b>Par défaut personne</b> : renseignez au moins un utilisateur ou un rôle. Les commandes de lecture (liste, statut, joueurs) sont ouvertes à tous les membres, sauf si vous indiquez des rôles de lecture. Identifiants séparés par des virgules.</p>
+      ${dcDetect.invite_url ? `<p style="font-size:12px;margin:8px 0">➕ <a href="${escapeHtml(dcDetect.invite_url)}" target="_blank" rel="noopener">${dcT("Invite the bot to a Discord server (with the permissions needed to create channels)", "Inviter le bot sur un serveur Discord (avec les permissions pour créer les salons)")}</a></p>` : `<p style="color:var(--overlay0);font-size:12px;margin:6px 0">${dcT("Create the bot at", "Créez le bot sur")} <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a> (New Application → Bot → copy the token), ${dcT("paste the token, click Detect: the invite link and your servers appear.", "collez le token puis cliquez sur Détecter : le lien d'invitation et vos serveurs apparaissent.")}</p>`}
+
+      <h3 style="margin:14px 0 6px">2. ${dcT("Who can do what?", "Qui peut faire quoi ?")}</h3>
       <div class="form-grid">
-        <div class="form-row"><label>Opérateurs — utilisateurs</label><input id="dc-op-users" value="${escapeHtml(discordCfg.operator_user_ids)}"></div>
-        <div class="form-row"><label>Opérateurs — rôles</label><input id="dc-op-roles" value="${escapeHtml(discordCfg.operator_role_ids)}"></div>
-        <div class="form-row"><label>Rôles autorisés en lecture (vide = tous)</label><input id="dc-view-roles" value="${escapeHtml(discordCfg.viewer_role_ids)}"></div>
+        <div class="form-row"><label>${dcT("Operators — roles", "Opérateurs — rôles")} <span class="meta">${dcT("start/stop, console commands", "démarrer/arrêter, commandes console")}</span></label>${dcPicker("dc-op-roles", discordCfg.operator_role_ids, dcDetect.roles)}</div>
+        <div class="form-row"><label>${dcT("Console & status viewers — roles", "Lecteurs console et statut — rôles")} <span class="meta">${dcT("read-only", "lecture seule")}</span></label>${dcPicker("dc-console-view-roles", discordCfg.console_view_role_ids, dcDetect.roles)}</div>
+        <div class="form-row"><label>${dcT("Chat — roles", "Chat — rôles")} <span class="meta">${dcT("see and write in the chat channel", "voient et écrivent dans le salon chat")}</span></label>${dcPicker("dc-chat-roles", discordCfg.chat_role_ids, dcDetect.roles)}</div>
+        <div class="form-row"><label>${dcT("Read-only /mc commands — roles", "Commandes /mc de lecture — rôles")} <span class="meta">${dcT("empty = everyone", "vide = tout le monde")}</span></label>${dcPicker("dc-view-roles", discordCfg.viewer_role_ids, dcDetect.roles)}</div>
+        <div class="form-row"><label>${dcT("Operators — individual users (IDs)", "Opérateurs — utilisateurs précis (identifiants)")}</label><input id="dc-op-users" placeholder="123456789012345678, …" value="${escapeHtml((discordCfg.operator_user_ids || []).join(", "))}"></div>
       </div>
-      <h2 style="margin-top:14px">Notifications</h2>
+      <p style="color:var(--overlay0);font-size:12px">${dcT("<b>By default nobody</b> can start, stop or send commands: pick at least one operator role (or user). Channels created below are hidden from everyone except these roles.", "<b>Par défaut personne</b> ne peut démarrer, arrêter ni envoyer de commandes : choisissez au moins un rôle (ou utilisateur) opérateur. Les salons créés plus bas sont cachés à tous sauf à ces rôles.")}</p>
+
+      <h3 style="margin:14px 0 6px">3. ${dcT("Channels per Minecraft server", "Salons par serveur Minecraft")}</h3>
+      ${state.servers.length ? `<table><thead><tr><th>${dcT("Server", "Serveur")}</th><th>${dcT("Channels", "Salons")}</th><th>${dcT("Live console", "Console en direct")}</th><th>${dcT("Chat bridge", "Pont de chat")}</th><th>${dcT("Roles allowed to type commands", "Rôles pouvant taper des commandes")}</th><th></th></tr></thead><tbody>
+        ${state.servers.map((sv) => {
+          const sc = (discordCfg.servers || {})[sv.id];
+          return `<tr data-dc-row="${sv.id}">
+            <td><b>${escapeHtml(sv.name)}</b> ${sv.remote ? `<span class="badge badge-mauve">🖧 ${escapeHtml(sv.remote.label)}</span>` : ""}</td>
+            <td>${sc && sc.console_channel_id ? `<span class="badge badge-green">✓ ${dcT("created", "créés")}</span>` : "—"}</td>
+            <td><input type="checkbox" data-dc="stream" style="width:auto" ${!sc || sc.stream_console ? "checked" : ""}></td>
+            <td><input type="checkbox" data-dc="chat" style="width:auto" ${!sc || sc.bridge_chat ? "checked" : ""}></td>
+            <td>${dcPicker("dc-cmd-" + sv.id, sc ? sc.console_command_role_ids : [], dcDetect.roles, true)}</td>
+            <td style="white-space:nowrap"><button class="btn-green" data-dc-setup="${sv.id}">${sc && sc.console_channel_id ? "🔄 " + dcT("Update", "Mettre à jour") : "✨ " + dcT("Create channels", "Créer les salons")}</button>${sc ? ` <button class="btn-red" data-dc-remove="${sv.id}">${dcT("Remove", "Retirer")}</button>` : ""}</td>
+          </tr>`;
+        }).join("")}</tbody></table>
+        <p style="color:var(--overlay0);font-size:12px;margin-top:6px">${dcT("Needs the bot to have <i>Manage Channels</i> and <i>Manage Roles</i> (included in the invite link). “Update” re-applies the roles chosen above to existing channels; channels deleted by hand are recreated. “Remove” unlinks them (you will be asked whether to delete them on Discord too).", "Le bot doit avoir <i>Gérer les salons</i> et <i>Gérer les rôles</i> (inclus dans le lien d'invitation). « Mettre à jour » réapplique les rôles choisis ci-dessus aux salons existants ; un salon supprimé à la main est recréé. « Retirer » les délie (on vous demandera s'il faut aussi les supprimer sur Discord).")}</p>`
+        : `<div class="empty-state">${dcT("No servers.", "Aucun serveur.")}</div>`}
+
+      <h3 style="margin:14px 0 6px">4. ${dcT("Notifications", "Notifications")}</h3>
       <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:12px">
-        ${[["started","Démarrage"],["ready","Serveur prêt"],["stopped","Arrêt"],["crash","Crash"],["backup","Sauvegarde"],["scheduled_restart","Redémarrage programmé"],["auto_stop","Arrêt auto (inactif)"],["player_join_leave","Connexion/déconnexion joueur"]].map(([k, label]) => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="dc-n-${k}" style="width:auto" ${discordCfg["notify_" + k] ? "checked" : ""}> ${label}</label>`).join("")}
+        ${[["started", dcT("Starting", "Démarrage")], ["ready", dcT("Server ready", "Serveur prêt")], ["stopped", dcT("Stopped", "Arrêt")], ["crash", "Crash"], ["backup", dcT("Backup", "Sauvegarde")], ["scheduled_restart", dcT("Scheduled restart", "Redémarrage programmé")], ["auto_stop", dcT("Auto-stop (idle)", "Arrêt auto (inactif)")], ["player_join_leave", dcT("Player join/leave", "Connexion/déconnexion joueur")]].map(([k, label]) => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="dc-n-${k}" style="width:auto" ${discordCfg["notify_" + k] ? "checked" : ""}> ${label}</label>`).join("")}
       </div>
       <button class="btn-green" id="dc-save">${t('common.save')}</button>
-      <button class="btn-ghost" id="dc-test">📨 Envoyer un test</button>
+      <button class="btn-ghost" id="dc-test">📨 ${dcT("Send a test", "Envoyer un test")}</button>
       <span id="dc-msg" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
     <div class="card">
@@ -2295,30 +2340,89 @@ async function renderSettings() {
       toast(e.message || "Échec de l'enregistrement.", "error");
     }
   });
+  const dcPickerValue = (name) => {
+    const boxes = $$(`[data-picker="${name}"]`);
+    if (boxes.length) return boxes.filter((b) => b.checked).map((b) => b.value);
+    return ($("#" + name)?.value || "").split(/[\s,;]+/).filter(Boolean);
+  };
   const discordBody = () => ({
     enabled: $("#dc-enabled").checked,
+    language: $("#dc-lang").value,
     bot_token: $("#dc-token").value,
     webhook_url: $("#dc-webhook").value,
     guild_id: $("#dc-guild").value,
     channel_id: $("#dc-channel").value,
-    operator_user_ids: $("#dc-op-users").value,
-    operator_role_ids: $("#dc-op-roles").value,
-    viewer_role_ids: $("#dc-view-roles").value,
+    operator_user_ids: ($("#dc-op-users").value || "").split(/[\s,;]+/).filter(Boolean),
+    operator_role_ids: dcPickerValue("dc-op-roles"),
+    viewer_role_ids: dcPickerValue("dc-view-roles"),
+    console_view_role_ids: dcPickerValue("dc-console-view-roles"),
+    chat_role_ids: dcPickerValue("dc-chat-roles"),
     ...Object.fromEntries(["started", "ready", "stopped", "crash", "backup", "scheduled_restart", "auto_stop", "player_join_leave"].map((k) => ["notify_" + k, $("#dc-n-" + k).checked])),
   });
+  const dcSave = () => api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
   $("#dc-save").addEventListener("click", async () => {
-    await api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
-    toast("Réglages Discord enregistrés.", "success");
+    await dcSave();
+    toast(dcT("Discord settings saved.", "Réglages Discord enregistrés."), "success");
     // Le bot se (re)connecte en quelques secondes : on relit l'état avant de réafficher.
     setTimeout(renderSettings, 2500);
   });
-  $("#dc-test").addEventListener("click", async () => {
-    $("#dc-msg").textContent = "Envoi…";
+  $("#dc-detect").addEventListener("click", async () => {
+    $("#dc-msg").textContent = dcT("Detecting…", "Détection…");
     try {
-      await api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
+      const typed = $("#dc-token").value;
+      const d = await api("/discord/detect", { method: "POST", body: JSON.stringify({ bot_token: typed }) });
+      dcDetect.guilds = d.guilds || [];
+      dcDetect.invite_url = d.invite_url || "";
+      const keep = discordBody();
+      // On enregistre le token saisi tout de suite : les menus de rôles/salons en ont besoin.
+      await dcSave();
+      const guildId = keep.guild_id && dcDetect.guilds.some((g) => g.id === keep.guild_id) ? keep.guild_id : (dcDetect.guilds[0] || {}).id;
+      if (guildId) {
+        const g = await api(`/discord/guild/${guildId}`);
+        dcDetect.roles = g.roles; dcDetect.channels = g.channels;
+        await api("/discord/config", { method: "POST", body: JSON.stringify({ ...keep, bot_token: "", guild_id: guildId }) });
+      }
+      toast(dcT(`${dcDetect.guilds.length} Discord server(s) found.`, `${dcDetect.guilds.length} serveur(s) Discord trouvé(s).`), dcDetect.guilds.length ? "success" : "error");
+      renderSettings(true);
+    } catch { $("#dc-msg").textContent = ""; }
+  });
+  $("#dc-guild").addEventListener("change", async () => {
+    // Autre serveur Discord choisi : on enregistre puis on recharge ses rôles et salons.
+    try {
+      const gid = $("#dc-guild").value;
+      await api("/discord/config", { method: "POST", body: JSON.stringify({ ...discordBody(), bot_token: "", guild_id: gid, operator_role_ids: [], viewer_role_ids: [], console_view_role_ids: [], chat_role_ids: [], channel_id: "" }) });
+      const g = await api(`/discord/guild/${gid}`);
+      dcDetect.roles = g.roles; dcDetect.channels = g.channels;
+      renderSettings(true);
+    } catch {}
+  });
+  $$("[data-dc-setup]").forEach((b) => b.addEventListener("click", async () => {
+    const id = b.dataset.dcSetup;
+    const row = b.closest("tr");
+    b.disabled = true;
+    try {
+      await dcSave(); // rôles généraux choisis ci-dessus pris en compte
+      await api(`/discord/servers/${id}/setup`, { method: "POST", body: JSON.stringify({
+        stream_console: row.querySelector('[data-dc="stream"]').checked,
+        bridge_chat: row.querySelector('[data-dc="chat"]').checked,
+        command_role_ids: dcPickerValue("dc-cmd-" + id),
+      }) });
+      toast(dcT("Discord channels ready.", "Salons Discord prêts."), "success");
+      renderSettings(true);
+    } catch { b.disabled = false; }
+  }));
+  $$("[data-dc-remove]").forEach((b) => b.addEventListener("click", async () => {
+    const del = await confirmDialog(dcT("Also delete the category and channels on Discord?", "Supprimer aussi la catégorie et les salons sur Discord ?"), { confirmLabel: dcT("Delete on Discord", "Supprimer sur Discord"), cancelLabel: dcT("Only unlink", "Seulement délier") });
+    await api(`/discord/servers/${b.dataset.dcRemove}/setup?delete_channels=${del}`, { method: "DELETE" });
+    renderSettings(true);
+  }));
+  $("#dc-test").addEventListener("click", async () => {
+    $("#dc-msg").textContent = dcT("Sending…", "Envoi…");
+    try {
+      await dcSave();
       await api("/discord/test", { method: "POST" });
       $("#dc-msg").textContent = "";
-      toast("Message de test envoyé sur Discord.", "success");
+      toast(dcT("Test message sent to Discord.", "Message de test envoyé sur Discord."), "success");
     } catch (e) {
       $("#dc-msg").textContent = "";
     }

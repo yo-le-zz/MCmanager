@@ -1,0 +1,86 @@
+# Paquet RPM de MCManager (Fedora, RHEL / Rocky / Alma, openSUSE...).
+# Génère à partir de binaires DÉJÀ compilés (même binaire que le .deb) : voir build.sh -> build_rpm.
+Name:           mcmanager
+Version:        __VERSION__
+Release:        1
+Summary:        Gestionnaire de serveurs Minecraft avec interface web
+License:        MIT
+URL:            https://github.com/yo-le-zz/MCmanager
+# Pas de BuildArch : l'architecture vient de `rpmbuild --target` (x86_64 ou aarch64), ce qui permet de
+# fabriquer le paquet ARM depuis un PC x86 à partir du binaire ARM déjà compilé.
+# Binaire Rust déjà compilé (TLS embarqué : rustls) : pas d'analyse de dépendances automatique,
+# pas de strip ni de paquet debuginfo.
+AutoReqProv:    no
+%global debug_package %{nil}
+%global __strip /bin/true
+%global _build_id_links none
+%global __os_install_post %{nil}
+Requires(pre):  shadow-utils
+# Java est nécessaire pour LANCER les serveurs Minecraft (pas MCManager lui-même) : dépendance « faible ».
+Recommends:     java-21-openjdk-headless
+
+%description
+MCManager est un gestionnaire de serveurs Minecraft (Vanilla, Paper, Purpur,
+Spigot, Fabric, Forge, NeoForge) avec interface web intégrée, marketplace
+Modrinth, sauvegardes, schematics WorldEdit/FAWE, bot Discord, domaines
+personnalisés et contrôle d'autres machines MCManager.
+Mode serveur (VPS, Raspberry Pi) : service systemd « mcmanager-server ».
+
+%prep
+
+%build
+
+%install
+cp -a __PAYLOAD__/. %{buildroot}/
+
+%pre
+getent group mcmanager >/dev/null || groupadd -r mcmanager
+getent passwd mcmanager >/dev/null || useradd -r -g mcmanager -d /var/lib/mcmanager -s /sbin/nologin -c "MCManager" mcmanager
+# Ancien service renommé en 1.0.8 : on le désactive pour ne pas avoir deux instances.
+if systemctl is-enabled mcmanager-headless >/dev/null 2>&1; then
+  systemctl disable --now mcmanager-headless >/dev/null 2>&1 || :
+fi
+exit 0
+
+%post
+mkdir -p /var/lib/mcmanager
+chown mcmanager:mcmanager /var/lib/mcmanager 2>/dev/null || :
+chgrp mcmanager /etc/mcmanager/server.env 2>/dev/null || :
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ "$1" -eq 1 ]; then
+  echo ""
+  echo "MCManager installé."
+  echo "Poste de travail : commande mcmanager -> http://127.0.0.1:7777"
+  echo ""
+  echo "Mode serveur (VPS / machine distante) :"
+  echo "  sudo systemctl enable --now mcmanager-server"
+  echo "  Le mot de passe admin initial s'affiche dans : sudo journalctl -u mcmanager-server"
+  echo "  Pare-feu Fedora/RHEL (si accès depuis une autre machine) :"
+  echo "    sudo firewall-cmd --permanent --add-port=7777/tcp && sudo firewall-cmd --reload"
+  echo "  (ainsi que le port de chaque serveur Minecraft, 25565/tcp par défaut)"
+  echo "  Configuration : /etc/mcmanager/server.env"
+fi
+exit 0
+
+%preun
+if [ "$1" -eq 0 ]; then
+  systemctl disable --now mcmanager-server >/dev/null 2>&1 || :
+fi
+exit 0
+
+%postun
+systemctl daemon-reload >/dev/null 2>&1 || :
+exit 0
+
+%files
+%attr(0755,root,root) /usr/bin/mcmanager
+%attr(0755,root,root) /usr/bin/mcmanager-server
+/usr/share/mcmanager
+/usr/lib/systemd/user/mcmanager.service
+/usr/lib/systemd/system/mcmanager-server.service
+/usr/share/applications/mcmanager.desktop
+/usr/share/icons/hicolor/256x256/apps/mcmanager.png
+%dir /etc/mcmanager
+%config(noreplace) /etc/mcmanager/autostart.txt
+%config(noreplace) %attr(0640,root,mcmanager) /etc/mcmanager/server.env
+%doc /usr/share/doc/mcmanager

@@ -31,7 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+      # dpkg-dev -> .deb ; rpm -> .rpm (Fedora, RHEL/Rocky/Alma, openSUSE) : memes binaires, memes fichiers.
+      - run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
       # Sur le runner ARM la compilation est native (build.sh ne cross-compile
       # que lorsque le CPU de la machine differe de la cible).
       - run: chmod +x build.sh && ./build.sh ${{ matrix.task }}
@@ -40,6 +41,7 @@ jobs:
           name: linux-${{ matrix.arch }}-artifacts
           path: |
             dist/*.deb
+            dist/*.rpm
             dist/*.tar.gz
 
   # -------------------------------------------------------------- Windows

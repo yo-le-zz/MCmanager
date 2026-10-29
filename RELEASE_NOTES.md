@@ -1,23 +1,21 @@
-# MCManager v1.0.8 — Serveurs distants intégrés, mode serveur, Docker
+# MCManager v1.0.9 — Bot Discord complet, domaines, paquets .rpm
 
-## 🖧 Les serveurs distants sont dans votre tableau de bord
-Jumelez une autre machine MCManager : ses serveurs apparaissent **comme les vôtres**, avec une étiquette
-« distant ». Console en direct, fichiers, mods/plugins, schematics, sauvegardes, démarrage/arrêt — tout
-fonctionne à l'identique, exécuté sur la machine distante. Création directe là-bas via « Héberger sur ».
+## 🤖 Bot Discord
+- **Une catégorie par serveur Minecraft**, créée par le bot : salon **statut**, **console en direct** (les rôles autorisés
+  y tapent des commandes) et **chat** relié au jeu dans les deux sens.
+- **Détection automatique** des serveurs Discord, rôles et salons (cases à cocher, menus) : plus d'identifiants à recopier.
+- **Version anglaise** : le bot et les réglages parlent français ou anglais ; les commandes `/mc` suivent la langue de chaque utilisateur.
+- Sécurité : salons invisibles pour `@everyone`, droits revérifiés par MCManager, aucun ping possible, refus par défaut.
 
-## 🔴 Corrections critiques
-- `remote enable` ne s'éteint plus avec le terminal (`remote install-permanent`, service permanent).
-- Plusieurs utilisateurs/appareils en même temps ne se déconnectent plus mutuellement.
-- Requêtes à usage unique (anti-rejeu), ouverture de session signée.
-- Téléversements > 2 Mo (mods, schematics, archives) enfin acceptés.
+## 🔗 Domaines personnalisés
+Onglet **Domaines** : DNS (A/SRV), nginx (proxy TCP, interface web + WebSocket + HTTPS) et Caddy générés pour vos serveurs.
 
-## 🐳 Mode serveur
-`mcmanager-headless` devient **`mcmanager-server`** : interface web complète avec connexion multi-utilisateurs,
-service systemd durci, **image Docker** (`docker compose up -d`). Voir `docs/SERVER.md`.
+## 📦 Paquets `.rpm`
+Fedora, RHEL/Rocky/Alma, openSUSE : `.rpm` x86_64 et aarch64, mêmes binaires et mêmes fichiers que le `.deb`.
+`sudo dnf install ./mcmanager-1.0.9-1.x86_64.rpm`
 
-## ➖ Retiré
-Support Nix (on se concentre sur Linux).
+## 📥 Import / export
+Importer un serveur depuis une archive `.zip` ; bouton **Exporter** sur chaque serveur.
 
-## ⚠ À savoir
-Service `mcmanager-headless` remplacé par `mcmanager-server` (désactivé automatiquement par le .deb ; ses données
-sont à copier dans `/var/lib/mcmanager`). Transferts plafonnés à 512 Mo.
+## 🛠 Corrections
+Publication GitHub (artefact de trace), boîtes de confirmation bloquables par le navigateur, `.deb` sans dépendance `libssl`.

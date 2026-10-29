@@ -4,7 +4,7 @@ Section: utils
 Priority: optional
 Architecture: __ARCH__
 Maintainer: yolezz
-Depends: default-jre-headless | java17-runtime | java-runtime, libssl3 | libssl1.1
+Depends: default-jre-headless | java17-runtime | java-runtime
 Description: MCManager - gestionnaire de serveurs Minecraft
  MCManager est un gestionnaire de serveurs Minecraft (Vanilla, Paper, Purpur,
  Spigot, Fabric, Forge, NeoForge) avec interface web integree, marketplace
