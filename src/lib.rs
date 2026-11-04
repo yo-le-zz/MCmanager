@@ -15,6 +15,7 @@
 
 pub mod ai;
 pub mod api;
+pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod cli;
@@ -28,6 +29,7 @@ pub mod history;
 pub mod hub;
 pub mod models;
 pub mod network;
+pub mod perm;
 pub mod modrinth;
 pub mod ntfy;
 pub mod playit;

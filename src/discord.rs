@@ -801,7 +801,8 @@ pub async fn handle_interaction(state: AppState, api_base: String, interaction: 
                             respond(&http, &api_base, &interaction, pick(l, "❌ Commande vide ou invalide.", "❌ Empty or invalid command."), true).await;
                             return;
                         }
-                        tracing::info!("[discord] {} ({}) : commande « {text} » sur {}", caller.user_name, caller.user_id, server.name);
+                        tracing::info!("[discord] {} ({}) : commande sur {}", caller.user_name, caller.user_id, server.name);
+                        crate::audit::record(&state.data_dir, crate::audit::Entry::new("discord", &format!("discord:{}", caller.user_name.chars().filter(|c| !c.is_control()).take(40).collect::<String>()), "").detail(format!("/mc command sur « {} » (id Discord {})", server.name, caller.user_id)).http("POST", &format!("/api/servers/{}/command", server.id), None)).await;
                         let reply = match send_console_command(&state, &server, &text).await {
                             Ok(()) => pick(l, "✅ Commande envoyée à **{n}** : `{c}`", "✅ Command sent to **{n}**: `{c}`").replace("{n}", &server.label()).replace("{c}", &text.replace('`', "'")),
                             Err(e) => format!("❌ {e}"),
@@ -815,6 +816,7 @@ pub async fn handle_interaction(state: AppState, api_base: String, interaction: 
                         _ => (Action::Restart, "Redémarrage", "Restart"),
                     };
                     tracing::info!("[discord] {} ({}) : {sub_name} {}", caller.user_name, caller.user_id, server.name);
+                    crate::audit::record(&state.data_dir, crate::audit::Entry::new("discord", &format!("discord:{}", caller.user_name.chars().filter(|c| !c.is_control()).take(40).collect::<String>()), "").detail(format!("/mc {sub_name} sur « {} » (id Discord {})", server.name, caller.user_id)).http("POST", &format!("/api/servers/{}", server.id), None)).await;
                     if action == Action::Start && server.running {
                         respond(&http, &api_base, &interaction, &pick(l, "ℹ️ **{n}** est déjà en ligne.", "ℹ️ **{n}** is already online.").replace("{n}", &server.label()), true).await;
                         return;

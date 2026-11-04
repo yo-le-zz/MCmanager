@@ -45,6 +45,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
+
+use crate::audit::{self, Entry};
+use crate::perm::{self, Level, Need};
 
 const PBKDF2_ROUNDS: u32 = 310_000;
 const COOKIE_NAME: &str = "mcm_session";
@@ -62,6 +66,38 @@ pub struct User {
     rounds: u32,
     pub admin: bool,
     pub created_at: DateTime<Utc>,
+    /// Niveau d'accès sur tous les serveurs (voir `perm.rs`) ; `None` = aucun, sauf cas listés dans `servers`.
+    /// Un compte enregistré avant l'introduction des droits par serveur garde l'accès complet qu'il avait.
+    #[serde(default = "legacy_default_level")]
+    pub default_level: Option<Level>,
+    /// Niveaux par serveur : remplacent `default_level` (pour monter ou descendre).
+    #[serde(default)]
+    pub servers: HashMap<Uuid, Level>,
+}
+
+fn legacy_default_level() -> Option<Level> {
+    Some(Level::Manage)
+}
+
+impl User {
+    /// Niveau effectif sur un serveur (`None` = pas d'accès). Un administrateur a tout.
+    pub fn level_for(&self, id: &Uuid) -> Option<Level> {
+        if self.admin {
+            return Some(Level::Manage);
+        }
+        self.servers.get(id).copied().or(self.default_level)
+    }
+
+    pub fn allows(&self, need: &Need) -> bool {
+        if self.admin {
+            return true;
+        }
+        match need {
+            Need::Anyone | Need::List => true,
+            Need::Admin => false,
+            Need::Server(id, required) => self.level_for(id).map(|l| l >= *required).unwrap_or(false),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +160,9 @@ fn make_user(username: &str, password: &str, admin: bool) -> Result<User> {
         rounds: PBKDF2_ROUNDS,
         admin,
         created_at: Utc::now(),
+        // Un nouveau compte n'a accès à aucun serveur tant qu'on ne lui en donne pas.
+        default_level: None,
+        servers: HashMap::new(),
     })
 }
 
@@ -216,6 +255,8 @@ impl AuthState {
         if let Some(old) = users.iter().find(|u| u.username == username) {
             new_user.admin = old.admin;
             new_user.created_at = old.created_at;
+            new_user.default_level = old.default_level;
+            new_user.servers = old.servers.clone();
         }
         users.retain(|u| u.username != username);
         users.push(new_user);
@@ -227,6 +268,17 @@ impl AuthState {
             self.sessions.write().await.retain(|_, s| s.username != username);
         }
         Ok(())
+    }
+
+    /// Règle les droits d'un compte (voir `perm.rs`). Pris en compte tout de suite : le compte est relu à chaque requête.
+    pub async fn set_access(&self, username: &str, default_level: Option<Level>, servers: HashMap<Uuid, Level>) -> Result<()> {
+        let mut users = self.users.write().await;
+        let user = users.iter_mut().find(|u| u.username == username).ok_or_else(|| anyhow::anyhow!("utilisateur introuvable"))?;
+        user.default_level = default_level;
+        user.servers = servers;
+        let snapshot = users.clone();
+        drop(users);
+        self.persist(&snapshot).await
     }
 
     pub async fn remove_user(&self, username: &str) -> Result<bool> {
@@ -346,6 +398,11 @@ impl AuthState {
     }
 }
 
+/// Un nom d'utilisateur tenté est une entrée non fiable : on borne sa longueur et on retire tout contrôle.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(40).collect()
+}
+
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
@@ -379,19 +436,39 @@ pub async fn require_auth(State(auth): State<Arc<AuthState>>, mut req: Request, 
         return next.run(req).await;
     }
     if auth.bearer_ok(req.headers()) {
-        return next.run(req).await;
+        let mut resp = next.run(req).await;
+        resp.extensions_mut().insert(Actor("jeton-api".to_string()));
+        return resp;
     }
     if !origin_ok(req.headers()) {
         return err(StatusCode::FORBIDDEN, "Origine refusee.");
     }
     match auth.session_from_headers(req.headers()).await {
         Some((_, user)) => {
+            let need = perm::classify(req.method(), req.uri().path());
+            if !user.allows(&need) {
+                let msg = match need {
+                    Need::Server(_, level) => format!("Permission refusée : cette action exige le niveau « {} » sur ce serveur.", level.label()),
+                    _ => "Permission refusée : réservé aux administrateurs.".to_string(),
+                };
+                let mut resp = err(StatusCode::FORBIDDEN, msg);
+                resp.extensions_mut().insert(Actor(user.username.clone()));
+                return resp;
+            }
+            let name = user.username.clone();
             req.extensions_mut().insert(user);
-            next.run(req).await
+            let mut resp = next.run(req).await;
+            resp.extensions_mut().insert(Actor(name));
+            resp
         }
         None => err(StatusCode::UNAUTHORIZED, "Connexion requise."),
     }
 }
+
+/// Qui a fait la requête : posé sur la *réponse* par `require_auth` pour que la couche d'audit
+/// (plus à l'extérieur) puisse l'inscrire au journal.
+#[derive(Debug, Clone)]
+pub struct Actor(pub String);
 
 // ───────────────────────── routes /auth ─────────────────────────
 
@@ -405,6 +482,7 @@ pub fn router(auth: Arc<AuthState>) -> Router {
         .route("/auth/sessions/:id", delete(revoke_session))
         .route("/auth/users", get(list_users).post(create_user))
         .route("/auth/users/:name", delete(delete_user))
+        .route("/auth/users/:name/access", axum::routing::put(set_user_access))
         .with_state(auth)
 }
 
@@ -434,10 +512,13 @@ async fn login(State(auth): State<Arc<AuthState>>, peer: Option<ConnectInfo<Sock
     };
     let Some(user) = user.filter(|_| ok) else {
         auth.record_failure(&ip).await;
+        // On inscrit le nom tenté (utile pour repérer une attaque), jamais le mot de passe.
+        audit::record(&auth.data_dir, Entry::new("auth", &sanitize_for_log(&body.username), &ip).detail("connexion refusée")).await;
         return err(StatusCode::UNAUTHORIZED, "Identifiants incorrects.");
     };
     let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
     let token = auth.create_session(&user.username, &ip, ua).await;
+    audit::record(&auth.data_dir, Entry::new("auth", &user.username, &ip).detail("connexion réussie")).await;
     let cookie = format!(
         "{COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
         SESSION_ABSOLUTE.num_seconds(),
@@ -452,7 +533,9 @@ async fn login(State(auth): State<Arc<AuthState>>, peer: Option<ConnectInfo<Sock
 
 async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Response {
     if let Some(token) = cookie_value(&headers, COOKIE_NAME) {
-        auth.sessions.write().await.remove(&sha256_hex(&token));
+        if let Some(s) = auth.sessions.write().await.remove(&sha256_hex(&token)) {
+            audit::record(&auth.data_dir, Entry::new("auth", &s.username, &s.ip).detail("déconnexion")).await;
+        }
     }
     let mut resp = Json(json!({ "ok": true })).into_response();
     resp.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("mcm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"));
@@ -461,7 +544,7 @@ async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Respo
 
 async fn me(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Response {
     match auth.session_from_headers(&headers).await {
-        Some((_, u)) => Json(json!({ "auth_required": true, "username": u.username, "admin": u.admin })).into_response(),
+        Some((_, u)) => Json(json!({ "auth_required": true, "username": u.username, "admin": u.admin, "default_level": u.default_level, "servers": u.servers })).into_response(),
         None => err(StatusCode::UNAUTHORIZED, "Connexion requise."),
     }
 }
@@ -482,7 +565,10 @@ async fn change_password(State(auth): State<Arc<AuthState>>, headers: HeaderMap,
     }
     match auth.add_user(&user.username, &body.new, user.admin, true).await {
         // add_user(replace) ends all sessions of the account, this one included: log in again.
-        Ok(()) => Json(json!({ "ok": true, "relogin": true })).into_response(),
+        Ok(()) => {
+            audit::record(&auth.data_dir, Entry::new("auth", &user.username, "").detail("mot de passe changé (toutes les sessions fermées)")).await;
+            Json(json!({ "ok": true, "relogin": true })).into_response()
+        }
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
@@ -512,7 +598,10 @@ async fn revoke_session(State(auth): State<Arc<AuthState>>, headers: HeaderMap, 
     let key = sessions.iter().find(|(_, s)| s.id == id && (user.admin || s.username == user.username)).map(|(k, _)| k.clone());
     match key {
         Some(k) => {
-            sessions.remove(&k);
+            let removed = sessions.remove(&k);
+            drop(sessions);
+            let target = removed.map(|r| r.username).unwrap_or_default();
+            audit::record(&auth.data_dir, Entry::new("auth", &user.username, "").detail(format!("session de {target} fermée"))).await;
             Json(json!({ "ok": true })).into_response()
         }
         None => err(StatusCode::NOT_FOUND, "Session introuvable."),
@@ -534,7 +623,7 @@ async fn list_users(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> R
     if let Err(r) = require_admin(&auth, &headers).await {
         return r;
     }
-    let users: Vec<_> = auth.list_users().await.into_iter().map(|u| json!({ "username": u.username, "admin": u.admin, "created_at": u.created_at })).collect();
+    let users: Vec<_> = auth.list_users().await.into_iter().map(|u| json!({ "username": u.username, "admin": u.admin, "created_at": u.created_at, "default_level": u.default_level, "servers": u.servers })).collect();
     Json(users).into_response()
 }
 
@@ -544,24 +633,65 @@ struct CreateUserBody {
     password: String,
     #[serde(default)]
     admin: bool,
+    /// Accès à tous les serveurs (absent = aucun).
+    #[serde(default)]
+    default_level: Option<Level>,
+    #[serde(default)]
+    servers: HashMap<Uuid, Level>,
+}
+
+#[derive(Deserialize)]
+struct AccessBody {
+    #[serde(default)]
+    default_level: Option<Level>,
+    #[serde(default)]
+    servers: HashMap<Uuid, Level>,
 }
 
 async fn create_user(State(auth): State<Arc<AuthState>>, headers: HeaderMap, Json(body): Json<CreateUserBody>) -> Response {
-    if let Err(r) = require_admin(&auth, &headers).await {
-        return r;
-    }
+    let admin = match require_admin(&auth, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
     match auth.add_user(&body.username, &body.password, body.admin, false).await {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Ok(()) => {
+            if !body.admin {
+                if let Err(e) = auth.set_access(&body.username, body.default_level, body.servers).await {
+                    return err(StatusCode::BAD_REQUEST, e.to_string());
+                }
+            }
+            audit::record(&auth.data_dir, Entry::new("auth", &admin.username, "").detail(format!("compte « {} » créé{}", sanitize_for_log(&body.username), if body.admin { " (administrateur)" } else { "" }))).await;
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
-async fn delete_user(State(auth): State<Arc<AuthState>>, headers: HeaderMap, AxPath(name): AxPath<String>) -> Response {
-    if let Err(r) = require_admin(&auth, &headers).await {
-        return r;
+async fn set_user_access(State(auth): State<Arc<AuthState>>, headers: HeaderMap, AxPath(name): AxPath<String>, Json(body): Json<AccessBody>) -> Response {
+    let admin = match require_admin(&auth, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let summary = format!("droits de « {} » modifiés (défaut : {}, {} serveur(s) précisé(s))", sanitize_for_log(&name), body.default_level.map(|l| l.label()).unwrap_or("aucun"), body.servers.len());
+    match auth.set_access(&name, body.default_level, body.servers).await {
+        Ok(()) => {
+            audit::record(&auth.data_dir, Entry::new("auth", &admin.username, "").detail(summary)).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => err(StatusCode::NOT_FOUND, e.to_string()),
     }
+}
+
+async fn delete_user(State(auth): State<Arc<AuthState>>, headers: HeaderMap, AxPath(name): AxPath<String>) -> Response {
+    let admin = match require_admin(&auth, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
     match auth.remove_user(&name).await {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(true) => {
+            audit::record(&auth.data_dir, Entry::new("auth", &admin.username, "").detail(format!("compte « {} » supprimé", sanitize_for_log(&name)))).await;
+            Json(json!({ "ok": true })).into_response()
+        }
         Ok(false) => err(StatusCode::NOT_FOUND, "Utilisateur introuvable."),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }

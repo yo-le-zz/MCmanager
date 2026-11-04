@@ -101,7 +101,7 @@ administrateurs créent et suppriment les comptes.
 - Mots de passe : PBKDF2-SHA256 (310 000 tours), jamais stockés en clair. Sessions
   par cookie `HttpOnly` + `SameSite=Strict`, 12 h d'inactivité. Après 8 échecs de
   connexion, l'adresse est bloquée 10 min.
-- Seuls les administrateurs peuvent jumeler une machine ou gérer les comptes.
+- Seuls les administrateurs peuvent jumeler une machine, gérer les comptes ou créer/supprimer des serveurs ; les autres comptes ont des droits **par serveur** (voir plus bas).
 
 En ligne de commande (fonctionne même pendant que le service tourne) :
 
@@ -111,6 +111,46 @@ mcmanager-server user add alice [--admin]
 mcmanager-server user passwd alice
 mcmanager-server user remove alice
 ```
+
+## Droits par serveur
+
+Chaque compte non administrateur a un **niveau d'accès** par serveur Minecraft (ou aucun) :
+
+| Niveau | Peut |
+|---|---|
+| `view` | voir le serveur, son état, l'historique, la console **en lecture seule**, la liste des mods/sauvegardes |
+| `console` | + envoyer des commandes, vider la console, diagnostiquer un crash |
+| `control` | + démarrer, arrêter, forcer l'arrêt |
+| `manage` | + fichiers, mods/plugins, sauvegardes, propriétés, schematics, réglages du serveur |
+
+Un compte a un niveau **pour tous les serveurs** (y compris ceux créés plus tard) et des **exceptions par serveur** qui le
+remplacent (monter ou descendre). Les **administrateurs** ont tout, et sont seuls à pouvoir : créer ou supprimer un serveur,
+modifier les réglages, Discord, domaines, jumelage de machines, comptes, mises à jour, consulter le journal d'audit.
+
+- Interface : onglet **Utilisateurs → 🔑 Accès** (effet immédiat, sans reconnexion). Un compte ne voit dans la liste, le
+  tableau de bord et les menus que ce qui lui est accordé ; les boutons interdits disparaissent.
+- Ligne de commande (marche pendant que le service tourne) :
+  `mcmanager-server user access alice control` · `user access alice view 1111…=manage` · `user access alice none`.
+- **Un nouveau compte n'a accès à rien** tant qu'on ne lui donne rien. Les comptes créés *avant* cette version gardent l'accès
+  complet qu'ils avaient (rien ne casse à la mise à jour) : à resserrer avec `user access`.
+- Le serveur **refuse** toute action non autorisée (403), l'interface ne fait que masquer les boutons. La règle est « refus par
+  défaut » : une route non prévue est réservée aux administrateurs, et une route de serveur inconnue exige `manage`.
+- Les serveurs d'**instances distantes** suivent les mêmes règles que les locaux, par leur identifiant.
+
+## Journal d'audit
+
+`audit.log` (dossier de données, une entrée JSON par ligne, rotation à 5 Mo, 5 fichiers) enregistre **qui a fait quoi, quand,
+depuis quelle adresse** :
+
+- toute modification (`POST`/`PUT`/`PATCH`/`DELETE`) avec son code de réponse, les **accès refusés**, les exports téléchargés ;
+- connexions réussies ou **échouées** (au nom tenté), déconnexions, changements de mot de passe, création/suppression de comptes,
+  changements de droits, sessions fermées de force ;
+- les actions des **machines jumelées** (`machine:<nom>`) et du **bot Discord** (`discord:<nom>`, avec l'identifiant Discord).
+
+**Jamais enregistrés** : corps de requête, paramètres d'URL, mots de passe, tokens, contenu des fichiers ou **des commandes**
+(le journal dit qu'une commande a été envoyée à tel serveur, pas laquelle). Consultation : onglet **Utilisateurs → Journal d'audit**
+(recherche, utilisateur, « refus seulement ») ou `GET /api/audit`. Derrière un reverse proxy, activez `MCMANAGER_TRUST_PROXY=1`
+pour que l'adresse enregistrée soit celle du client et non celle du proxy.
 
 ## Voir les serveurs d'autres machines comme les vôtres
 

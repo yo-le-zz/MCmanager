@@ -65,7 +65,8 @@ async fn main() -> anyhow::Result<()> {
             ["user", "add", name, "--admin"] => cmd_user_set(&data_dir, name, true, false).await,
             ["user", "passwd", name] => cmd_user_set(&data_dir, name, false, true).await,
             ["user", "remove", name] => cmd_user_remove(&data_dir, name).await,
-            _ => { println!("Usage : mcmanager-server user list | add <nom> [--admin] | passwd <nom> | remove <nom>"); Ok(()) }
+            ["user", "access", name, level, rest @ ..] => cmd_user_access(&data_dir, name, level, rest).await,
+            _ => { println!("Usage : mcmanager-server user list | add <nom> [--admin] | passwd <nom> | remove <nom> | access <nom> <view|console|control|manage|none> [<id-serveur>=<niveau> ...]"); Ok(()) }
         };
         if let Err(e) = result {
             eprintln!("Erreur : {e}");
@@ -266,6 +267,7 @@ async fn dispatch(state: &state::AppState, remote_repl: &mut RemoteRepl, line: &
         ["user", "add", name, "--admin"] => cmd_user_set(&state.data_dir, name, true, false).await,
         ["user", "passwd", name] => cmd_user_set(&state.data_dir, name, false, true).await,
         ["user", "remove", name] => cmd_user_remove(&state.data_dir, name).await,
+        ["user", "access", name, level, rest @ ..] => cmd_user_access(&state.data_dir, name, level, rest).await,
         ["remote", "pair", host, label] => cmd_remote_pair(state, remote_repl, host, label).await,
         ["remote", "targets"] => cmd_remote_targets(state).await,
         ["remote", "list", label] => cmd_remote_call(state, remote_repl, label, serde_json::json!({"action":"list"})).await,
@@ -295,7 +297,7 @@ fn print_help() {
                                  cree un nouveau serveur (loader: vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge)
   autostart add|remove|list <id>
                                  serveurs a demarrer automatiquement quand ce daemon se lance (ex: apres un reboot)
-  user list|add <nom> [--admin]|passwd <nom>|remove <nom>
+  user list|add <nom> [--admin]|passwd <nom>|remove <nom>|access <nom> <niveau> [<id>=<niveau>...]
                                  comptes de connexion a l'interface web (utilisable aussi depuis un autre terminal
                                  pendant que le daemon tourne : mcmanager-server user passwd admin)
   remote fingerprint            empreinte de l'identite RSA de cette instance
@@ -735,7 +737,12 @@ async fn cmd_user_list(data_dir: &std::path::Path) -> anyhow::Result<()> {
         println!("Aucun compte (le premier demarrage en mode --daemon cree 'admin').");
     }
     for u in users {
-        println!("  {}{}  (cree le {})", u.username, if u.admin { " [admin]" } else { "" }, u.created_at.format("%Y-%m-%d"));
+        let access = if u.admin {
+            "tous les droits".to_string()
+        } else {
+            format!("serveurs : {}{}", u.default_level.map(|l| l.label()).unwrap_or("aucun accès"), if u.servers.is_empty() { String::new() } else { format!(" (+ {} exception(s))", u.servers.len()) })
+        };
+        println!("  {}{}  - {}  (cree le {})", u.username, if u.admin { " [admin]" } else { "" }, access, u.created_at.format("%Y-%m-%d"));
     }
     Ok(())
 }
@@ -750,6 +757,24 @@ async fn cmd_user_set(data_dir: &std::path::Path, name: &str, admin: bool, repla
     auth.add_user(name, &password, admin, replace).await?;
     println!("Compte '{name}' {}.", if replace { "mis a jour" } else { "cree" });
     println!("(pris en compte immediatement par un daemon deja lance)");
+    Ok(())
+}
+
+/// `user access alice control 1111...=manage` : niveau par défaut + exceptions par serveur.
+async fn cmd_user_access(data_dir: &std::path::Path, name: &str, level: &str, exceptions: &[&str]) -> anyhow::Result<()> {
+    use mcmanager::perm::Level;
+    let parse = |l: &str| -> anyhow::Result<Level> {
+        serde_json::from_value(serde_json::Value::String(l.to_lowercase())).map_err(|_| anyhow::anyhow!("niveau inconnu « {l} » (view, console, control, manage)"))
+    };
+    let default_level = if level.eq_ignore_ascii_case("none") || level == "-" { None } else { Some(parse(level)?) };
+    let mut servers = std::collections::HashMap::new();
+    for e in exceptions {
+        let (id, lvl) = e.split_once('=').ok_or_else(|| anyhow::anyhow!("exception invalide « {e} » (attendu : <id-serveur>=<niveau>)"))?;
+        servers.insert(uuid::Uuid::parse_str(id).map_err(|_| anyhow::anyhow!("identifiant de serveur invalide : {id}"))?, parse(lvl)?);
+    }
+    let auth = auth::AuthState::load(data_dir).await?;
+    auth.set_access(name, default_level, servers).await?;
+    println!("Droits de '{name}' mis a jour (effet immediat sur un daemon deja lance).");
     Ok(())
 }
 

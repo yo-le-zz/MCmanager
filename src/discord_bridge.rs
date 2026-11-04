@@ -402,7 +402,9 @@ pub async fn handle_message(state: AppState, api_base: String, msg: Value) {
             return;
         }
         let Some(server) = server_info(&state, server_id).await else { return };
-        tracing::info!("[discord] {} ({}) : console de {} : « {command} »", caller.user_name, caller.user_id, server.name);
+        // Le journal d'audit dit qu'une commande a été envoyée, jamais laquelle (elle peut contenir un secret).
+        tracing::info!("[discord] {} ({}) : commande dans la console de {}", caller.user_name, caller.user_id, server.name);
+        crate::audit::record(&state.data_dir, crate::audit::Entry::new("discord", &format!("discord:{}", caller.user_name.chars().filter(|c| !c.is_control()).take(40).collect::<String>()), "").detail(format!("commande via le salon console de « {} » (id Discord {})", server.name, caller.user_id)).http("POST", &format!("/api/servers/{}/command", server.id), None)).await;
         match discord::send_console_command(&state, &server, &command).await {
             Ok(()) => react(&http, &api_base, &token, channel, message_id, EMOJI_OK).await,
             Err(e) => {

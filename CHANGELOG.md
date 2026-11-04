@@ -3,7 +3,19 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
-## [1.0.9] - 2026-10-30 (bot Discord, domaines personnalisés, import/export, paquets .rpm)
+## [1.0.9] - 2026-10-30 (bot Discord, domaines, droits par serveur, audit, import/export, paquets .rpm)
+### Nouvelle interface (refonte complète du design)
+- **Design system** sobre (palette neutre, typographie Inter + JetBrains Mono embarquées, bordures fines, états de survol/focus soignés) à la place
+  de la palette Catppuccin d'origine ; **vraies icônes** (Lucide, sprite SVG) à la place des emojis dans toute l'interface.
+- **Navigation par catégories** : Vue d'ensemble · Serveur actif (avec le nom du serveur) · Réseau · Administration.
+- **Fond animé** : matrice de points qui réagit à la souris (points repoussés et teintés d'accent, onde de choc au clic) ; variante **planisphère**
+  en points. Au repos, aucun calcul ; respecte « réduire les animations » du système.
+- **Carte du monde** (Domaines et Contrôle à distance) : machines placées par ville (liste) ou détection par IP sur clic, flux de données animés
+  entre elles, zoom automatique sur la région avec points haute résolution, étiquettes sans chevauchement.
+- **Personnalisation poussée** (Paramètres → Apparence, effet immédiat, conservée dans le navigateur) : 6 thèmes (automatique, graphite, minuit,
+  forêt, clair, contraste élevé), couleur d'accent libre, arrondi des coins, densité, taille du texte, police, largeur du menu, style et intensité du fond.
+- Aucune ressource externe : icônes, polices et cartes sont dans `web/assets` (voir THIRD_PARTY_NOTICES.md).
+- Bug trouvé par les tests visuels : une variable locale masquait la fonction `isAdmin` sur la page Utilisateurs (le journal d'audit ne s'affichait pas).
 ### Bot Discord (nouveau, voir docs/DISCORD.md · docs/DISCORD.en.md)
 - **Une catégorie par serveur Minecraft** créée par le bot, avec trois salons : **statut** (notifications de CE serveur),
   **console** (sortie en direct, et envoi de commandes depuis Discord par les rôles autorisés) et **chat** (pont
@@ -29,6 +41,18 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 - Onglet **🔗 Domaines** : un domaine par serveur (et pour l'interface), génération des enregistrements DNS (A / SRV), de la
   config nginx (proxy TCP `stream`, reverse proxy web avec WebSocket + HTTPS certbot) et d'un Caddyfile. Rien n'est appliqué
   automatiquement. Domaine affiché sur les cartes de serveur. Valeurs validées (pas d'injection de directives).
+### Droits par serveur (nouveau, voir docs/SERVER.md)
+- Chaque compte a un niveau par serveur : `view` (lecture seule, y compris la console) < `console` (commandes) < `control`
+  (démarrer/arrêter) < `manage` (fichiers, mods, sauvegardes, réglages), avec un niveau « tous les serveurs » et des exceptions par
+  serveur. Les administrateurs seuls créent/suppriment des serveurs et gèrent réglages, Discord, domaines, machines jumelées, comptes.
+- Appliqué **côté serveur** (403), à refus par défaut : une route non prévue est réservée aux administrateurs. La liste, le tableau de
+  bord et les menus ne montrent que ce qui est autorisé ; la console devient lecture seule (la saisie est aussi refusée par le serveur).
+- Changement de droits immédiat, sans reconnexion : onglet *Utilisateurs → 🔑 Accès* ou `mcmanager-server user access`.
+- Un nouveau compte n'a accès à rien ; les comptes existants gardent leur accès complet à la mise à jour.
+### Journal d'audit (nouveau)
+- `audit.log` : modifications, accès refusés, connexions (réussies et échouées), changements de comptes et de droits, actions des machines
+  jumelées et du bot Discord, avec utilisateur, adresse et code de réponse. Jamais de contenu de commande, de fichier, de mot de passe
+  ni de paramètre d'URL. Rotation 5 Mo × 5. Consultable (recherche, filtre « refus ») dans l'onglet *Utilisateurs*.
 ### Paquets `.rpm` (Fedora, RHEL / Rocky / AlmaLinux, openSUSE)
 - `./build.sh linux` et `linux-arm64` produisent maintenant un `.rpm` (x86_64 et aarch64) **en plus** du `.deb` : mêmes binaires,
   mêmes fichiers, même service systemd `mcmanager-server`, utilisateur dédié `mcmanager`, fichiers de configuration conservés

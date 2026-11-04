@@ -83,3 +83,9 @@ Hors préfixe `/api` : `POST /auth/login` `{username,password}` · `POST /auth/l
 - `GET|POST /discord/config` (token/webhook jamais renvoyés : `has_token`, `has_webhook`) · `GET /discord/status` · `POST /discord/test`
 - `GET|PUT /network` : domaines par serveur + configuration générée (DNS, nginx stream, nginx web, Caddy) · `POST /network/detect-ip`
 - `GET /servers` ajoute `domain` / `public_port` aux serveurs ayant un domaine.
+
+## Droits et audit (v1.0.9)
+- `PUT /auth/users/:name/access` `{default_level, servers:{<uuid>:<level>}}` (administrateurs) ; niveaux : `view` < `console` < `control` < `manage`.
+  `GET /auth/users` et `GET /auth/me` renvoient `default_level` et `servers`. `POST /auth/users` accepte les mêmes champs.
+- `GET /servers` ne renvoie à un compte non administrateur que ses serveurs, avec `my_level`. Réponse `403` pour toute action non autorisée.
+- `GET /audit?limit=&user=&q=&only_denied=` (administrateurs) : journal d'audit, plus récent d'abord.

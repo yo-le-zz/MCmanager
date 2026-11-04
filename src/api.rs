@@ -81,8 +81,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/playit/detect-local", post(playit_use_local))
         .route("/api/playit/ws", get(ws::playit_ws))
         .route("/api/remote/hub", get(remote_hub_status))
+        .route("/api/audit", get(get_audit))
         .route("/api/network", get(get_network).put(save_network))
         .route("/api/network/detect-ip", post(detect_public_ip))
+        .route("/api/network/geolocate", post(geolocate))
         .route("/api/discord/config", get(get_discord_config).post(save_discord_config))
         .route("/api/discord/status", get(get_discord_status))
         .route("/api/discord/test", post(test_discord))
@@ -168,7 +170,7 @@ fn parse_loader(s: &str) -> AppResult<Loader> {
 
 // ───────────────────────── servers ─────────────────────────
 
-async fn list_servers(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Json<Vec<serde_json::Value>> {
+async fn list_servers(State(state): State<AppState>, headers: axum::http::HeaderMap, user: Option<axum::Extension<crate::auth::User>>) -> Json<Vec<serde_json::Value>> {
     let mut list: Vec<serde_json::Value> = {
         let servers = state.servers.read().await;
         servers.values().filter_map(|s| serde_json::to_value(s).ok()).collect()
@@ -179,9 +181,16 @@ async fn list_servers(State(state): State<AppState>, headers: axum::http::Header
     if !headers.contains_key(remote::TUNNEL_HEADER) {
         list.extend(crate::hub::remote_servers_json(&state).await);
     }
+    // Un compte non administrateur ne voit que les serveurs auxquels il a accès (voir perm.rs).
+    if let Some(axum::Extension(u)) = &user {
+        list.retain(|s| s["id"].as_str().and_then(|x| Uuid::parse_str(x).ok()).map(|id| u.level_for(&id).is_some()).unwrap_or(false));
+    }
     // Domaine personnalisé configuré dans l'onglet Réseau (affiché sur les cartes).
     let net = network::load(&state.data_dir).await;
     for s in list.iter_mut() {
+        if let (Some(axum::Extension(u)), Some(id)) = (&user, s["id"].as_str().and_then(|x| Uuid::parse_str(x).ok())) {
+            s["my_level"] = json!(u.level_for(&id));
+        }
         if let Some(sd) = s["id"].as_str().and_then(|x| Uuid::parse_str(x).ok()).and_then(|id| net.servers.get(&id)) {
             s["domain"] = json!(sd.domain);
             s["public_port"] = json!(sd.public_port);
@@ -1280,6 +1289,13 @@ async fn test_ntfy(State(state): State<AppState>) -> AppResult<Json<serde_json::
     Ok(Json(json!({ "ok": true })))
 }
 
+// ───────────────────────── Journal d'audit ─────────────────────────
+
+/// Journal d'audit (administrateurs : voir `perm.rs`, la route n'est dans aucune liste blanche).
+async fn get_audit(State(state): State<AppState>, Query(q): Query<crate::audit::Query>) -> Json<Vec<crate::audit::Entry>> {
+    Json(crate::audit::read(&state.data_dir, &q).await)
+}
+
 // ───────────────────────── Réseau : domaines, nginx, DNS ─────────────────────────
 
 /// Tous les serveurs connus (locaux + instances jumelées) avec la machine qui les héberge vue d'ici.
@@ -1331,6 +1347,44 @@ async fn detect_public_ip(State(state): State<AppState>) -> AppResult<Json<serde
         return Err(anyhow::anyhow!("réponse inattendue du service de détection").into());
     }
     Ok(Json(json!({ "ip": ip })))
+}
+
+#[derive(Deserialize)]
+struct GeoBody {
+    /// Hôte à situer ; vide = cette machine (son IP publique est détectée d'abord).
+    #[serde(default)]
+    host: String,
+}
+
+/// Situe une machine sur la carte à partir de son IP publique (service ipwho.is), uniquement sur demande.
+/// Seule l'adresse IP est envoyée à ce service ; une adresse privée n'est jamais géolocalisable.
+async fn geolocate(State(state): State<AppState>, Json(b): Json<GeoBody>) -> AppResult<Json<serde_json::Value>> {
+    let timeout = std::time::Duration::from_secs(7);
+    let host = network::host_without_port(&b.host);
+    if host.len() > 253 || host.chars().any(|c| c.is_control() || c == '/' || c == ' ') {
+        return Err(anyhow::anyhow!("adresse invalide").into());
+    }
+    let ip: std::net::IpAddr = if host.is_empty() {
+        let text = state.http.get("https://api.ipify.org").timeout(timeout).send().await.map_err(|e| anyhow::anyhow!("détection de l'IP publique impossible : {e}"))?.text().await?;
+        text.trim().parse().map_err(|_| anyhow::anyhow!("réponse inattendue du service de détection"))?
+    } else if let Ok(ip) = host.parse() {
+        ip
+    } else {
+        tokio::net::lookup_host((host.as_str(), 0)).await.map_err(|e| anyhow::anyhow!("nom d'hôte introuvable : {e}"))?.next().ok_or_else(|| anyhow::anyhow!("nom d'hôte introuvable"))?.ip()
+    };
+    if !network::is_public_ip(&ip) {
+        return Err(anyhow::anyhow!("{ip} est une adresse privée (réseau local) : elle ne peut pas être située automatiquement, choisissez une ville dans la liste").into());
+    }
+    let v: serde_json::Value = state.http.get(format!("https://ipwho.is/{ip}")).timeout(timeout).send().await.map_err(|e| anyhow::anyhow!("géolocalisation impossible : {e}"))?.json().await.map_err(|e| anyhow::anyhow!("réponse illisible : {e}"))?;
+    if v["success"] != true {
+        return Err(anyhow::anyhow!("le service n'a pas pu situer {ip}").into());
+    }
+    let (lat, lon) = (v["latitude"].as_f64().unwrap_or(f64::NAN), v["longitude"].as_f64().unwrap_or(f64::NAN));
+    if !lat.is_finite() || !lon.is_finite() {
+        return Err(anyhow::anyhow!("réponse sans coordonnées").into());
+    }
+    let name = [v["city"].as_str(), v["country"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(", ");
+    Ok(Json(json!({ "ip": ip.to_string(), "name": name, "lat": lat, "lon": lon })))
 }
 
 // ───────────────────────── Discord ─────────────────────────

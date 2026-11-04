@@ -54,6 +54,14 @@ pub struct ServerDomain {
     pub mode: String,
 }
 
+/// Emplacement d'une machine sur la carte du monde (purement visuel : aucune donnée n'est envoyée nulle part).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Location {
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Domaine de l'interface web (ex. mc.exemple.fr), vide = non utilisé.
@@ -66,11 +74,34 @@ pub struct NetworkConfig {
     pub public_ip: String,
     #[serde(default)]
     pub servers: HashMap<Uuid, ServerDomain>,
+    /// Où se trouvent les machines sur la carte : clé `"local"` (cette machine) ou le nom d'une instance jumelée.
+    #[serde(default)]
+    pub locations: HashMap<String, Location>,
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        NetworkConfig { web_domain: String::new(), web_port: 7777, public_ip: String::new(), servers: HashMap::new() }
+        NetworkConfig { web_domain: String::new(), web_port: 7777, public_ip: String::new(), servers: HashMap::new(), locations: HashMap::new() }
+    }
+}
+
+/// Adresse joignable depuis Internet ? (Une IP privée, de boucle locale ou « link-local » ne peut pas être géolocalisée.)
+pub fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v) => !(v.is_private() || v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.is_broadcast() || v.is_documentation() || v.octets()[0] == 0 || (v.octets()[0] == 100 && (v.octets()[1] & 0xC0) == 64)),
+        std::net::IpAddr::V6(v) => !(v.is_loopback() || v.is_unspecified() || (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80),
+    }
+}
+
+/// `hote:port`, `[::1]:7777`, `1.2.3.4`, `exemple.fr` -> l'hôte seul.
+pub fn host_without_port(host: &str) -> String {
+    let h = host.trim();
+    if let Some(rest) = h.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("").to_string();
+    }
+    match h.rsplit_once(':') {
+        Some((a, b)) if !a.contains(':') && b.chars().all(|c| c.is_ascii_digit()) => a.to_string(),
+        _ => h.to_string(),
     }
 }
 
@@ -118,6 +149,17 @@ pub fn validate(cfg: &NetworkConfig) -> Result<()> {
     }
     if !cfg.public_ip.is_empty() && !valid_ip(&cfg.public_ip) {
         bail!("IP publique invalide : « {} »", cfg.public_ip);
+    }
+    for (key, loc) in &cfg.locations {
+        if key.is_empty() || key.len() > 80 || key.chars().any(|c| c.is_control()) {
+            bail!("nom d'emplacement invalide");
+        }
+        if loc.name.len() > 80 || loc.name.chars().any(|c| c.is_control()) {
+            bail!("nom de lieu invalide pour « {key} »");
+        }
+        if !loc.lat.is_finite() || !loc.lon.is_finite() || !(-90.0..=90.0).contains(&loc.lat) || !(-180.0..=180.0).contains(&loc.lon) {
+            bail!("coordonnées invalides pour « {key} »");
+        }
     }
     let mut seen: HashMap<&str, Uuid> = HashMap::new();
     for (id, sd) in &cfg.servers {
@@ -271,6 +313,25 @@ mod tests {
             assert!(!valid_domain(bad), "{bad:?} doit être refusé");
         }
         assert!(!valid_domain(&format!("{}.fr", "a".repeat(64))), "étiquette de plus de 63 caractères");
+    }
+
+    #[test]
+    fn locations_are_validated_and_hosts_parsed() {
+        let mut cfg = NetworkConfig::default();
+        cfg.locations.insert("local".into(), Location { name: "Paris".into(), lat: 48.86, lon: 2.35 });
+        assert!(validate(&cfg).is_ok());
+        for bad in [(91.0, 0.0), (0.0, 181.0), (f64::NAN, 0.0), (0.0, f64::INFINITY)] {
+            cfg.locations.insert("x".into(), Location { name: "?".into(), lat: bad.0, lon: bad.1 });
+            assert!(validate(&cfg).is_err(), "{bad:?}");
+        }
+        cfg.locations.insert("x".into(), Location { name: "Lyon\nX".into(), lat: 45.0, lon: 4.8 });
+        assert!(validate(&cfg).is_err(), "pas de caractères de contrôle dans un nom");
+        for (input, host) in [("1.2.3.4:7777", "1.2.3.4"), ("exemple.fr:7777", "exemple.fr"), ("exemple.fr", "exemple.fr"), ("[::1]:7777", "::1"), ("2001:db8::1", "2001:db8::1")] {
+            assert_eq!(host_without_port(input), host, "{input}");
+        }
+        for (ip, public) in [("8.8.8.8", true), ("192.168.1.5", false), ("10.0.0.1", false), ("127.0.0.1", false), ("169.254.1.1", false), ("100.64.0.1", false), ("::1", false), ("fd00::1", false), ("fe80::1", false), ("2606:4700::1111", true)] {
+            assert_eq!(is_public_ip(&ip.parse().unwrap()), public, "{ip}");
+        }
     }
 
     #[test]

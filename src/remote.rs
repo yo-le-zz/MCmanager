@@ -847,7 +847,25 @@ pub async fn dispatch_action(rt: &RemoteRuntime, action: serde_json::Value) -> s
 
 pub async fn handle_api_request(rt: &RemoteRuntime, req: ApiRequest) -> Result<ApiResponse> {
     let (action, aes_key) = authenticate_and_decrypt(rt, &req).await?;
+    // Journal d'audit : ce que fait une machine jumelée (jamais le contenu des requêtes).
+    let audit_entry = {
+        let label = rt.trusted_snapshot().await.into_iter().find(|c| c.id == req.client_id).map(|c| c.label).unwrap_or_else(|| "?".into());
+        let who = format!("machine:{}", label.chars().filter(|c| !c.is_control()).take(40).collect::<String>());
+        let name = action["action"].as_str().unwrap_or("");
+        match name {
+            "start" | "stop" | "restart" | "send" | "import_server" => Some(crate::audit::Entry::new("remote", &who, "").detail(format!("action « {name} »")).http("POST", &format!("/api/servers/{}", action["server_id"].as_str().unwrap_or("")), None)),
+            "http" if action["method"].as_str().map(|m| !m.eq_ignore_ascii_case("GET")).unwrap_or(false) => Some(crate::audit::Entry::new("remote", &who, "").http(action["method"].as_str().unwrap_or("?"), action["path"].as_str().unwrap_or(""), None)),
+            _ => None,
+        }
+    };
     let result = dispatch_action(rt, action).await;
+    if let Some(mut e) = audit_entry {
+        e.status = result["status"].as_u64().map(|s| s as u16);
+        if result.get("error").is_some() {
+            e.detail = Some(format!("{} — échec", e.detail.clone().unwrap_or_default()));
+        }
+        crate::audit::record(&rt.data_dir, e).await;
+    }
     let encrypted_body = encrypt_with(&aes_key, &result)?;
     Ok(ApiResponse { encrypted_body })
 }

@@ -7,9 +7,13 @@
 <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
 <link rel="icon" type="image/png" href="assets/icon-32.png">
 <link rel="apple-touch-icon" href="assets/icon-256.png">
+<link rel="preload" href="assets/fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="style.css">
+<!-- Appliqué avant le premier affichage pour éviter un flash de mauvais thème -->
+<script src="ui.js"></script>
 </head>
 <body>
+<canvas id="bg-canvas" aria-hidden="true"></canvas>
 <div id="app">
   <aside class="sidebar">
     <div class="brand">
@@ -20,24 +24,36 @@
       </div>
     </div>
     <nav id="nav">
-      <button class="nav-item active" data-view="dashboard">📊 Tableau de bord</button>
-      <button class="nav-item" data-view="servers">🖥 Serveurs</button>
-      <button class="nav-item" data-view="console" data-needs-server="1">📟 Console</button>
-      <button class="nav-item" data-view="files" data-needs-server="1">📁 Fichiers</button>
-      <button class="nav-item" data-view="addons" data-needs-server="1">🧩 Mods / Plugins</button>
-      <button class="nav-item" data-view="marketplace" data-needs-server="1">🛒 Marketplace</button>
-      <button class="nav-item" data-view="schematics" data-needs-server="1">🏗 Schematics</button>
-      <button class="nav-item" data-view="whitelist" data-needs-server="1">🛡 Liste blanche</button>
-      <button class="nav-item" data-view="properties" data-needs-server="1">📝 Propriétés serveur</button>
-      <button class="nav-item" data-view="backups" data-needs-server="1">💾 Sauvegardes</button>
-      <button class="nav-item" data-view="stats" data-needs-server="1">📈 Statistiques</button>
-      <button class="nav-item" data-view="network">🌐 Réseau (playit.gg)</button>
-      <button class="nav-item" data-view="remote">🖧 Contrôle à distance</button>
-      <button class="nav-item" data-view="domains">🔗 Domaines</button>
-      <button class="nav-item hidden" id="nav-users" data-view="users">👥 Utilisateurs</button>
-      <button class="nav-item" data-view="docs">📚 Docs &amp; tutos</button>
-      <button class="nav-item" data-view="assistant">🤖 Assistant IA</button>
-      <button class="nav-item" data-view="settings">⚙ Paramètres</button>
+      <div class="nav-group">
+        <div class="nav-group-title" data-t="group.overview">Vue d'ensemble</div>
+        <button class="nav-item active" data-view="dashboard"><svg class="i"><use href="assets/icons.svg#layout-dashboard"/></svg><span class="nav-label">Tableau de bord</span></button>
+        <button class="nav-item" data-view="servers"><svg class="i"><use href="assets/icons.svg#server"/></svg><span class="nav-label">Serveurs</span></button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title"><span data-t="group.server">Serveur actif</span><span class="srv" id="nav-server-name"></span></div>
+        <button class="nav-item" data-view="console" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#terminal"/></svg><span class="nav-label">Console</span></button>
+        <button class="nav-item" data-view="files" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#folder"/></svg><span class="nav-label">Fichiers</span></button>
+        <button class="nav-item" data-view="addons" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#puzzle"/></svg><span class="nav-label">Mods / Plugins</span></button>
+        <button class="nav-item" data-view="marketplace" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#store"/></svg><span class="nav-label">Marketplace</span></button>
+        <button class="nav-item" data-view="schematics" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#box"/></svg><span class="nav-label">Schematics</span></button>
+        <button class="nav-item" data-view="whitelist" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#shield-check"/></svg><span class="nav-label">Liste blanche</span></button>
+        <button class="nav-item" data-view="properties" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#sliders-horizontal"/></svg><span class="nav-label">Propriétés serveur</span></button>
+        <button class="nav-item" data-view="backups" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#archive"/></svg><span class="nav-label">Sauvegardes</span></button>
+        <button class="nav-item" data-view="stats" data-needs-server="1"><svg class="i"><use href="assets/icons.svg#chart-line"/></svg><span class="nav-label">Statistiques</span></button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title" data-t="group.network">Réseau</div>
+        <button class="nav-item" data-view="domains"><svg class="i"><use href="assets/icons.svg#globe"/></svg><span class="nav-label">Domaines</span></button>
+        <button class="nav-item" data-view="remote"><svg class="i"><use href="assets/icons.svg#network"/></svg><span class="nav-label">Contrôle à distance</span></button>
+        <button class="nav-item" data-view="network"><svg class="i"><use href="assets/icons.svg#waypoints"/></svg><span class="nav-label">Réseau (playit.gg)</span></button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-title" data-t="group.admin">Administration</div>
+        <button class="nav-item hidden" id="nav-users" data-view="users"><svg class="i"><use href="assets/icons.svg#users"/></svg><span class="nav-label">Utilisateurs</span></button>
+        <button class="nav-item" data-view="settings"><svg class="i"><use href="assets/icons.svg#settings"/></svg><span class="nav-label">Paramètres</span></button>
+        <button class="nav-item" data-view="assistant"><svg class="i"><use href="assets/icons.svg#bot"/></svg><span class="nav-label">Assistant IA</span></button>
+        <button class="nav-item" data-view="docs"><svg class="i"><use href="assets/icons.svg#book-open"/></svg><span class="nav-label">Docs &amp; tutos</span></button>
+      </div>
     </nav>
     <div class="server-picker">
       <label>Serveur actif</label>
@@ -51,6 +67,7 @@
   <main id="content"></main>
 </div>
 <div id="toast-container"></div>
+<script src="worldmap.js"></script>
 <script src="app.js"></script>
 <script src="i18n.js"></script>
 </body>

@@ -67,6 +67,27 @@ function confirmDialog(message, { confirmLabel = "Confirmer", cancelLabel = "Ann
   });
 }
 
+// ───────────────────────── droits d'accès (mode serveur) ─────────────────────────
+//
+// Le serveur refuse de toute façon les actions non autorisées (403) : ces fonctions ne servent qu'à
+// ne pas montrer des boutons qui échoueraient. Sans connexion (application de bureau), tout est permis.
+
+const LEVEL_RANK = { view: 1, console: 2, control: 3, manage: 4 };
+const isAdmin = () => !state.me || !!state.me.admin;
+function can(level, server = currentServer()) {
+  if (isAdmin()) return true;
+  return (LEVEL_RANK[server && server.my_level] || 0) >= LEVEL_RANK[level];
+}
+function applyAccess() {
+  const admin = isAdmin();
+  for (const v of ["network", "remote", "domains", "settings", "assistant"]) {
+    $(`#nav .nav-item[data-view="${v}"]`)?.classList.toggle("hidden", !admin);
+  }
+  for (const v of ["files", "addons", "marketplace", "schematics", "whitelist", "properties", "backups"]) {
+    $(`#nav .nav-item[data-view="${v}"]`)?.classList.toggle("hidden", !can("manage"));
+  }
+}
+
 // ───────────────────────── connexion (mode serveur) ─────────────────────────
 //
 // Only present when MCManager is served with login enabled (mcmanager-server,
@@ -97,7 +118,7 @@ function setupAuthChrome() {
   const chip = document.createElement("div");
   chip.id = "auth-chip";
   chip.className = "auth-chip";
-  chip.innerHTML = `<span>👤 ${escapeHtml(state.me.username)}${state.me.admin ? " · admin" : ""}</span><button class="btn-ghost" id="logout-btn">Déconnexion</button>`;
+  chip.innerHTML = `<span>${ico("user")} ${escapeHtml(state.me.username)}${state.me.admin ? " · admin" : ""}</span><button class="btn-ghost" id="logout-btn">Déconnexion</button>`;
   side.appendChild(chip);
   $("#logout-btn").addEventListener("click", async () => {
     await fetch("/auth/logout", { method: "POST" });
@@ -110,7 +131,8 @@ function showLogin() {
   if ($("#login-overlay")) return;
   const ov = document.createElement("div");
   ov.id = "login-overlay";
-  ov.className = "login-overlay";
+  ov.className = "login-overlay login-solo";
+  document.body.classList.add("logged-out"); // masque l'interface derrière : seul le fond animé reste visible
   ov.innerHTML = `
     <div class="login-box">
       <img src="assets/icon-256.png" alt="" class="login-icon">
@@ -167,16 +189,17 @@ function setupNav() {
 function remoteTag(s) {
   if (!s.remote) return "";
   return s.remote.online
-    ? `<span class="badge badge-mauve" title="Hébergé sur ${escapeHtml(s.remote.host)}">🖧 distant · ${escapeHtml(s.remote.label)}</span>`
-    : `<span class="badge badge-red" title="Instance injoignable : les actions échoueront jusqu'au retour de la connexion">🖧 ${escapeHtml(s.remote.label)} · hors ligne</span>`;
+    ? `<span class="badge badge-mauve" title="Hébergé sur ${escapeHtml(s.remote.host)}">${ico("network")} distant · ${escapeHtml(s.remote.label)}</span>`
+    : `<span class="badge badge-red" title="Instance injoignable : les actions échoueront jusqu'au retour de la connexion">${ico("network")} ${escapeHtml(s.remote.label)} · hors ligne</span>`;
 }
 
 async function refreshServerList(selectId) {
   state.servers = await api("/servers");
   try { state.remoteTargets = await api("/remote/hub"); } catch { state.remoteTargets = []; }
+  applyAccess();
   const sel = $("#server-select");
   sel.innerHTML = `<option value="">${t("nav.none")}</option>` +
-    state.servers.map((s) => `<option value="${s.id}">${s.remote ? "🖧 " : ""}${escapeHtml(s.name)} (${s.mc_version})${s.remote ? " · " + escapeHtml(s.remote.label) : ""}</option>`).join("");
+    state.servers.map((s) => `<option value="${s.id}">${s.remote ? "› " : ""}${escapeHtml(s.name)} (${s.mc_version})${s.remote ? " · " + escapeHtml(s.remote.label) : ""}</option>`).join("");
   if (selectId) {
     state.currentServerId = selectId;
   }
@@ -284,6 +307,10 @@ function applyConsoleAppearance() {
 // ───────────────────────── render dispatcher ─────────────────────────
 
 async function render() {
+  const cur = currentServer();
+  const nameEl = $("#nav-server-name");
+  if (nameEl) nameEl.textContent = cur ? cur.name : "";
+  $$(".nav-item[data-needs-server]").forEach((b) => b.classList.toggle("needs-server-off", !state.currentServerId));
   const content = $("#content");
   content.innerHTML = '<div class="empty-state">Chargement…</div>';
   try {
@@ -352,8 +379,8 @@ async function renderDashboard() {
               <td>${status ? status.mem_mb.toFixed(0) + ' Mo' : '—'}</td>
               <td>
                 ${status?.running
-                  ? `<button class="btn-red" data-stop="${s.id}">Stop</button>`
-                  : `<button class="btn-green" data-start="${s.id}">Start</button>`}
+                  ? (can("control", s) ? `<button class="btn-red" data-stop="${s.id}">Stop</button>` : "")
+                  : (can("control", s) ? `<button class="btn-green" data-start="${s.id}">Start</button>` : "")}
               </td>
             </tr>`).join("")}
         </tbody>
@@ -379,7 +406,7 @@ function hostingSelectHtml(id) {
   const targets = (state.remoteTargets || []).filter((x) => x.online);
   if (!targets.length) return "";
   return `<div class="form-row"><label>Héberger sur</label>
-    <select id="${id}"><option value="">Cette machine (local)</option>${targets.map((x) => `<option value="${escapeHtml(x.label)}">🖧 ${escapeHtml(x.label)} (${escapeHtml(x.host)})</option>`).join("")}</select>
+    <select id="${id}"><option value="">Cette machine (local)</option>${targets.map((x) => `<option value="${escapeHtml(x.label)}">${escapeHtml(x.label)} (${escapeHtml(x.host)})</option>`).join("")}</select>
     <div style="font-size:11px;color:var(--overlay0);margin-top:4px">Sur une machine distante, le chemin d'un dossier à importer est celui de <b>cette machine-là</b>.</div></div>`;
 }
 function hostingHeaders(id) {
@@ -396,8 +423,8 @@ async function renderServers() {
     <h1>${t('view.servers')}</h1>
     <div class="subtitle">Créez et gérez vos serveurs Minecraft.</div>
     <div class="toolbar">
-      <button class="btn-blue" id="new-server-btn">+ Nouveau serveur</button>
-      <button class="btn-ghost" id="import-server-btn">📂 Importer un serveur existant</button>
+      ${isAdmin() ? `<button class="btn-blue" id="new-server-btn">+ Nouveau serveur</button>
+      <button class="btn-ghost" id="import-server-btn">${ico("folder-open")} Importer un serveur existant</button>` : ""}
     </div>
     <div id="server-list" class="grid"></div>
     <div id="wizard" class="card hidden"></div>
@@ -412,12 +439,12 @@ async function renderServers() {
         <div class="label">${s.loader.toUpperCase()} · ${s.mc_version}</div>
         <div class="value" style="font-size:16px">${escapeHtml(s.name)}</div>
         ${s.remote ? `<div style="margin-top:6px">${remoteTag(s)}</div>` : ""}
-        ${s.domain ? `<div style="margin-top:6px;font-size:12px;color:var(--subtext1)" title="Domaine configuré dans l'onglet Réseau">🌐 ${escapeHtml(s.domain)}${s.public_port && s.public_port !== 25565 ? ":" + s.public_port : ""}</div>` : ""}
+        ${s.domain ? `<div style="margin-top:6px;font-size:12px;color:var(--subtext1)" title="Domaine configuré dans l'onglet Réseau">${ico("globe")} ${escapeHtml(s.domain)}${s.public_port && s.public_port !== 25565 ? ":" + s.public_port : ""}</div>` : ""}
         <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
-          ${s.remote ? "" : `<button class="btn-ghost" data-explorer="${s.id}">🗂 ${t('files.openExplorer')}</button>`}
-          <a class="btn-ghost" style="text-decoration:none;display:inline-flex;align-items:center" href="/api/servers/${s.id}/files/export?path=" title="Télécharger tout le serveur en .zip (réimportable via « Importer un serveur existant »)">📤 Exporter</a>
-          <button class="btn-red" data-del="${s.id}">${t('common.delete')}</button>
+          ${s.remote ? "" : `<button class="btn-ghost" data-explorer="${s.id}">${ico("folder-open")} ${t('files.openExplorer')}</button>`}
+          <a class="btn-ghost" style="text-decoration:none;display:inline-flex;align-items:center" href="/api/servers/${s.id}/files/export?path=" title="Télécharger tout le serveur en .zip (réimportable via « Importer un serveur existant »)">${ico("upload")} Exporter</a>
+          ${isAdmin() ? `<button class="btn-red" data-del="${s.id}">${t('common.delete')}</button>` : ""}
         </div>
       </div>
     `).join("");
@@ -449,11 +476,11 @@ async function renderServers() {
     }));
   }
 
-  $("#new-server-btn").addEventListener("click", () => {
+  $("#new-server-btn")?.addEventListener("click", () => {
     $("#import-form").classList.add("hidden");
     openWizard();
   });
-  $("#import-server-btn").addEventListener("click", () => {
+  $("#import-server-btn")?.addEventListener("click", () => {
     $("#wizard").classList.add("hidden");
     openImportForm();
   });
@@ -683,18 +710,18 @@ function renderConsole() {
     <h1>${t('view.console')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">${s.loader} · ${s.mc_version} · port ${s.port}</div>
     <div class="toolbar">
-      <button class="btn-green" id="c-start">▶ Démarrer</button>
-      <button class="btn-yellow" id="c-restart">⟳ Redémarrer</button>
-      <button class="btn-red" id="c-stop">⏹ Arrêter</button>
-      <button class="btn-ghost" id="c-kill">✕ Forcer l'arrêt</button>
-      <button class="btn-ghost" id="c-clear">🧹 Effacer la console</button>
-      <button class="btn-ghost" id="c-debug">🩺 Diagnostiquer un crash</button>
+      ${can("control") ? `<button class="btn-green" id="c-start">${ico("play")} Démarrer</button>
+      <button class="btn-yellow" id="c-restart">${ico("rotate-cw")} Redémarrer</button>
+      <button class="btn-red" id="c-stop">${ico("square")} Arrêter</button>
+      <button class="btn-ghost" id="c-kill">${ico("x")} Forcer l'arrêt</button>` : ""}
+      ${can("console") ? `<button class="btn-ghost" id="c-clear">${ico("eraser")} Effacer la console</button>
+      <button class="btn-ghost" id="c-debug">${ico("stethoscope")} Diagnostiquer un crash</button>` : `<span class="badge">${ico("eye")} ${dcT("Read-only", "Lecture seule")}</span>`}
     </div>
     <div class="console" id="console-out"></div>
     <div class="console-input-row console-input-row-multiline">
       <textarea id="console-cmd" rows="3" placeholder="Une commande par ligne (ex: give Steve diamond_sword{...} 1). Entrée = nouvelle ligne, Ctrl+Entrée ou le bouton = tout exécuter."></textarea>
       <div class="console-input-actions">
-        <button class="btn-blue" id="console-send">▶ Exécuter</button>
+        <button class="btn-blue" id="console-send">${ico("play")} Exécuter</button>
         <span class="meta" id="console-line-count"></span>
       </div>
     </div>
@@ -753,6 +780,12 @@ function renderConsole() {
     $("#console-line-count").textContent = n > 1 ? `${n} commandes` : "";
   }
 
+  if (!can("console")) {
+    // Lecture seule : on voit la console en direct mais on ne peut pas taper (le serveur le refuserait aussi).
+    $("#console-cmd").disabled = true;
+    $("#console-cmd").placeholder = dcT("Read-only: your access level does not allow sending commands.", "Lecture seule : votre niveau d'accès ne permet pas d'envoyer des commandes.");
+    $("#console-send").disabled = true;
+  }
   $("#console-send").addEventListener("click", sendAll);
   $("#console-cmd").addEventListener("input", updateLineCount);
   $("#console-cmd").addEventListener("keydown", (e) => {
@@ -762,13 +795,13 @@ function renderConsole() {
     }
   });
 
-  $("#c-start").addEventListener("click", async () => { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Démarrage…", "success"); });
-  $("#c-stop").addEventListener("click", async () => {
+  $("#c-start")?.addEventListener("click", async () => { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Démarrage…", "success"); });
+  $("#c-stop")?.addEventListener("click", async () => {
     if (!await confirmDialog("Arrêter ce serveur ? Les joueurs connectés seront déconnectés.")) return;
     await api(`/servers/${s.id}/stop`, { method: "POST" }); toast("Arrêt demandé.", "success");
   });
-  $("#c-kill").addEventListener("click", async () => { if (await confirmDialog("Forcer l'arrêt immédiat ? Risque de corruption du monde en cours de sauvegarde.")) { await api(`/servers/${s.id}/kill`, { method: "POST" }); } });
-  $("#c-restart").addEventListener("click", async () => {
+  $("#c-kill")?.addEventListener("click", async () => { if (await confirmDialog("Forcer l'arrêt immédiat ? Risque de corruption du monde en cours de sauvegarde.")) { await api(`/servers/${s.id}/kill`, { method: "POST" }); } });
+  $("#c-restart")?.addEventListener("click", async () => {
     if (!await confirmDialog("Redémarrer ce serveur ? Les joueurs connectés seront déconnectés puis pourront se reconnecter.")) return;
     try { await api(`/servers/${s.id}/stop`, { method: "POST" }); } catch {}
     setTimeout(async () => { try { await api(`/servers/${s.id}/start`, { method: "POST" }); toast("Redémarrage…", "success"); } catch {} }, 4000);
@@ -779,7 +812,7 @@ function renderConsole() {
   // while (one full boot attempt per addon) - progress streams live into
   // this same console via the WebSocket above, the toast at the end just
   // gives the final verdict.
-  $("#c-debug").addEventListener("click", async () => {
+  $("#c-debug")?.addEventListener("click", async () => {
     if (!await confirmDialog(
       "Ce diagnostic va arrêter le serveur s'il tourne, désactiver temporairement tous les mods/plugins, " +
       "puis les tester un par un en redémarrant le serveur à chaque fois (ça peut prendre plusieurs minutes). " +
@@ -796,10 +829,10 @@ function renderConsole() {
       toast(e.message || "Échec du diagnostic.", "error");
     } finally {
       btn.disabled = false;
-      btn.textContent = "🩺 Diagnostiquer un crash";
+      btn.textContent = "Diagnostiquer un crash";
     }
   });
-  $("#c-clear").addEventListener("click", async () => {
+  $("#c-clear")?.addEventListener("click", async () => {
     await api(`/servers/${s.id}/console/clear`, { method: "POST" });
     out.textContent = "";
   });
@@ -816,18 +849,18 @@ async function renderFiles(path = "") {
     <h1>${t('view.files')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Chemin actuel : /${escapeHtml(path)}</div>
     <div class="toolbar">
-      ${path ? '<button class="btn-ghost" id="f-up">⬆ Dossier parent</button>' : ""}
-      <label class="btn-ghost" style="cursor:pointer">📤 Envoyer un fichier<input type="file" id="f-upload" class="hidden"></label>
-      <label class="btn-ghost" style="cursor:pointer">📦 Importer une archive .zip<input type="file" id="f-import" accept=".zip" class="hidden"></label>
-      <button class="btn-ghost" id="f-export">📥 Exporter ${path ? "ce dossier" : "tout le serveur"} (.zip)</button>
-      <button class="btn-ghost" id="f-explorer">🗂 ${t('files.openExplorer')}</button>
+      ${path ? '<button class="btn-ghost" id="f-up">' + ico("arrow-up") + ' Dossier parent</button>' : ""}
+      <label class="btn-ghost" style="cursor:pointer">${ico("upload")} Envoyer un fichier<input type="file" id="f-upload" class="hidden"></label>
+      <label class="btn-ghost" style="cursor:pointer">${ico("package")} Importer une archive .zip<input type="file" id="f-import" accept=".zip" class="hidden"></label>
+      <button class="btn-ghost" id="f-export">${ico("download")} Exporter ${path ? "ce dossier" : "tout le serveur"} (.zip)</button>
+      <button class="btn-ghost" id="f-explorer">${ico("folder-open")} ${t('files.openExplorer')}</button>
     </div>
     <div class="file-browser">
       <div class="file-list" id="file-list"></div>
       <div class="file-editor hidden" id="file-editor">
         <div class="toolbar">
           <b id="editor-name"></b>
-          <button class="btn-green" id="editor-save">💾 Enregistrer</button>
+          <button class="btn-green" id="editor-save">${ico("archive")} Enregistrer</button>
         </div>
         <textarea id="editor-content" spellcheck="false"></textarea>
       </div>
@@ -836,7 +869,7 @@ async function renderFiles(path = "") {
   const list = $("#file-list");
   list.innerHTML = entries.map((e) => `
     <div class="file-row" data-name="${escapeHtml(e.name)}" data-dir="${e.is_dir}">
-      <span>${e.is_dir ? "📁" : "📄"} ${escapeHtml(e.name)}</span>
+      <span>${e.is_dir ? "" + ico("folder") + "" : "" + ico("file-text") + ""} ${escapeHtml(e.name)}</span>
       <span style="color:var(--overlay0)">${e.is_dir ? "" : humanSize(e.size_bytes)}</span>
     </div>
   `).join("") || '<div class="empty-state">Dossier vide.</div>';
@@ -936,8 +969,8 @@ async function renderAddons() {
     <h1>${isModded ? t('view.mods') : t('view.plugins')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Activez, désactivez ou supprimez vos ${isModded ? "mods" : "plugins"} installés.</div>
     <div class="toolbar">
-      <button class="btn-blue" id="check-updates">🔄 Vérifier les mises à jour</button>
-      <button class="btn-mauve" id="boost-perf">⚡ Ajouter les mods/plugins de performance</button>
+      <button class="btn-blue" id="check-updates">${ico("refresh-cw")} Vérifier les mises à jour</button>
+      <button class="btn-mauve" id="boost-perf">${ico("zap")} Ajouter les mods/plugins de performance</button>
       <span id="updates-result"></span>
     </div>
     <div class="card">
@@ -956,7 +989,7 @@ async function renderAddons() {
         <button class="btn-green" id="ma-add">+ Ajouter à la liste</button>
       </div>
       <div id="managed-list" style="margin-top:12px"></div>
-      <button class="btn-blue" id="ma-sync" style="margin-top:10px">🔄 Synchroniser maintenant</button>
+      <button class="btn-blue" id="ma-sync" style="margin-top:10px">${ico("refresh-cw")} Synchroniser maintenant</button>
       <div id="ma-sync-result" style="margin-top:8px;font-size:13px"></div>
     </div>
   `;
@@ -972,7 +1005,7 @@ async function renderAddons() {
       </div>
       <div class="mod-actions">
         <button class="btn-ghost" data-config="${escapeHtml(a.file_name)}" title="${t('addons.configTip')}">${t('addons.config')}</button>
-        <button class="btn-ghost" data-track-existing="${escapeHtml(a.file_name)}" title="Repérer ce fichier sur Modrinth et le suivre pour les mises à jour auto">👁 Suivre</button>
+        <button class="btn-ghost" data-track-existing="${escapeHtml(a.file_name)}" title="Repérer ce fichier sur Modrinth et le suivre pour les mises à jour auto">${ico("eye")} Suivre</button>
         <button class="btn-ghost" data-toggle="${escapeHtml(a.file_name)}">${a.enabled ? t('addons.disable') : t('addons.enable')}</button>
         <button class="btn-red" data-remove="${escapeHtml(a.file_name)}">${t('common.delete')}</button>
       </div>
@@ -1054,7 +1087,7 @@ async function renderAddons() {
     } catch (e) {
       toast(e.message || "Échec de l'installation.", "error");
       btn.disabled = false;
-      btn.textContent = "⚡ Ajouter les mods/plugins de performance";
+      btn.textContent = "Ajouter les mods/plugins de performance";
     }
   });
 
@@ -1101,7 +1134,7 @@ function renderManagedAddons(s) {
         : "Rien à synchroniser.";
     } finally {
       btn.disabled = false;
-      btn.textContent = "🔄 Synchroniser maintenant";
+      btn.textContent = "Synchroniser maintenant";
     }
   });
 }
@@ -1136,7 +1169,7 @@ async function renderMarketplace() {
         <div class="desc">${escapeHtml(h.description)}</div>
         <div class="meta" style="font-size:11px;color:var(--overlay0)">${h.downloads.toLocaleString()} téléchargements</div>
         <button class="btn-green" data-install="${h.project_id}">+ Installer</button>
-        <button class="btn-ghost" data-track="${h.project_id}" data-label="${escapeHtml(h.title)}">➕ Suivi auto</button>
+        <button class="btn-ghost" data-track="${h.project_id}" data-label="${escapeHtml(h.title)}">${ico("plus")} Suivi auto</button>
       </div>
     `).join("") : '<div class="empty-state">Aucun résultat.</div>';
 
@@ -1146,7 +1179,7 @@ async function renderMarketplace() {
       try {
         await api(`/servers/${s.id}/marketplace/install`, { method: "POST", body: JSON.stringify({ project_id: b.dataset.install }) });
         toast("Installé avec succès. Redémarrez le serveur pour l'activer.", "success");
-        b.textContent = "✓ Installé";
+        b.textContent = "Installé";
       } catch {
         b.disabled = false;
         b.textContent = "+ Installer";
@@ -1161,7 +1194,7 @@ async function renderMarketplace() {
         body: JSON.stringify({ project_id: b.dataset.track, label: b.dataset.label }),
       });
       state.servers = state.servers.map((sv) => sv.id === updated.id ? updated : sv);
-      b.textContent = "✓ Suivi";
+      b.textContent = "Suivi";
       b.disabled = true;
     }));
   }
@@ -1179,7 +1212,7 @@ async function renderSchematics() {
     <h1>Schematics (WorldEdit / FAWE)</h1>
     <div class="subtitle">Déposez vos fichiers <code>.schem</code> / <code>.schematic</code> — ils seront disponibles côté serveur avec <code>//schem load &lt;nom&gt;</code>.</div>
     <div class="toolbar">
-      <label class="btn-blue" style="cursor:pointer">📤 Envoyer un schematic<input type="file" id="sc-upload" class="hidden" accept=".schem,.schematic" multiple></label>
+      <label class="btn-blue" style="cursor:pointer">${ico("upload")} Envoyer un schematic<input type="file" id="sc-upload" class="hidden" accept=".schem,.schematic" multiple></label>
     </div>
     <div class="mod-list" id="sc-list"></div>
   `;
@@ -1231,7 +1264,7 @@ async function renderBackups() {
     <h1>${t('view.backups')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Sauvegardes complètes (mondes, configs, mods/plugins) au format .zip.</div>
     <div class="toolbar">
-      <button class="btn-blue" id="bk-create">💾 Créer une sauvegarde maintenant</button>
+      <button class="btn-blue" id="bk-create">${ico("archive")} Créer une sauvegarde maintenant</button>
       <span id="bk-progress" style="font-size:12px;color:var(--subtext1)"></span>
     </div>
     <table>
@@ -1288,7 +1321,7 @@ async function renderStats() {
   const content = $("#content");
   const hist = await api(`/servers/${s.id}/history`);
   content.innerHTML = `
-    <h1>📈 ${t('view.stats')} — ${escapeHtml(s.name)}</h1>
+    <h1>${ico("chart-line")} ${t('view.stats')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Historique de fonctionnement de ce serveur (conservé localement par MCManager).</div>
     <div class="grid">
       <div class="stat-card"><div class="label">Démarrages</div><div class="value">${hist.total_boots}</div></div>
@@ -1339,7 +1372,7 @@ async function renderWhitelist() {
   } catch { /* pas encore de server.properties */ }
 
   content.innerHTML = `
-    <h1>🛡 ${t('view.whitelist')} — ${escapeHtml(s.name)}</h1>
+    <h1>${ico("shield-check")} ${t('view.whitelist')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Seuls les joueurs listés ici pourront rejoindre si la liste blanche est activée.</div>
     <div class="card">
       <label style="display:flex;align-items:center;gap:8px">
@@ -1470,14 +1503,14 @@ async function renderProperties() {
     const res = await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("server.properties")}`);
     raw = res.content || "";
   } catch {
-    content.innerHTML = `<h1>📝 ${t('view.properties')} — ${escapeHtml(s.name)}</h1><div class="empty-state">${t('view.propertiesMissing')}</div>`;
+    content.innerHTML = `<h1>${ico("sliders-horizontal")} ${t('view.properties')} — ${escapeHtml(s.name)}</h1><div class="empty-state">${t('view.propertiesMissing')}</div>`;
     return;
   }
   const props = parseProperties(raw);
   const status = await api(`/servers/${s.id}/status`);
 
   content.innerHTML = `
-    <h1>📝 ${t('view.properties')} — ${escapeHtml(s.name)}</h1>
+    <h1>${ico("sliders-horizontal")} ${t('view.properties')} — ${escapeHtml(s.name)}</h1>
     <div class="subtitle">Réglages les plus courants de server.properties, avec des contrôles adaptés plutôt que du texte brut. ${status.running ? "Un redémarrage est nécessaire pour appliquer les changements." : ""}</div>
     <div class="card">
       <div class="form-grid">
@@ -1535,10 +1568,10 @@ async function renderNetwork() {
       <p>${status.running ? '<span class="badge badge-green">En cours d’exécution</span>' : '<span class="badge badge-red">Arrêté</span>'}</p>
       <p style="color:var(--subtext1);font-size:12px">${status.path ? "Binaire : " + escapeHtml(status.path) : "playit-agent n'est pas encore installé."}</p>
       <div class="toolbar">
-        <button class="btn-blue" id="pl-download">⬇ Installer / mettre à jour l'agent (téléchargé par MCManager)</button>
-        <button class="btn-ghost" id="pl-local">🔎 Utiliser mon installation locale de playit</button>
-        <button class="btn-green" id="pl-start" ${status.running ? "disabled" : ""}>▶ Démarrer</button>
-        <button class="btn-red" id="pl-stop" ${status.running ? "" : "disabled"}>⏹ Arrêter</button>
+        <button class="btn-blue" id="pl-download">${ico("arrow-down")} Installer / mettre à jour l'agent (téléchargé par MCManager)</button>
+        <button class="btn-ghost" id="pl-local">${ico("search")} Utiliser mon installation locale de playit</button>
+        <button class="btn-green" id="pl-start" ${status.running ? "disabled" : ""}>${ico("play")} Démarrer</button>
+        <button class="btn-red" id="pl-stop" ${status.running ? "" : "disabled"}>${ico("square")} Arrêter</button>
       </div>
       <div class="console" id="pl-console" style="height:220px;margin-top:10px"></div>
     </div>
@@ -1594,12 +1627,14 @@ function fmtDate(iso) {
 async function renderRemote() {
   const content = $("#content");
   const hub = await api("/remote/hub");
+  const net = await api("/network").catch(() => null);
   let info = null;
   try { info = await api("/server/info"); } catch {}
 
   content.innerHTML = `
-    <h1>🖧 ${t('view.remote')}</h1>
+    <h1>${ico("network")} ${t('view.remote')}</h1>
     <div class="subtitle">Ajoutez d'autres machines MCManager (VPS, serveur maison, Raspberry Pi...) : leurs serveurs apparaissent ici <b>comme les vôtres</b>, avec une étiquette « distant ». Console, fichiers, mods/plugins, schematics, sauvegardes : tout fonctionne à l'identique, les actions sont exécutées sur la machine distante. Connexion chiffrée et authentifiée par échange de clés RSA.</div>
+    ${net ? '<div id="remote-map"></div>' : ""}
 
     <div class="card">
       <h2>Instances jumelées</h2>
@@ -1612,7 +1647,7 @@ async function renderRemote() {
           <td>${h.latency_ms != null ? h.latency_ms + " ms" : "—"}</td>
           <td><button class="btn-red" data-rm-forget="${escapeHtml(h.label)}">Oublier</button></td>
         </tr>`).join("")}</tbody></table>
-        <p style="color:var(--overlay0);font-size:12px;margin-top:10px">Leurs serveurs sont dans le <b>Tableau de bord</b> et la liste des <b>Serveurs</b> (étiquette 🖧 distant). Pour en créer un directement sur une instance, choisissez « Héberger sur » dans l'assistant de création.</p>`
+        <p style="color:var(--overlay0);font-size:12px;margin-top:10px">Leurs serveurs sont dans le <b>Tableau de bord</b> et la liste des <b>Serveurs</b> (étiquette ${ico("network")} distant). Pour en créer un directement sur une instance, choisissez « Héberger sur » dans l'assistant de création.</p>`
         : '<div class="empty-state">Aucune instance jumelée pour l\'instant.</div>'}
     </div>
 
@@ -1626,7 +1661,7 @@ async function renderRemote() {
         <div class="form-row"><label>Nom pour cette instance</label><input id="rm-label" placeholder="mon-vps"></div>
         <div class="form-row"><label>Code de jumelage</label><input id="rm-code" placeholder="03847680"></div>
       </div>
-      <button class="btn-green" id="rm-pair">🔗 Jumeler</button>
+      <button class="btn-green" id="rm-pair">${ico("link")} Jumeler</button>
       <span id="rm-pair-status" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
 
@@ -1639,7 +1674,7 @@ async function renderRemote() {
         <select id="rm-deploy-select" style="flex:1">
           ${state.servers.filter((s) => !s.remote).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.loader} ${s.mc_version})</option>`).join("")}
         </select>
-        <button class="btn-mauve" id="rm-deploy">📤 Envoyer</button>
+        <button class="btn-mauve" id="rm-deploy">${ico("upload")} Envoyer</button>
       </div>
       <div id="rm-deploy-result" style="margin-top:8px;font-size:13px"></div>
     </div>` : ""}
@@ -1648,7 +1683,7 @@ async function renderRemote() {
     <div class="card">
       <h2>Cette instance accepte le contrôle à distance</h2>
       <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">Empreinte (à comparer côté client) : <code>${escapeHtml(info.fingerprint)}</code></p>
-      <button class="btn-blue" id="rm-gen-code">🔑 Générer un code de jumelage (10 min, usage unique)</button>
+      <button class="btn-blue" id="rm-gen-code">${ico("key-round")} Générer un code de jumelage (10 min, usage unique)</button>
       <div id="rm-code-out" style="margin-top:10px;font-size:15px"></div>
       <h2 style="margin-top:18px">Machines autorisées</h2>
       ${info.clients.length ? `<table><thead><tr><th>Nom</th><th>Jumelée le</th><th>Dernière activité</th><th>Connectée</th><th></th></tr></thead><tbody>
@@ -1657,6 +1692,7 @@ async function renderRemote() {
     </div>` : ""}
   `;
 
+  if (net) WorldMap.mount($("#remote-map"), { markers: mapMarkers(net, hub), arcs: hub.map((h) => ["local", h.label, h.online]), legendOnline: dcT("Online", "En ligne"), legendOffline: dcT("Offline", "Hors ligne") });
   $("#rm-pair").addEventListener("click", async () => {
     const host = $("#rm-host").value.trim();
     const label = $("#rm-label").value.trim();
@@ -1704,7 +1740,7 @@ async function renderRemote() {
       $("#rm-deploy-result").textContent = e.message || "Échec de l'envoi.";
     } finally {
       btn.disabled = false;
-      btn.textContent = "📤 Envoyer";
+      btn.textContent = "Envoyer";
     }
   });
 }
@@ -1714,21 +1750,77 @@ async function renderRemote() {
 // MCManager ne modifie jamais nginx ni le DNS : il génère la configuration à
 // relire et appliquer soi-même (voir src/network.rs pour le pourquoi de chaque mode).
 
+// ───────────────────────── carte du monde : machines, domaines, flux ─────────────────────────
+
+function mapMarkers(net, hub) {
+  const L = net.config.locations || {};
+  const domains = {};
+  for (const sv of net.servers) {
+    const d = (net.config.servers || {})[sv.id];
+    if (d && d.domain) (domains[sv.remote || "local"] = domains[sv.remote || "local"] || []).push(d.domain);
+  }
+  const sub = (key, base) => [base, L[key] && L[key].name, domains[key] && domains[key].join(", ")].filter(Boolean).join(" · ");
+  const at = (key) => (L[key] ? { lat: L[key].lat, lon: L[key].lon } : {});
+  return [
+    { id: "local", kind: "local", label: dcT("This machine", "Cette machine"), online: true, sub: sub("local", ""), ...at("local") },
+    ...hub.map((h) => ({ id: h.label, kind: "instance", label: h.label, online: h.online, sub: sub(h.label, `${h.host} · ${h.server_count} ${dcT("server(s)", "serveur(s)")}`), ...at(h.label) })),
+  ];
+}
+
+// Éditeur d'emplacement : ville dans une liste, ou détection par l'IP publique (sur clic uniquement).
+function placementEditorHtml(net, hub) {
+  const L = net.config.locations || {};
+  const rows = [{ key: "local", label: dcT("This machine", "Cette machine"), host: "" }, ...hub.map((h) => ({ key: h.label, label: h.label, host: h.host }))];
+  return `<table><thead><tr><th>${dcT("Machine", "Machine")}</th><th>${dcT("Location on the map", "Emplacement sur la carte")}</th><th></th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td><b>${escapeHtml(r.label)}</b></td>
+      <td><select data-loc="${escapeHtml(r.key)}"><option value="">${dcT("— not placed —", "— non placée —")}</option>${L[r.key] && !WorldMap.CITIES.some((c) => c[0] === L[r.key].name) ? `<option value="__custom" selected>${escapeHtml(L[r.key].name)}</option>` : ""}${WorldMap.CITIES.map((c) => `<option value="${escapeHtml(c[0])}" ${L[r.key] && L[r.key].name === c[0] ? "selected" : ""}>${escapeHtml(c[0])}</option>`).join("")}</select></td>
+      <td><button class="btn-ghost btn-sm" data-geo="${escapeHtml(r.key)}" data-host="${escapeHtml(r.host)}" title="${dcT("Looks up the public IP of this machine (the IP is sent to ipwho.is)", "Recherche l'IP publique de cette machine (l'IP est envoyée à ipwho.is)")}">${ico("map-pin")} ${dcT("Detect", "Détecter")}</button></td></tr>`).join("")}
+  </tbody></table>`;
+}
+
+function bindPlacementEditor(net, rerender) {
+  const save = async (locations) => {
+    await api("/network", { method: "PUT", body: JSON.stringify({ ...net.config, locations }) });
+    rerender();
+  };
+  $$("[data-loc]").forEach((sel) => sel.addEventListener("change", async () => {
+    const locations = { ...(net.config.locations || {}) };
+    const city = WorldMap.CITIES.find((c) => c[0] === sel.value);
+    if (city) locations[sel.dataset.loc] = { name: city[0], lat: city[1], lon: city[2] };
+    else if (!sel.value) delete locations[sel.dataset.loc];
+    else return;
+    await save(locations);
+  }));
+  $$("[data-geo]").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    try {
+      const g = await api("/network/geolocate", { method: "POST", body: JSON.stringify({ host: b.dataset.host }) });
+      await save({ ...(net.config.locations || {}), [b.dataset.geo]: { name: g.name || g.ip, lat: g.lat, lon: g.lon } });
+    } catch { b.disabled = false; }
+  }));
+}
+
 async function renderDomains() {
   const content = $("#content");
   const data = await api("/network");
+  const hub = await api("/remote/hub").catch(() => []);
   const cfg = data.config;
   const g = data.generated;
 
   const block = (id, title, text) => text ? `
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">${title}</h2><button class="btn-ghost" data-copy="${id}">📋 Copier</button></div>
+      <div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">${title}</h2><button class="btn-ghost" data-copy="${id}">${ico("clipboard-copy")} Copier</button></div>
       <pre id="${id}" style="margin-top:10px;white-space:pre-wrap;word-break:break-all;background:var(--crust);padding:12px;border-radius:8px;font-size:12px;max-height:340px;overflow:auto">${escapeHtml(text)}</pre>
     </div>` : "";
 
   content.innerHTML = `
-    <h1>🔗 Domaines et redirections</h1>
+    <h1>${ico("link")} Domaines et redirections</h1>
     <div class="subtitle">Donnez un nom à vos serveurs (<code>play.exemple.fr</code>) et à l'interface web (<code>mc.exemple.fr</code>). MCManager <b>génère</b> les enregistrements DNS et les configurations nginx / Caddy ; vous les relisez et les appliquez vous-même (rien n'est modifié automatiquement).</div>
+
+    <div id="net-map"></div>
+    <div class="card"><h2>${ico("map-pin")} ${dcT("Where are your machines?", "Où sont vos machines ?")}</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">${dcT("Purely visual: place each machine to see the data flows between them. Nothing is sent anywhere unless you click Detect.", "Purement visuel : placez chaque machine pour voir les flux entre elles. Rien n'est envoyé nulle part tant que vous ne cliquez pas sur Détecter.")}</p>
+      ${placementEditorHtml(data, hub)}</div>
 
     <div class="card">
       <h2>Interface web</h2>
@@ -1750,7 +1842,7 @@ async function renderDomains() {
         ${data.servers.map((sv) => {
           const sd = cfg.servers[sv.id] || {};
           return `<tr data-nw-row="${sv.id}">
-            <td><b>${escapeHtml(sv.name)}</b> ${sv.remote ? `<span class="badge badge-mauve">🖧 ${escapeHtml(sv.remote)}</span>` : ""}</td>
+            <td><b>${escapeHtml(sv.name)}</b> ${sv.remote ? `<span class="badge badge-mauve">${ico("network")} ${escapeHtml(sv.remote)}</span>` : ""}</td>
             <td>${sv.port}</td>
             <td><input data-nw="domain" placeholder="play.exemple.fr" value="${escapeHtml(sd.domain || "")}"></td>
             <td><select data-nw="mode"><option value="srv" ${sd.mode !== "proxy" ? "selected" : ""}>DNS seul (SRV)</option><option value="proxy" ${sd.mode === "proxy" ? "selected" : ""}>Proxy nginx</option></select></td>
@@ -1767,6 +1859,8 @@ async function renderDomains() {
     ${g.notes.length ? `<div class="card"><h2>À savoir</h2><ul style="margin:0;padding-left:18px;color:var(--subtext1);font-size:13px;line-height:1.6">${g.notes.map((n) => `<li>${escapeHtml(n)}</li>`).join("")}</ul></div>` : ""}
   `;
 
+  WorldMap.mount($("#net-map"), { markers: mapMarkers(data, hub), arcs: hub.map((h) => ["local", h.label, h.online]), legendOnline: dcT("Online", "En ligne"), legendOffline: dcT("Offline", "Hors ligne") });
+  bindPlacementEditor(data, renderDomains);
   $$("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText($("#" + b.dataset.copy).textContent); toast("Copié.", "success"); }
     catch { toast("Copie impossible : sélectionnez le texte à la main.", "error"); }
@@ -1786,6 +1880,7 @@ async function renderDomains() {
       web_port: parseInt($("#nw-webport").value, 10) || 7777,
       public_ip: $("#nw-ip").value.trim(),
       servers,
+      locations: cfg.locations || {},
     }) });
     toast("Réseau enregistré.", "success");
     await refreshServerList();
@@ -1798,11 +1893,11 @@ async function renderDomains() {
 async function renderUsers() {
   const content = $("#content");
   const sessions = await (await fetch("/auth/sessions")).json().catch(() => []);
-  const isAdmin = state.me?.admin;
-  const users = isAdmin ? await (await fetch("/auth/users")).json().catch(() => []) : [];
+  const amAdmin = !!state.me?.admin;
+  const users = amAdmin ? await (await fetch("/auth/users")).json().catch(() => []) : [];
 
   content.innerHTML = `
-    <h1>👥 ${t('view.users')}</h1>
+    <h1>${ico("users")} ${t('view.users')}</h1>
     <div class="subtitle">Plusieurs personnes peuvent être connectées en même temps, chacune avec son compte et autant d'appareils qu'elle veut. Les modifications de fichiers sont « dernier enregistrement gagnant » : évitez d'éditer le même fichier à deux.</div>
 
     <div class="card">
@@ -1827,17 +1922,19 @@ async function renderUsers() {
       <button class="btn-blue" id="pw-save">Changer (déconnecte tous mes appareils)</button>
     </div>
 
-    ${isAdmin ? `
+    ${amAdmin ? `
     <div class="card">
       <h2>Comptes</h2>
       <table><thead><tr><th>Utilisateur</th><th>Rôle</th><th>Créé le</th><th></th></tr></thead><tbody>
-        ${users.map((u) => `<tr><td><b>${escapeHtml(u.username)}</b></td><td>${u.admin ? "administrateur" : "utilisateur"}</td><td>${fmtDate(u.created_at)}</td><td><button class="btn-red" data-deluser="${escapeHtml(u.username)}">Supprimer</button></td></tr>`).join("")}
+        ${users.map((u) => `<tr><td><b>${escapeHtml(u.username)}</b></td><td>${u.admin ? "administrateur" : "utilisateur"}</td><td>${fmtDate(u.created_at)}</td><td style="white-space:nowrap">${u.admin ? "" : `<button class="btn-ghost" data-access="${escapeHtml(u.username)}">${ico("key-round")} ${dcT("Access", "Accès")}</button> `}<button class="btn-red" data-deluser="${escapeHtml(u.username)}">Supprimer</button></td></tr>`).join("")}
       </tbody></table>
+      <div id="access-editor"></div>
       <h2 style="margin-top:16px">Ajouter un compte</h2>
       <div class="form-grid">
         <div class="form-row"><label>Nom</label><input id="nu-name" autocomplete="off"></div>
         <div class="form-row"><label>Mot de passe</label><input id="nu-pass" type="password" autocomplete="new-password"></div>
         <div class="form-row"><label><input type="checkbox" id="nu-admin"> Administrateur (comptes, jumelage de machines)</label></div>
+        <div class="form-row"><label>${dcT("Access to all servers", "Accès à tous les serveurs")}</label><select id="nu-level">${levelOptions("")}</select></div>
       </div>
       <button class="btn-green" id="nu-add">Créer</button>
     </div>` : ""}
@@ -1855,7 +1952,7 @@ async function renderUsers() {
     location.reload();
   });
   $("#nu-add")?.addEventListener("click", async () => {
-    await post("/auth/users", { username: $("#nu-name").value.trim(), password: $("#nu-pass").value, admin: $("#nu-admin").checked });
+    await post("/auth/users", { username: $("#nu-name").value.trim(), password: $("#nu-pass").value, admin: $("#nu-admin").checked, default_level: $("#nu-level").value || null });
     toast("Compte créé.", "success");
     renderUsers();
   });
@@ -1864,6 +1961,55 @@ async function renderUsers() {
     await post(`/auth/users/${encodeURIComponent(b.dataset.deluser)}`, null, "DELETE");
     renderUsers();
   }));
+  $$("[data-access]").forEach((b) => b.addEventListener("click", () => openAccessEditor(users.find((u) => u.username === b.dataset.access), post)));
+  if (amAdmin) loadAudit();
+}
+
+// `withNone` : propose « Aucun accès » (niveau par défaut) ; sinon la liste des 4 niveaux seule (exceptions par serveur).
+const levelOptions = (cur, withNone = true) => [...(withNone ? [["", dcT("No access", "Aucun accès")]] : []), ["view", dcT("View (read-only)", "Voir (lecture seule)")], ["console", dcT("Console (+ commands)", "Console (+ commandes)")], ["control", dcT("Control (+ start/stop)", "Contrôle (+ démarrer/arrêter)")], ["manage", dcT("Manage (+ files, mods, backups…)", "Gérer (+ fichiers, mods, sauvegardes…)")]]
+  .map(([v, l]) => `<option value="${v}" ${v === (cur || "") ? "selected" : ""}>${l}</option>`).join("");
+
+// Droits d'un compte : un niveau pour tous les serveurs + des exceptions par serveur (monter ou descendre).
+function openAccessEditor(user, post) {
+  const box = $("#access-editor");
+  box.innerHTML = `<div class="card" style="margin-top:12px;border:1px solid var(--blue)">
+    <h2>${ico("key-round")} ${dcT("Access of", "Accès de")} « ${escapeHtml(user.username)} »</h2>
+    <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px">${dcT("Level on all servers (including ones created later), then optional exceptions per server. Only administrators can create/delete servers, change settings, Discord, domains, remote machines and accounts.", "Niveau sur tous les serveurs (y compris ceux créés plus tard), puis des exceptions par serveur. Seuls les administrateurs créent/suppriment des serveurs et gèrent réglages, Discord, domaines, machines distantes et comptes.")}</p>
+    <div class="form-row"><label>${dcT("All servers", "Tous les serveurs")}</label><select id="ax-default">${levelOptions(user.default_level)}</select></div>
+    <table><thead><tr><th>${dcT("Server", "Serveur")}</th><th>${dcT("Level (overrides the above)", "Niveau (remplace le précédent)")}</th></tr></thead><tbody>
+      ${state.servers.map((sv) => `<tr><td>${escapeHtml(sv.name)}</td><td><select data-ax="${sv.id}"><option value="">${dcT("— same as above —", "— comme ci-dessus —")}</option>${levelOptions((user.servers || {})[sv.id], false)}</select></td></tr>`).join("")}
+    </tbody></table>
+    <div style="margin-top:10px"><button class="btn-green" id="ax-save">${t('common.save')}</button> <button class="btn-ghost" id="ax-cancel">${dcT("Cancel", "Annuler")}</button></div></div>`;
+  $("#ax-cancel").addEventListener("click", () => { box.innerHTML = ""; });
+  $("#ax-save").addEventListener("click", async () => {
+    const servers = {};
+    $$("[data-ax]").forEach((sel) => { if (sel.value) servers[sel.dataset.ax] = sel.value; });
+    await post(`/auth/users/${encodeURIComponent(user.username)}/access`, { default_level: $("#ax-default").value || null, servers }, "PUT");
+    toast(dcT("Access updated (effective immediately).", "Droits mis à jour (effet immédiat)."), "success");
+    renderUsers();
+  });
+}
+
+// Journal d'audit : qui a fait quoi, quand, depuis où (voir src/audit.rs : jamais de contenu ni de secret).
+async function loadAudit(params = {}) {
+  const qs = new URLSearchParams({ limit: "200", ...params }).toString();
+  let entries = [];
+  try { entries = await (await fetch(`/api/audit?${qs}`)).json(); } catch {}
+  const box = $("#audit-card") || (() => { const d = document.createElement("div"); d.id = "audit-card"; d.className = "card"; $("#content").appendChild(d); return d; })();
+  box.innerHTML = `<h2>${ico("scroll-text")} ${dcT("Audit log", "Journal d'audit")}</h2>
+    <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px">${dcT("Every change, every refused access, every sign-in, plus actions of paired machines and the Discord bot. Contents of commands, files and passwords are never recorded.", "Toute modification, tout accès refusé, toute connexion, ainsi que les actions des machines jumelées et du bot Discord. Le contenu des commandes, des fichiers et les mots de passe ne sont jamais enregistrés.")}</p>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <input id="au-q" placeholder="${dcT("Search…", "Rechercher…")}" value="${escapeHtml(params.q || "")}" style="max-width:240px">
+      <input id="au-user" placeholder="${dcT("User", "Utilisateur")}" value="${escapeHtml(params.user || "")}" style="max-width:160px">
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="au-denied" style="width:auto" ${params.only_denied ? "checked" : ""}> ${dcT("Denied only", "Refus seulement")}</label>
+      <button class="btn-ghost" id="au-go">${dcT("Filter", "Filtrer")}</button>
+    </div>
+    <div style="max-height:380px;overflow:auto"><table><thead><tr><th>${dcT("When", "Quand")}</th><th>${dcT("Who", "Qui")}</th><th>IP</th><th>${dcT("What", "Quoi")}</th><th></th></tr></thead><tbody>
+      ${entries.map((e) => `<tr><td style="white-space:nowrap">${fmtDate(e.ts)}</td><td>${escapeHtml(e.user)}</td><td>${escapeHtml(e.ip || "")}</td>
+        <td style="font-size:12px;word-break:break-all">${e.method ? `<code>${escapeHtml(e.method)} ${escapeHtml(e.path || "")}</code> ` : ""}${escapeHtml(e.detail || "")}</td>
+        <td>${e.status ? `<span class="badge ${e.status >= 400 ? "badge-red" : "badge-green"}">${e.status}</span>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="empty-state">${dcT("Nothing yet.", "Rien pour l'instant.")}</td></tr>`}
+    </tbody></table></div>`;
+  $("#au-go").addEventListener("click", () => loadAudit({ q: $("#au-q").value.trim(), user: $("#au-user").value.trim(), ...($("#au-denied").checked ? { only_denied: "true" } : {}) }));
 }
 
 // ───────────────────────── docs ─────────────────────────
@@ -1883,7 +2029,7 @@ async function renderAssistant() {
   }
 
   content.innerHTML = `
-    <h1>🤖 ${t('view.assistant')}</h1>
+    <h1>${ico("bot")} ${t('view.assistant')}</h1>
     <p class="subtitle">Suggestions personnalisées sur quoi ajouter, modifier ou réparer sur votre serveur. Votre clé API reste stockée localement et est envoyée uniquement au fournisseur choisi — jamais à un serveur MCManager.</p>
     <div class="card">
       <h2>Fournisseur</h2>
@@ -1919,7 +2065,7 @@ async function renderAssistant() {
           <label>Modèle</label>
           <div style="display:flex;gap:8px">
             <select id="ai-model" style="flex:1"><option value="${escapeHtml(cfg.model || "")}">${escapeHtml(cfg.model || "(par défaut)")}</option></select>
-            <button class="btn-ghost" id="ai-load-models" type="button">🔄 Détecter les modèles</button>
+            <button class="btn-ghost" id="ai-load-models" type="button">${ico("refresh-cw")} Détecter les modèles</button>
           </div>
         </div>
       </div>
@@ -1985,7 +2131,7 @@ async function renderAssistant() {
       toast(e.message || "Échec de la détection des modèles.", "error");
     } finally {
       btn.disabled = false;
-      btn.textContent = "🔄 Détecter les modèles";
+      btn.textContent = "Détecter les modèles";
     }
   });
 
@@ -2092,7 +2238,7 @@ async function sendAiChat() {
     }) });
     state.aiChatHistory.push({ role: "assistant", content: res.reply });
   } catch (e) {
-    state.aiChatHistory.push({ role: "assistant", content: `⚠ ${e.message || "Erreur lors de la requête à l'assistant."}` });
+    state.aiChatHistory.push({ role: "assistant", content: `${ico("triangle-alert")} ${e.message || "Erreur lors de la requête à l'assistant."}` });
   }
   renderAiChatLog();
 }
@@ -2121,6 +2267,62 @@ function dcPicker(name, selected, roles, compact = false) {
   return `<div style="display:flex;flex-wrap:wrap;gap:${compact ? 4 : 8}px 12px;max-height:${compact ? 90 : 130}px;overflow:auto">${roles.map((r) => `<label style="display:flex;align-items:center;gap:5px;font-size:12px"><input type="checkbox" data-picker="${name}" value="${escapeHtml(r.id)}" style="width:auto" ${selected.includes(r.id) ? "checked" : ""}><span style="width:9px;height:9px;border-radius:50%;background:${r.color === "#000000" ? "var(--overlay0)" : escapeHtml(r.color)};display:inline-block"></span>${escapeHtml(r.name)}</label>`).join("")}</div>`;
 }
 
+// ───────────────────────── apparence personnalisable ─────────────────────────
+//
+// Tout s'applique instantanément (aucun bouton « enregistrer ») et reste dans ce navigateur (voir ui.js).
+
+function appearanceCard() {
+  const a = Appearance.get();
+  const seg = (id, options, cur) => `<div class="seg" data-seg="${id}">${options.map(([v, l]) => `<button class="${String(v) === String(cur) ? "on" : ""}" data-v="${v}">${l}</button>`).join("")}</div>`;
+  return `<div class="card" id="appearance-card">
+    <h2>${ico("palette")} ${dcT("Appearance", "Apparence")}</h2>
+    <p style="color:var(--overlay0);font-size:12px;margin-bottom:12px">${dcT("Changes apply instantly and are stored in this browser.", "Les changements s'appliquent immédiatement et sont conservés dans ce navigateur.")}</p>
+
+    <div class="form-row"><label>${dcT("Theme", "Thème")}</label>
+      <div class="theme-cards">${Appearance.THEMES.map(([id, name, desc, cols]) => `<div class="theme-card ${a.theme === id ? "on" : ""}" data-theme="${id}" title="${desc}"><div class="prev" style="background:${cols[0]}">${cols.map((c) => `<i style="background:${c}"></i>`).join("")}</div>${name}</div>`).join("")}</div></div>
+
+    <div class="form-row"><label>${dcT("Accent color", "Couleur d'accent")}</label>
+      <div class="swatches">${Appearance.ACCENTS.map(([n, c]) => `<button class="swatch ${a.accent.toLowerCase() === c ? "on" : ""}" data-accent="${c}" title="${n}" style="background:${c}"></button>`).join("")}
+        <input type="color" id="ap-accent" value="${a.accent}" style="width:44px" title="${dcT("Custom color", "Couleur personnalisée")}"></div></div>
+
+    <div class="form-grid">
+      <div class="form-row"><label>${dcT("Corner radius", "Arrondi des coins")} <span class="meta" id="ap-radius-v">${a.radius}px</span></label><input type="range" id="ap-radius" min="0" max="20" value="${a.radius}"></div>
+      <div class="form-row"><label>${dcT("Text size", "Taille du texte")} <span class="meta" id="ap-fs-v">${Math.round(a.fontScale * 100)}%</span></label><input type="range" id="ap-fs" min="85" max="125" step="5" value="${Math.round(a.fontScale * 100)}"></div>
+      <div class="form-row"><label>${dcT("Density", "Densité")}</label>${seg("density", [[0.85, dcT("Compact", "Compacte")], [1, dcT("Normal", "Normale")], [1.15, dcT("Airy", "Aérée")]], a.density)}</div>
+      <div class="form-row"><label>${dcT("Menu width", "Largeur du menu")}</label>${seg("sidebar", [[208, dcT("Narrow", "Étroit")], [248, dcT("Normal", "Normal")], [288, dcT("Wide", "Large")]], a.sidebar)}</div>
+      <div class="form-row"><label>${dcT("Font", "Police")}</label>${seg("font", [["inter", "Inter"], ["system", dcT("System", "Système")], ["mono", "Mono"], ["serif", "Serif"]], a.font)}</div>
+    </div>
+
+    <h3 style="margin-top:6px">${dcT("Animated background", "Fond animé")}</h3>
+    <div class="form-grid">
+      <div class="form-row"><label>${dcT("Style", "Style")}</label>${seg("bg", [["dots", dcT("Dot grid", "Grille de points")], ["world", dcT("World map", "Planisphère")], ["none", dcT("None", "Aucun")]], a.bg)}</div>
+      <div class="form-row"><label>${dcT("Intensity", "Intensité")} <span class="meta" id="ap-int-v">${a.bgIntensity}%</span></label><input type="range" id="ap-int" min="10" max="100" step="5" value="${a.bgIntensity}"></div>
+      <div class="form-row"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ap-inter" ${a.bgInteractive ? "checked" : ""}> ${dcT("Dots react to the mouse (and ripple on click)", "Les points réagissent à la souris (onde au clic)")}</label></div>
+    </div>
+    <button class="btn-ghost" id="ap-reset">${ico("rotate-ccw")} ${dcT("Reset appearance", "Réinitialiser l'apparence")}</button>
+  </div>`;
+}
+
+function bindAppearance() {
+  const card = $("#appearance-card"); if (!card) return;
+  const redraw = () => { const next = document.createElement("div"); next.innerHTML = appearanceCard(); card.replaceWith(next.firstElementChild); bindAppearance(); };
+  $$(".theme-card", card).forEach((el) => el.addEventListener("click", () => { Appearance.set({ theme: el.dataset.theme }); redraw(); }));
+  $$(".swatch", card).forEach((el) => el.addEventListener("click", () => { Appearance.set({ accent: el.dataset.accent }); redraw(); }));
+  $("#ap-accent", card).addEventListener("input", (e) => Appearance.set({ accent: e.target.value }));
+  $("#ap-accent", card).addEventListener("change", redraw);
+  $("#ap-radius", card).addEventListener("input", (e) => { Appearance.set({ radius: +e.target.value }); $("#ap-radius-v").textContent = e.target.value + "px"; });
+  $("#ap-fs", card).addEventListener("input", (e) => { Appearance.set({ fontScale: +e.target.value / 100 }); $("#ap-fs-v").textContent = e.target.value + "%"; });
+  $("#ap-int", card).addEventListener("input", (e) => { Appearance.set({ bgIntensity: +e.target.value }); $("#ap-int-v").textContent = e.target.value + "%"; });
+  $("#ap-inter", card).addEventListener("change", (e) => Appearance.set({ bgInteractive: e.target.checked }));
+  $$("[data-seg]", card).forEach((seg) => seg.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    const id = seg.dataset.seg, raw = b.dataset.v;
+    Appearance.set({ [id]: ["density", "sidebar"].includes(id) ? +raw : raw });
+    redraw();
+  }));
+  $("#ap-reset", card).addEventListener("click", () => { Appearance.reset(); redraw(); });
+}
+
 async function renderSettings(keepDetect = false) {
   const content = $("#content");
   const cfg = await api("/settings");
@@ -2136,7 +2338,8 @@ async function renderSettings(keepDetect = false) {
   let ntfyCfg;
   try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   content.innerHTML = `
-    <h1>${t('view.settings')}</h1>
+    <h1>${ico("settings")} ${t('view.settings')}</h1>
+    ${appearanceCard()}
     <div class="card">
       <h2>${t('common.language')}</h2>
       <div class="form-grid">
@@ -2171,7 +2374,7 @@ async function renderSettings(keepDetect = false) {
       <p style="color:var(--overlay0);font-size:12px">S'applique immédiatement, à toutes les consoles (jeu et playit.gg). Enregistré sur cet appareil uniquement.</p>
     </div>
     <div class="card">
-      <h2>🔔 Notifications (ntfy)</h2>
+      <h2>${ico("bell")} Notifications (ntfy)</h2>
       <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
         Pousse des notifications vers <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy.sh</a> (ou une instance auto-hébergée) — pas besoin de bot, juste un nom de "topic" à vous. Installez l'appli ntfy et abonnez-vous au même topic pour recevoir les alertes sur votre téléphone.
       </p>
@@ -2190,11 +2393,11 @@ async function renderSettings(keepDetect = false) {
       </div>
       <div style="margin-top:10px;display:flex;gap:8px">
         <button class="btn-green" id="nt-save">${t('common.save')}</button>
-        <button class="btn-ghost" id="nt-test">📨 Envoyer un test</button>
+        <button class="btn-ghost" id="nt-test">${ico("send")} Envoyer un test</button>
       </div>
     </div>
     <div class="card">
-      <h2>🤖 ${dcT("Discord bot", "Bot Discord")}</h2>
+      <h2>${ico("bot")} ${dcT("Discord bot", "Bot Discord")}</h2>
       <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
         ${dcT(
           "Notifications, <code>/mc</code> commands, and for each Minecraft server a dedicated <b>category</b> with a <b>status</b> channel, a live <b>console</b> channel (type commands there if your role allows it) and a <b>chat</b> channel linked to the in-game chat. The bot connects <i>out</i> to Discord: no port to open, no domain needed.",
@@ -2202,21 +2405,21 @@ async function renderSettings(keepDetect = false) {
         )}
       </p>
       <div style="margin-bottom:10px">${dcT("State", "État")} : ${discordStatus.state === "connected" ? `<span class="badge badge-green">${dcT("Connected", "Connecté")}</span> ${escapeHtml(discordStatus.detail || "")}${discordStatus.commands_registered ? " · " + dcT("commands registered", "commandes enregistrées") : " · " + dcT("registering commands…", "enregistrement des commandes…")}` : discordStatus.state === "connecting" ? `<span class="badge badge-mauve">${dcT("Connecting…", "Connexion…")}</span>` : discordStatus.state === "error" ? `<span class="badge badge-red">${dcT("Error", "Erreur")}</span> ${escapeHtml(discordStatus.detail || "")}` : `<span class="badge">${dcT("Inactive", "Inactif")}</span>`}</div>
-      ${discordStatus.message_content_missing ? `<div class="badge badge-red" style="display:block;margin-bottom:10px;white-space:normal">⚠ ${dcT("Console and chat in Discord are unavailable: enable <b>Message Content Intent</b> in the Discord developer portal (Bot → Privileged Gateway Intents), then save again. Notifications and slash commands already work.", "Console et chat dans Discord indisponibles : activez <b>Message Content Intent</b> dans le portail développeur Discord (Bot → Privileged Gateway Intents), puis enregistrez à nouveau. Les notifications et commandes slash fonctionnent déjà.")}</div>` : ""}
+      ${discordStatus.message_content_missing ? `<div class="badge badge-red" style="display:block;margin-bottom:10px;white-space:normal">${ico("triangle-alert")} ${dcT("Console and chat in Discord are unavailable: enable <b>Message Content Intent</b> in the Discord developer portal (Bot → Privileged Gateway Intents), then save again. Notifications and slash commands already work.", "Console et chat dans Discord indisponibles : activez <b>Message Content Intent</b> dans le portail développeur Discord (Bot → Privileged Gateway Intents), puis enregistrez à nouveau. Les notifications et commandes slash fonctionnent déjà.")}</div>` : ""}
 
       <h3 style="margin:14px 0 6px">1. ${dcT("Connection", "Connexion")}</h3>
       <div class="form-grid">
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="dc-enabled" style="width:auto" ${discordCfg.enabled ? "checked" : ""}> ${dcT("Enable", "Activer")}</label></div>
         <div class="form-row"><label>${dcT("Language of the bot", "Langue du bot")}</label><select id="dc-lang"><option value="fr" ${discordCfg.language !== "en" ? "selected" : ""}>Français</option><option value="en" ${discordCfg.language === "en" ? "selected" : ""}>English</option></select></div>
         <div class="form-row"><label>${dcT("Bot token", "Token du bot")} ${discordCfg.has_token ? `<span class="meta">(${dcT("configured", "configuré")})</span>` : ""}</label>
-          <div style="display:flex;gap:6px"><input id="dc-token" type="password" autocomplete="off" placeholder="${discordCfg.has_token ? dcT("Leave empty to keep", "Laisser vide pour conserver") : "MTE2…"}"><button class="btn-ghost" id="dc-detect" title="${dcT("Find the Discord servers where the bot is", "Trouver les serveurs Discord où se trouve le bot")}">🔍 ${dcT("Detect", "Détecter")}</button></div></div>
+          <div style="display:flex;gap:6px"><input id="dc-token" type="password" autocomplete="off" placeholder="${discordCfg.has_token ? dcT("Leave empty to keep", "Laisser vide pour conserver") : "MTE2…"}"><button class="btn-ghost" id="dc-detect" title="${dcT("Find the Discord servers where the bot is", "Trouver les serveurs Discord où se trouve le bot")}">${ico("search")} ${dcT("Detect", "Détecter")}</button></div></div>
         <div class="form-row"><label>${dcT("Discord server", "Serveur Discord")}</label>
           ${dcDetect.guilds.length ? `<select id="dc-guild">${dcDetect.guilds.map((g) => `<option value="${escapeHtml(g.id)}" ${g.id === discordCfg.guild_id ? "selected" : ""}>${escapeHtml(g.name)}</option>`).join("")}</select>` : `<input id="dc-guild" placeholder="${dcT("Click Detect, or paste the server ID", "Cliquez sur Détecter, ou collez l'identifiant")}" value="${escapeHtml(discordCfg.guild_id)}">`}</div>
         <div class="form-row"><label>${dcT("General notifications channel", "Salon des notifications générales")}</label>
           ${dcDetect.channels.length ? `<select id="dc-channel"><option value="">—</option>${dcDetect.channels.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === discordCfg.channel_id ? "selected" : ""}>#${escapeHtml(c.name)}</option>`).join("")}</select>` : `<input id="dc-channel" placeholder="123456789012345678" value="${escapeHtml(discordCfg.channel_id)}">`}</div>
         <div class="form-row"><label>${dcT("…or webhook URL (no bot)", "…ou URL de webhook (sans bot)")} ${discordCfg.has_webhook ? `<span class="meta">(${dcT("configured, “-” to remove", "configuré, « - » pour supprimer")})</span>` : ""}</label><input id="dc-webhook" type="password" autocomplete="off" placeholder="${discordCfg.has_webhook ? dcT("Leave empty to keep", "Laisser vide pour conserver") : "https://discord.com/api/webhooks/…"}"></div>
       </div>
-      ${dcDetect.invite_url ? `<p style="font-size:12px;margin:8px 0">➕ <a href="${escapeHtml(dcDetect.invite_url)}" target="_blank" rel="noopener">${dcT("Invite the bot to a Discord server (with the permissions needed to create channels)", "Inviter le bot sur un serveur Discord (avec les permissions pour créer les salons)")}</a></p>` : `<p style="color:var(--overlay0);font-size:12px;margin:6px 0">${dcT("Create the bot at", "Créez le bot sur")} <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a> (New Application → Bot → copy the token), ${dcT("paste the token, click Detect: the invite link and your servers appear.", "collez le token puis cliquez sur Détecter : le lien d'invitation et vos serveurs apparaissent.")}</p>`}
+      ${dcDetect.invite_url ? `<p style="font-size:12px;margin:8px 0">${ico("plus")} <a href="${escapeHtml(dcDetect.invite_url)}" target="_blank" rel="noopener">${dcT("Invite the bot to a Discord server (with the permissions needed to create channels)", "Inviter le bot sur un serveur Discord (avec les permissions pour créer les salons)")}</a></p>` : `<p style="color:var(--overlay0);font-size:12px;margin:6px 0">${dcT("Create the bot at", "Créez le bot sur")} <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a> (New Application → Bot → copy the token), ${dcT("paste the token, click Detect: the invite link and your servers appear.", "collez le token puis cliquez sur Détecter : le lien d'invitation et vos serveurs apparaissent.")}</p>`}
 
       <h3 style="margin:14px 0 6px">2. ${dcT("Who can do what?", "Qui peut faire quoi ?")}</h3>
       <div class="form-grid">
@@ -2233,12 +2436,12 @@ async function renderSettings(keepDetect = false) {
         ${state.servers.map((sv) => {
           const sc = (discordCfg.servers || {})[sv.id];
           return `<tr data-dc-row="${sv.id}">
-            <td><b>${escapeHtml(sv.name)}</b> ${sv.remote ? `<span class="badge badge-mauve">🖧 ${escapeHtml(sv.remote.label)}</span>` : ""}</td>
-            <td>${sc && sc.console_channel_id ? `<span class="badge badge-green">✓ ${dcT("created", "créés")}</span>` : "—"}</td>
+            <td><b>${escapeHtml(sv.name)}</b> ${sv.remote ? `<span class="badge badge-mauve">${ico("network")} ${escapeHtml(sv.remote.label)}</span>` : ""}</td>
+            <td>${sc && sc.console_channel_id ? `<span class="badge badge-green">${ico("check")} ${dcT("created", "créés")}</span>` : "—"}</td>
             <td><input type="checkbox" data-dc="stream" style="width:auto" ${!sc || sc.stream_console ? "checked" : ""}></td>
             <td><input type="checkbox" data-dc="chat" style="width:auto" ${!sc || sc.bridge_chat ? "checked" : ""}></td>
             <td>${dcPicker("dc-cmd-" + sv.id, sc ? sc.console_command_role_ids : [], dcDetect.roles, true)}</td>
-            <td style="white-space:nowrap"><button class="btn-green" data-dc-setup="${sv.id}">${sc && sc.console_channel_id ? "🔄 " + dcT("Update", "Mettre à jour") : "✨ " + dcT("Create channels", "Créer les salons")}</button>${sc ? ` <button class="btn-red" data-dc-remove="${sv.id}">${dcT("Remove", "Retirer")}</button>` : ""}</td>
+            <td style="white-space:nowrap"><button class="btn-green" data-dc-setup="${sv.id}">${sc && sc.console_channel_id ? "" + ico("refresh-cw") + " " + dcT("Update", "Mettre à jour") : "" + ico("sparkles") + " " + dcT("Create channels", "Créer les salons")}</button>${sc ? ` <button class="btn-red" data-dc-remove="${sv.id}">${dcT("Remove", "Retirer")}</button>` : ""}</td>
           </tr>`;
         }).join("")}</tbody></table>
         <p style="color:var(--overlay0);font-size:12px;margin-top:6px">${dcT("Needs the bot to have <i>Manage Channels</i> and <i>Manage Roles</i> (included in the invite link). “Update” re-applies the roles chosen above to existing channels; channels deleted by hand are recreated. “Remove” unlinks them (you will be asked whether to delete them on Discord too).", "Le bot doit avoir <i>Gérer les salons</i> et <i>Gérer les rôles</i> (inclus dans le lien d'invitation). « Mettre à jour » réapplique les rôles choisis ci-dessus aux salons existants ; un salon supprimé à la main est recréé. « Retirer » les délie (on vous demandera s'il faut aussi les supprimer sur Discord).")}</p>`
@@ -2249,7 +2452,7 @@ async function renderSettings(keepDetect = false) {
         ${[["started", dcT("Starting", "Démarrage")], ["ready", dcT("Server ready", "Serveur prêt")], ["stopped", dcT("Stopped", "Arrêt")], ["crash", "Crash"], ["backup", dcT("Backup", "Sauvegarde")], ["scheduled_restart", dcT("Scheduled restart", "Redémarrage programmé")], ["auto_stop", dcT("Auto-stop (idle)", "Arrêt auto (inactif)")], ["player_join_leave", dcT("Player join/leave", "Connexion/déconnexion joueur")]].map(([k, label]) => `<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="dc-n-${k}" style="width:auto" ${discordCfg["notify_" + k] ? "checked" : ""}> ${label}</label>`).join("")}
       </div>
       <button class="btn-green" id="dc-save">${t('common.save')}</button>
-      <button class="btn-ghost" id="dc-test">📨 ${dcT("Send a test", "Envoyer un test")}</button>
+      <button class="btn-ghost" id="dc-test">${ico("send")} ${dcT("Send a test", "Envoyer un test")}</button>
       <span id="dc-msg" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
     <div class="card">
@@ -2274,7 +2477,7 @@ async function renderSettings(keepDetect = false) {
         <div class="form-row"><label>Exécutable Java pour ce serveur</label>
           <div style="display:flex;gap:8px">
             <input id="ss-java" style="flex:1" value="${escapeHtml(s.java_path || "")}" placeholder="java (celui du système)">
-            <button class="btn-ghost" id="ss-java-test" type="button">🧪 Tester</button>
+            <button class="btn-ghost" id="ss-java-test" type="button">${ico("flask-conical")} Tester</button>
           </div>
           <div id="ss-java-result" style="font-size:12px;margin-top:4px"></div>
         </div>
@@ -2288,7 +2491,7 @@ async function renderSettings(keepDetect = false) {
         </div>
         <div class="form-row"><label>… après combien de minutes sans joueur</label><input id="ss-stopempty-min" type="number" min="1" value="${s.stop_when_empty_minutes || 20}" ${s.stop_when_empty_minutes ? "" : "disabled"}></div>
         <div class="form-row">
-          <label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-dynamic" style="width:auto" ${s.dynamic_server ? "checked" : ""} ${s.stop_when_empty_minutes ? "" : "disabled"}> ⚡ Serveur dynamique (économie d'énergie)</label>
+          <label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="ss-dynamic" style="width:auto" ${s.dynamic_server ? "checked" : ""} ${s.stop_when_empty_minutes ? "" : "disabled"}> ${ico("zap")} Serveur dynamique (économie d'énergie)</label>
           <p style="color:var(--overlay0);font-size:12px;margin-top:4px">
             Une fois arrêté par inactivité, MCManager écoute discrètement sur le port du serveur (Java, et Bedrock/Geyser si détecté — expérimental) au lieu de laisser le port mort.
             Il répond aux pings (le serveur reste visible avec un message "en veille") et redémarre le serveur dès qu'un joueur essaie vraiment de rejoindre.
@@ -2340,6 +2543,7 @@ async function renderSettings(keepDetect = false) {
       toast(e.message || "Échec de l'enregistrement.", "error");
     }
   });
+  bindAppearance();
   const dcPickerValue = (name) => {
     const boxes = $$(`[data-picker="${name}"]`);
     if (boxes.length) return boxes.filter((b) => b.checked).map((b) => b.value);
@@ -2453,11 +2657,11 @@ async function renderSettings(keepDetect = false) {
         const res = await api(`/servers/${s.id}/java/test`, { method: "POST", body: JSON.stringify({ java_path: javaPath, xmx_mb: xmx }) });
         resultEl.style.color = res.ok ? "var(--green)" : "var(--red)";
         resultEl.textContent = res.ok
-          ? `✓ "${res.java_path}" fonctionne avec -Xmx${res.xmx_mb}M — ${res.output.split("\n")[0]}`
-          : `✗ Échec avec -Xmx${res.xmx_mb}M : ${res.output || "aucune sortie"}`;
+          ? `${ico("check")} "${res.java_path}" fonctionne avec -Xmx${res.xmx_mb}M — ${res.output.split("\n")[0]}`
+          : `${ico("x")} Échec avec -Xmx${res.xmx_mb}M : ${res.output || "aucune sortie"}`;
       } catch (e) {
         resultEl.style.color = "var(--red)";
-        resultEl.textContent = `✗ ${e.message || "Impossible de lancer ce Java (chemin introuvable ?)."}`;
+        resultEl.textContent = `${ico("x")} ${e.message || "Impossible de lancer ce Java (chemin introuvable ?)."}`;
       }
     });
 

@@ -8,17 +8,20 @@ use crate::state::{AppState, ServerRuntime};
 pub async fn console_ws(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    user: Option<axum::Extension<crate::auth::User>>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // Lire la console demande « view » ; y TAPER des commandes demande « console » (voir perm.rs).
+    let can_input = user.map(|axum::Extension(u)| u.level_for(&id).map(|l| l >= crate::perm::Level::Console).unwrap_or(false)).unwrap_or(true);
     // A server living on another paired instance: bridge to its console
     // through the encrypted tunnel instead of the (non-existent) local runtime.
     if let Some(label) = state.hub.label_for_server(id).await {
-        return ws.on_upgrade(move |socket| handle_remote_socket(state, id, label, socket));
+        return ws.on_upgrade(move |socket| handle_remote_socket(state, id, label, can_input, socket));
     }
-    ws.on_upgrade(move |socket| handle_socket(state, id, socket))
+    ws.on_upgrade(move |socket| handle_socket(state, id, can_input, socket))
 }
 
-async fn handle_remote_socket(state: AppState, id: Uuid, label: String, mut socket: WebSocket) {
+async fn handle_remote_socket(state: AppState, id: Uuid, label: String, can_input: bool, mut socket: WebSocket) {
     let (backlog, mut rx) = crate::hub::console_subscribe(&state, id, &label).await;
     for line in backlog {
         if socket.send(Message::Text(line)).await.is_err() {
@@ -41,6 +44,9 @@ async fn handle_remote_socket(state: AppState, id: Uuid, label: String, mut sock
             }
             msg = socket.recv() => {
                 match msg {
+                    Some(Ok(Message::Text(_))) if !can_input => {
+                        let _ = socket.send(Message::Text("[MCManager] Lecture seule : votre niveau d'accès ne permet pas d'envoyer des commandes.".to_string())).await;
+                    }
                     Some(Ok(Message::Text(text))) => {
                         if let Err(e) = crate::hub::console_send(&state, &label, id, &text).await {
                             let _ = socket.send(Message::Text(format!("[MCManager] Commande non envoyee : {e}"))).await;
@@ -55,7 +61,7 @@ async fn handle_remote_socket(state: AppState, id: Uuid, label: String, mut sock
     }
 }
 
-async fn handle_socket(state: AppState, id: Uuid, mut socket: WebSocket) {
+async fn handle_socket(state: AppState, id: Uuid, can_input: bool, mut socket: WebSocket) {
     // IMPORTANT: always subscribe to the *same* per-server runtime entry that
     // `process::start_server` uses (it does `.entry(id).or_insert_with(...)`
     // too). Previously, opening the console before ever starting the server
@@ -90,6 +96,9 @@ async fn handle_socket(state: AppState, id: Uuid, mut socket: WebSocket) {
             }
             msg = socket.recv() => {
                 match msg {
+                    Some(Ok(Message::Text(_))) if !can_input => {
+                        let _ = socket.send(Message::Text("[MCManager] Lecture seule : votre niveau d'accès ne permet pas d'envoyer des commandes.".to_string())).await;
+                    }
                     Some(Ok(Message::Text(text))) => {
                         let _ = crate::process::send_command(&state, id, &text).await;
                     }

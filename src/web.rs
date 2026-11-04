@@ -56,6 +56,7 @@ pub fn resolve_web_dir() -> String {
 }
 
 pub fn build_app(state: AppState, opts: WebOptions) -> Router {
+    let state_data_dir = state.data_dir.clone();
     let index = format!("{}/index.html", opts.web_dir);
     let static_service = ServeDir::new(&opts.web_dir).not_found_service(ServeFile::new(&index));
 
@@ -66,6 +67,12 @@ pub fn build_app(state: AppState, opts: WebOptions) -> Router {
     if let Some(auth) = opts.auth.clone() {
         app = app.merge(auth::router(auth.clone())).layer(axum::middleware::from_fn_with_state(auth, auth::require_auth));
     }
+    // Journal d'audit : au-dessus de l'authentification pour voir aussi les accès refusés.
+    let trust_proxy = std::env::var("MCMANAGER_TRUST_PROXY").map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on")).unwrap_or(false);
+    app = app.layer(axum::middleware::from_fn_with_state(
+        crate::audit::AuditCtx { data_dir: Arc::new(state_data_dir), trust_proxy },
+        crate::audit::layer,
+    ));
     // No CORS layer on purpose: the UI is same-origin, and a permissive CORS
     // policy would let any web page the user happens to visit drive the API
     // of a locally running instance.
@@ -476,6 +483,157 @@ mod tests {
             .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}")).body(Body::from(body2)).unwrap();
         assert_ne!(call(&app, req).await.status(), StatusCode::OK);
         assert_eq!(state.servers.read().await.len(), 1);
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    /// Droits par serveur + journal d'audit, sur l'application complète.
+    #[tokio::test]
+    async fn per_server_permissions_and_audit_trail() {
+        let dir = std::env::temp_dir().join(format!("mcmanager-perm-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let state = crate::state::build_state_for_test(&dir).await;
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        for (id, name) in [(a, "Survie"), (b, "Creatif")] {
+            let folder = dir.join(name);
+            tokio::fs::create_dir_all(&folder).await.unwrap();
+            state.servers.write().await.insert(id, crate::discord::testutil::sample_server(id, name, &folder));
+        }
+        let auth = AuthState::load(&dir).await.unwrap();
+        auth.add_user("root", "root-password-1", true, false).await.unwrap();
+        for (name, level, per_server) in [
+            ("viewer", Some(crate::perm::Level::View), vec![]),
+            ("ops", Some(crate::perm::Level::Control), vec![]),
+            ("dev", None, vec![(a, crate::perm::Level::Manage)]),
+            ("blocked", None, vec![]),
+        ] {
+            auth.add_user(name, &format!("{name}-password-1"), false, false).await.unwrap();
+            auth.set_access(name, level, per_server.into_iter().collect()).await.unwrap();
+        }
+        let app = build_app(state.clone(), WebOptions { web_dir: dir.to_string_lossy().to_string(), auth: Some(auth), remote: None });
+
+        let mut cookies = std::collections::HashMap::new();
+        for name in ["root", "viewer", "ops", "dev", "blocked"] {
+            let r = call(&app, json_req("POST", "/auth/login", json!({ "username": name, "password": format!("{name}-password-1") }), None)).await;
+            assert_eq!(r.status(), StatusCode::OK, "{name}");
+            cookies.insert(name, cookie_of(&r));
+        }
+        let status_of = |app: &Router, who: &str, method: &str, uri: String| {
+            let (app, cookie) = (app.clone(), cookies[who].clone());
+            let method = method.to_string();
+            // `/api/servers/<id>/` (barre finale) ne correspond à aucune route : on teste le vrai chemin.
+            let uri = uri.trim_end_matches('/').to_string();
+            async move {
+                let req = Request::builder().method(method.as_str()).uri(uri).header(header::COOKIE, cookie).header(header::CONTENT_TYPE, "application/json").body(Body::from("{}")).unwrap();
+                call(&app, req).await.status()
+            }
+        };
+        let list_for = |who: &'static str| {
+            let (app, cookie) = (app.clone(), cookies[who].clone());
+            async move {
+                let r = call(&app, get_req("/api/servers", Some(&cookie))).await;
+                let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+                v.as_array().unwrap().iter().map(|s| (s["name"].as_str().unwrap().to_string(), s["my_level"].clone())).collect::<Vec<_>>()
+            }
+        };
+
+        // La liste est filtrée selon les droits.
+        assert_eq!(list_for("root").await.len(), 2);
+        assert_eq!(list_for("viewer").await.len(), 2);
+        let dev_list = list_for("dev").await;
+        assert_eq!(dev_list.len(), 1);
+        assert_eq!(dev_list[0], ("Survie".to_string(), json!("manage")));
+        assert!(list_for("blocked").await.is_empty(), "un compte sans droit ne voit aucun serveur");
+
+        // viewer : lecture seule.
+        let sa = a.to_string();
+        assert_eq!(status_of(&app, "viewer", "GET", format!("/api/servers/{sa}")).await, StatusCode::OK);
+        assert_eq!(status_of(&app, "viewer", "GET", format!("/api/servers/{sa}/status")).await, StatusCode::OK);
+        for (m, p) in [("POST", "start"), ("POST", "stop"), ("POST", "kill"), ("POST", "command"), ("GET", "files"), ("GET", "files/content?path=server.properties"), ("DELETE", "")] {
+            assert_eq!(status_of(&app, "viewer", m, format!("/api/servers/{sa}/{p}")).await, StatusCode::FORBIDDEN, "viewer {m} {p}");
+        }
+        // ops (control) : peut démarrer/arrêter/commander, pas toucher aux fichiers ni à la configuration.
+        for p in ["start", "stop", "command"] {
+            let st = status_of(&app, "ops", "POST", format!("/api/servers/{sa}/{p}")).await;
+            assert!(st != StatusCode::FORBIDDEN && st != StatusCode::UNAUTHORIZED, "ops POST {p} -> {st}");
+        }
+        for (m, p) in [("GET", "files"), ("PUT", ""), ("POST", "backups"), ("GET", "files/export?path=")] {
+            assert_eq!(status_of(&app, "ops", m, format!("/api/servers/{sa}/{p}")).await, StatusCode::FORBIDDEN, "ops {m} {p}");
+        }
+        // dev : manage sur Survie seulement.
+        assert_ne!(status_of(&app, "dev", "GET", format!("/api/servers/{sa}/files?path=")).await, StatusCode::FORBIDDEN);
+        for p in ["", "status", "files", "start"] {
+            assert_eq!(status_of(&app, "dev", if p == "start" { "POST" } else { "GET" }, format!("/api/servers/{b}/{p}")).await, StatusCode::FORBIDDEN, "dev sur l'autre serveur : {p}");
+        }
+        // Réservé aux administrateurs, même avec manage partout.
+        for who in ["viewer", "ops", "dev"] {
+            assert_eq!(status_of(&app, who, "POST", "/api/servers".into()).await, StatusCode::FORBIDDEN, "{who} ne crée pas de serveur");
+            assert_eq!(status_of(&app, who, "GET", "/api/settings".into()).await, StatusCode::FORBIDDEN);
+            assert_eq!(status_of(&app, who, "GET", "/api/audit".into()).await, StatusCode::FORBIDDEN);
+            assert_eq!(status_of(&app, who, "GET", "/api/discord/config".into()).await, StatusCode::FORBIDDEN);
+            assert_eq!(status_of(&app, who, "GET", "/api/version".into()).await, StatusCode::OK, "catalogues publics ouverts");
+        }
+        assert_eq!(status_of(&app, "root", "GET", "/api/settings".into()).await, StatusCode::OK);
+
+        // Changer les droits d'un compte agit tout de suite, sans nouvelle connexion.
+        let put = Request::builder().method("PUT").uri("/auth/users/dev/access").header(header::COOKIE, cookies["root"].clone())
+            .header(header::CONTENT_TYPE, "application/json").body(Body::from(json!({ "default_level": "view", "servers": { a.to_string(): "manage" } }).to_string())).unwrap();
+        assert_eq!(call(&app, put).await.status(), StatusCode::OK);
+        assert_eq!(list_for("dev").await.len(), 2, "le niveau par défaut s'applique maintenant à l'autre serveur");
+        assert_eq!(status_of(&app, "dev", "GET", format!("/api/servers/{b}/status")).await, StatusCode::OK);
+        assert_eq!(status_of(&app, "dev", "POST", format!("/api/servers/{b}/start")).await, StatusCode::FORBIDDEN);
+        // Seul un administrateur règle les droits.
+        let put = Request::builder().method("PUT").uri("/auth/users/blocked/access").header(header::COOKIE, cookies["viewer"].clone())
+            .header(header::CONTENT_TYPE, "application/json").body(Body::from(json!({ "default_level": "manage" }).to_string())).unwrap();
+        assert_eq!(call(&app, put).await.status(), StatusCode::FORBIDDEN);
+
+        // Une connexion échouée, avec un mot de passe qui ne doit jamais atteindre le journal.
+        let bad = call(&app, json_req("POST", "/auth/login", json!({ "username": "viewer", "password": "MOT-DE-PASSE-SECRET" }), None)).await;
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        // Une requête avec un paramètre « secret » dans l'URL.
+        let _ = status_of(&app, "ops", "POST", format!("/api/servers/{sa}/command?token=PARAMETRE-SECRET")).await;
+
+        // ---- journal d'audit ----
+        let r = call(&app, get_req("/api/audit?limit=500", Some(&cookies["root"]))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let entries: Vec<serde_json::Value> = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert!(!raw.contains("MOT-DE-PASSE-SECRET") && !raw.contains("PARAMETRE-SECRET") && !raw.contains("password"), "aucun secret dans le journal");
+        let has = |user: &str, needle: &str| entries.iter().any(|e| e["user"] == user && format!("{} {}", e["path"].as_str().unwrap_or(""), e["detail"].as_str().unwrap_or("")).contains(needle));
+        assert!(has("viewer", &format!("/api/servers/{sa}/start")), "le refus de viewer est journalisé");
+        assert!(entries.iter().any(|e| e["user"] == "viewer" && e["status"] == 403 && e["server"] == sa.as_str()), "avec l'identifiant du serveur concerné");
+        assert!(has("ops", &format!("/api/servers/{sa}/command")), "la commande de ops est journalisée (sans son contenu ni son paramètre)");
+        assert!(has("dev", "/api/servers"), "tentative de création refusée journalisée");
+        assert!(has("root", "droits de « dev » modifiés"));
+        assert!(has("viewer", "connexion refusée"), "échec de connexion journalisé au nom tenté");
+        assert!(has("root", "connexion réussie"));
+        // Les simples lectures réussies ne remplissent pas le journal.
+        assert!(!entries.iter().any(|e| e["method"] == "GET" && e["status"] == 200), "GET réussis non journalisés");
+        // Filtre « refus seulement ».
+        let r = call(&app, get_req("/api/audit?only_denied=true", Some(&cookies["root"]))).await;
+        let denied: Vec<serde_json::Value> = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert!(!denied.is_empty() && denied.iter().all(|e| e["status"] == 403 || e["status"] == 401 || e["detail"].as_str().map(|d| d.contains("refus")).unwrap_or(false)));
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn legacy_users_keep_full_access_and_new_ones_start_with_none() {
+        let dir = std::env::temp_dir().join(format!("mcmanager-legacy-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // users.json écrit avant l'introduction des droits par serveur (aucun champ d'accès).
+        let hash = AuthState::load(&dir).await.unwrap();
+        hash.add_user("ancien", "ancien-password-1", false, false).await.unwrap();
+        let mut raw: serde_json::Value = serde_json::from_str(&tokio::fs::read_to_string(dir.join("users.json")).await.unwrap()).unwrap();
+        for u in raw.as_array_mut().unwrap() {
+            u.as_object_mut().unwrap().remove("default_level");
+            u.as_object_mut().unwrap().remove("servers");
+        }
+        tokio::fs::write(dir.join("users.json"), serde_json::to_string(&raw).unwrap()).await.unwrap();
+        let reloaded = AuthState::load(&dir).await.unwrap();
+        let u = reloaded.list_users().await.into_iter().find(|u| u.username == "ancien").unwrap();
+        assert_eq!(u.level_for(&uuid::Uuid::new_v4()), Some(crate::perm::Level::Manage), "un compte existant ne perd pas ses accès à la mise à jour");
+        reloaded.add_user("nouveau", "nouveau-password-1", false, false).await.unwrap();
+        let n = reloaded.list_users().await.into_iter().find(|u| u.username == "nouveau").unwrap();
+        assert_eq!(n.level_for(&uuid::Uuid::new_v4()), None, "un nouveau compte n'a accès à rien tant qu'on ne lui en donne pas");
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }
