@@ -2025,7 +2025,7 @@ async function renderAssistant() {
   try {
     cfg = await api("/ai/config");
   } catch {
-    cfg = { provider: "anthropic", model: "", ollama_base_url: "", omniroute_base_url: "", has_key: false, masked_key: "" };
+    cfg = { provider: "anthropic", model: "", ollama_base_url: "", omniroute_base_url: "", tools_mode: "ask", has_key: false, masked_key: "" };
   }
 
   content.innerHTML = `
@@ -2062,6 +2062,13 @@ async function renderAssistant() {
           </p>
         </div>
         <div class="form-row">
+          <label>${dcT("Tools mode", "Mode des outils")}</label>
+          <select id="ai-tools-mode">
+            ${[["off", "Désactivés — réponses en texte seulement", "Off — text answers only"], ["read", "Lecture — consulter l'état, la console, les mods, le web", "Read — inspect status, console, mods, the web"], ["ask", "Confirmer — chaque modification demande votre accord (recommandé)", "Ask — every change needs your approval (recommended)"], ["auto", "Automatique — modifie sans demander (à vos risques)", "Auto — changes without asking (at your own risk)"]]
+              .map(([v, fr, en]) => `<option value="${v}" ${(cfg.tools_mode || "ask") === v ? "selected" : ""}>${dcT(en, fr)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-row">
           <label>Modèle</label>
           <div style="display:flex;gap:8px">
             <select id="ai-model" style="flex:1"><option value="${escapeHtml(cfg.model || "")}">${escapeHtml(cfg.model || "(par défaut)")}</option></select>
@@ -2072,7 +2079,7 @@ async function renderAssistant() {
       <button class="btn-green" id="ai-save">${t('common.save')}</button>
       <p style="color:var(--overlay0);font-size:12px;margin-top:8px">
         La clé est chiffrée sur disque (AES-256-GCM) avec une clé de chiffrement générée localement et stockée séparément, accès restreint au propriétaire du compte. C'est une vraie protection contre une copie/sauvegarde accidentelle du seul fichier de config, mais pas l'équivalent d'un trousseau système : la clé de déchiffrement reste sur la même machine.
-        Pour Ollama local, aucune clé n'est nécessaire ; l'assistant peut alors chercher sur le web (DuckDuckGo) et lire des pages pour vous répondre.
+        Pour Ollama local, aucune clé n'est nécessaire ; l'assistant peut, avec tous les fournisseurs, consulter l'état du serveur, chercher sur le web et — selon le mode des outils — modifier le serveur après votre accord. Le contenu des pages web et de la console est traité comme une donnée, jamais comme une instruction.
       </p>
     </div>
     <div class="card" style="display:flex;flex-direction:column;flex:1;min-height:360px">
@@ -2081,6 +2088,7 @@ async function renderAssistant() {
       <div class="console-input-row">
         <input id="ai-chat-input" placeholder="Ex : Comment réduire le lag ? Quel plugin pour la protection anti-grief ?">
         <button class="btn-blue" id="ai-chat-send">Envoyer</button>
+        <button class="btn-ghost hidden" id="ai-chat-stop" type="button">${ico("square")} ${dcT("Stop", "Arrêter")}</button>
       </div>
     </div>
   `;
@@ -2119,6 +2127,7 @@ async function renderAssistant() {
         model: $("#ai-model").value || "",
         ollama_base_url: $("#ai-ollama-url").value || "",
         omniroute_base_url: $("#ai-omniroute-url").value || "",
+        tools_mode: $("#ai-tools-mode").value,
       }) });
       const models = await api("/ai/models");
       const sel = $("#ai-model");
@@ -2143,6 +2152,7 @@ async function renderAssistant() {
         model: $("#ai-model").value || "",
         ollama_base_url: $("#ai-ollama-url").value || "",
         omniroute_base_url: $("#ai-omniroute-url").value || "",
+        tools_mode: $("#ai-tools-mode").value,
       }) });
       toast("Configuration de l'assistant enregistrée.", "success");
       renderAssistant();
@@ -2152,8 +2162,11 @@ async function renderAssistant() {
   });
 
   renderAiChatLog();
+  $("#ai-chat-log").addEventListener("click", onAiLogClick);
   $("#ai-chat-send").addEventListener("click", sendAiChat);
+  $("#ai-chat-stop").addEventListener("click", stopAiChat);
   $("#ai-chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendAiChat(); });
+  setAiBusy(!!aiAbort);
 }
 
 // ───────────────────────── markdown minimal (chat IA) ─────────────────────────
@@ -2210,37 +2223,146 @@ function renderMarkdownLite(text) {
   return html;
 }
 
+// Chaque message de l'assistant est une suite de « parts » : texte, pastille d'outil ou erreur.
+// Les pastilles affichent l'état (en cours / en attente / fait / erreur / refusé) ; les demandes de
+// confirmation portent les boutons Approuver / Refuser.
+let aiAbort = null;
+let aiRenderQueued = false;
+
+function aiAssistantText(m) {
+  return (m.parts || []).filter((p) => p.type === "text").map((p) => p.text).join("");
+}
+
+function aiToolPill(p) {
+  const st = { pending: ["shield-check", dcT("Waiting for your approval", "En attente de votre accord")], running: ["square", dcT("Running", "En cours")], ok: ["check", dcT("Done", "Fait")], error: ["triangle-alert", dcT("Error", "Erreur")], denied: ["x", dcT("Refused", "Refusé")] }[p.status] || ["square", ""];
+  const spin = p.status === "running" ? '<span class="ai-spin" aria-hidden="true"></span>' : ico(st[0]);
+  const detail = p.summary && p.status !== "pending" ? ` — ${escapeHtml(p.summary)}` : "";
+  const actions = p.status === "pending"
+    ? `<span class="ai-tool-actions"><button class="btn-green btn-sm" data-ai-approve="${escapeHtml(p.id)}">${dcT("Approve", "Approuver")}</button> <button class="btn-ghost btn-sm" data-ai-deny="${escapeHtml(p.id)}">${dcT("Refuse", "Refuser")}</button></span>`
+    : "";
+  return `<div class="ai-tool ai-tool-${p.status}" title="${escapeHtml(st[1])}">${spin}<span class="ai-tool-label">${escapeHtml(p.label)}${detail}</span>${actions}</div>`;
+}
+
+function aiMessageHtml(m) {
+  const who = m.role === "user" ? dcT("You", "Vous") : "Assistant";
+  if (m.role === "user") return `<div class="ai-msg ai-msg-user"><b>${who} :</b> ${escapeHtml(m.content).replace(/\n/g, "<br>")}</div>`;
+  const body = (m.parts || []).map((p) => {
+    if (p.type === "text") return p.text ? `<div class="ai-text">${renderMarkdownLite(p.text)}</div>` : "";
+    if (p.type === "tool") return aiToolPill(p);
+    return `<div class="ai-error">${ico("triangle-alert")} ${escapeHtml(p.text)}</div>`;
+  }).join("");
+  const wait = m.streaming && !(m.parts || []).length ? `<span class="ai-spin" aria-hidden="true"></span> ${dcT("Thinking…", "L'assistant réfléchit…")}` : "";
+  return `<div class="ai-msg ai-msg-assistant"><b>${who} :</b> ${body}${wait}</div>`;
+}
+
 function renderAiChatLog() {
   const log = $("#ai-chat-log");
   if (!log) return;
+  const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 80;
   log.innerHTML = state.aiChatHistory.length
-    ? state.aiChatHistory.map((m) => `<div class="ai-msg ai-msg-${m.role}"><b>${m.role === "user" ? "Vous" : "Assistant"} :</b> ${m.role === "assistant" ? renderMarkdownLite(m.content) : escapeHtml(m.content).replace(/\n/g, "<br>")}</div>`).join("")
-    : `<div class="empty-state">Posez une question sur votre serveur — mods à installer, réglages de perf, pourquoi ça lag...</div>`;
-  log.scrollTop = log.scrollHeight;
+    ? state.aiChatHistory.map(aiMessageHtml).join("")
+    : `<div class="empty-state">${dcT("Ask about your server — mods to install, performance settings, why it lags...", "Posez une question sur votre serveur — mods à installer, réglages de perf, pourquoi ça lag...")}</div>`;
+  if (nearBottom) log.scrollTop = log.scrollHeight;
+}
+
+// Le rendu Markdown progressif est limité à une image d'écran : des dizaines de fragments par seconde ne coûtent qu'un rendu.
+function scheduleAiRender() {
+  if (aiRenderQueued) return;
+  aiRenderQueued = true;
+  requestAnimationFrame(() => { aiRenderQueued = false; renderAiChatLog(); });
+}
+
+function setAiBusy(busy) {
+  const send = $("#ai-chat-send"), stop = $("#ai-chat-stop");
+  if (send) send.disabled = busy;
+  if (stop) stop.classList.toggle("hidden", !busy);
+}
+
+// Décodage SSE : blocs séparés par une ligne vide, champs « event: » et « data: ».
+async function readAiStream(res, onEvent) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const data = block.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, "")).join("\n");
+      if (!data) continue;
+      try { onEvent(JSON.parse(data)); } catch { /* fragment illisible : ignoré */ }
+    }
+  }
+}
+
+function applyAiEvent(asst, ev) {
+  const parts = asst.parts;
+  if (ev.type === "delta") {
+    const last = parts[parts.length - 1];
+    if (last && last.type === "text") last.text += ev.text; else parts.push({ type: "text", text: ev.text });
+  } else if (ev.type === "tool_start") {
+    parts.push({ type: "tool", id: ev.id, name: ev.name, label: state.lang === "fr" ? ev.label_fr : ev.label_en, status: ev.needs_approval ? "pending" : "running", summary: "" });
+  } else if (ev.type === "tool_end") {
+    const p = parts.find((x) => x.type === "tool" && x.id === ev.id);
+    if (p) { p.status = ev.denied ? "denied" : ev.ok ? "ok" : "error"; p.summary = ev.summary || ""; }
+  } else if (ev.type === "error") {
+    parts.push({ type: "error", text: ev.message });
+  }
 }
 
 async function sendAiChat() {
+  if (aiAbort) return;
   const input = $("#ai-chat-input");
   const message = input.value.trim();
   if (!message) return;
   input.value = "";
-  state.aiChatHistory.push({ role: "user", content: message });
+  // Historique envoyé au serveur : texte seulement (les pastilles d'outils n'en font pas partie).
+  const history = state.aiChatHistory.map((m) => ({ role: m.role, content: m.role === "user" ? m.content : aiAssistantText(m) })).filter((m) => m.content);
+  const asst = { role: "assistant", parts: [], streaming: true };
+  state.aiChatHistory.push({ role: "user", content: message }, asst);
   renderAiChatLog();
-  const log = $("#ai-chat-log");
-  log.innerHTML += `<div class="empty-state" id="ai-typing">L'assistant réfléchit…</div>`;
-  log.scrollTop = log.scrollHeight;
+  const s = currentServer();
+  aiAbort = new AbortController();
+  setAiBusy(true);
   try {
-    const s = currentServer();
-    const res = await api("/ai/chat", { method: "POST", body: JSON.stringify({
-      message,
-      history: state.aiChatHistory.slice(0, -1),
-      server_id: s ? s.id : null,
-    }) });
-    state.aiChatHistory.push({ role: "assistant", content: res.reply });
+    const res = await fetch("/api/ai/chat/stream", {
+      method: "POST", signal: aiAbort.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, history, server_id: s ? s.id : null }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 && state.authRequired) showLogin();
+      throw new Error(data.error || `Erreur ${res.status}`);
+    }
+    await readAiStream(res, (ev) => { applyAiEvent(asst, ev); scheduleAiRender(); });
   } catch (e) {
-    state.aiChatHistory.push({ role: "assistant", content: `${ico("triangle-alert")} ${e.message || "Erreur lors de la requête à l'assistant."}` });
+    if (e.name !== "AbortError") asst.parts.push({ type: "error", text: e.message || "Erreur lors de la requête à l'assistant." });
+    else asst.parts.push({ type: "error", text: dcT("Stopped.", "Arrêté.") });
+  } finally {
+    asst.streaming = false;
+    // Une pastille restée « en cours » ou « en attente » après l'arrêt ne l'est plus.
+    for (const p of asst.parts) if (p.type === "tool" && (p.status === "running" || p.status === "pending")) { p.status = "denied"; p.summary = dcT("interrupted", "interrompu"); }
+    aiAbort = null;
+    setAiBusy(false);
+    renderAiChatLog();
   }
+}
+
+function stopAiChat() { if (aiAbort) aiAbort.abort(); }
+
+// Boutons Approuver / Refuser (délégation : le journal est redessiné à chaque fragment).
+async function onAiLogClick(e) {
+  const yes = e.target.closest("[data-ai-approve]"), no = e.target.closest("[data-ai-deny]");
+  const btn = yes || no;
+  if (!btn) return;
+  const id = btn.dataset.aiApprove || btn.dataset.aiDeny;
+  for (const m of state.aiChatHistory) for (const p of m.parts || []) if (p.type === "tool" && p.id === id) p.status = yes ? "running" : "denied";
   renderAiChatLog();
+  try { await api("/ai/approve", { method: "POST", body: JSON.stringify({ id, approve: !!yes }) }); } catch { /* demande expirée : l'événement de fin le dira */ }
 }
 
 function renderDocs() {
@@ -2271,6 +2393,39 @@ function dcPicker(name, selected, roles, compact = false) {
 //
 // Tout s'applique instantanément (aucun bouton « enregistrer ») et reste dans ce navigateur (voir ui.js).
 
+const THEME_TOKEN_LABELS = {
+  bg: ["Background", "Fond"], elev: ["Cards", "Cartes"], sunken: ["Recessed areas", "Zones en creux"], hover: ["Hover", "Survol"],
+  border: ["Border", "Bordure"], borderStrong: ["Strong border", "Bordure forte"], text: ["Text", "Texte"], dim: ["Secondary text", "Texte secondaire"],
+  faint: ["Faint text", "Texte discret"], ok: ["Success", "Succès"], warn: ["Warning", "Avertissement"], danger: ["Danger", "Danger"], info: ["Info", "Information"], violet: ["Violet", "Violet"],
+};
+
+// Carte « Personnalisé » : un sélecteur par jeton, plus la dérivation automatique depuis fond + texte.
+function customThemeBlock(a) {
+  const c = a.custom || Appearance.snapshot("graphite");
+  return `<div class="form-row" id="ap-custom"><label>${dcT("Custom colors", "Couleurs personnalisées")}</label>
+    <div class="form-grid">${Appearance.TOKENS.map(([k]) => `<label style="display:flex;align-items:center;gap:8px;font-size:12px"><input type="color" data-ctoken="${k}" value="${c[k]}" style="width:44px"> ${dcT(...THEME_TOKEN_LABELS[k])}</label>`).join("")}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+      <button class="btn-ghost btn-sm" id="ap-derive" type="button">${ico("wand-sparkles")} ${dcT("Derive from background + text", "Dériver depuis fond + texte")}</button>
+      <button class="btn-ghost btn-sm" id="ap-copy-theme" type="button">${ico("copy")} ${dcT("Copy theme", "Copier un thème")}</button>
+    </div></div>`;
+}
+
+// Section « Avancé » : export / import d'un thème (JSON validé) et CSS libre.
+function advancedAppearanceBlock(a) {
+  return `<details id="ap-adv" style="margin:10px 0"><summary style="cursor:pointer;font-weight:600">${dcT("Advanced", "Avancé")}</summary>
+    <div class="form-row" style="margin-top:10px"><label>${dcT("Import / export a theme (JSON)", "Importer / exporter un thème (JSON)")}</label>
+      <textarea id="ap-json" rows="4" spellcheck="false" style="font-family:var(--font-mono);font-size:12px" placeholder='{"mcmanagerTheme":1,...}'></textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+        <button class="btn-ghost btn-sm" id="ap-export" type="button">${dcT("Show current theme", "Afficher le thème actuel")}</button>
+        <button class="btn-ghost btn-sm" id="ap-import" type="button">${dcT("Import", "Importer")}</button>
+      </div>
+      <p style="color:var(--overlay0);font-size:12px;margin-top:6px">${dcT("Imports are validated: only #rrggbb colors are kept and external resources in CSS are removed.", "Les imports sont validés : seules les couleurs #rrggbb sont conservées et les ressources externes du CSS sont retirées.")}</p></div>
+    <div class="form-row"><label>${dcT("Custom CSS", "CSS libre")}</label>
+      <textarea id="ap-css" rows="5" spellcheck="false" style="font-family:var(--font-mono);font-size:12px" placeholder=".card { border-radius: 4px; }">${escapeHtml(a.customCss || "")}</textarea>
+      <button class="btn-ghost btn-sm" id="ap-css-apply" type="button" style="margin-top:6px">${dcT("Apply CSS", "Appliquer le CSS")}</button></div>
+  </details>`;
+}
+
 function appearanceCard() {
   const a = Appearance.get();
   const seg = (id, options, cur) => `<div class="seg" data-seg="${id}">${options.map(([v, l]) => `<button class="${String(v) === String(cur) ? "on" : ""}" data-v="${v}">${l}</button>`).join("")}</div>`;
@@ -2283,7 +2438,10 @@ function appearanceCard() {
 
     <div class="form-row"><label>${dcT("Accent color", "Couleur d'accent")}</label>
       <div class="swatches">${Appearance.ACCENTS.map(([n, c]) => `<button class="swatch ${a.accent.toLowerCase() === c ? "on" : ""}" data-accent="${c}" title="${n}" style="background:${c}"></button>`).join("")}
-        <input type="color" id="ap-accent" value="${a.accent}" style="width:44px" title="${dcT("Custom color", "Couleur personnalisée")}"></div></div>
+        <input type="color" id="ap-accent" value="${a.accent}" style="width:44px" title="${dcT("Custom color", "Couleur personnalisée")}">
+        <input type="text" id="ap-accent-hex" value="${a.accent}" maxlength="7" spellcheck="false" style="width:92px;font-family:var(--font-mono)" title="${dcT("Hexadecimal (#rrggbb)", "Hexadécimal (#rrggbb)")}"></div></div>
+
+    ${a.theme === "custom" ? customThemeBlock(a) : ""}
 
     <div class="form-grid">
       <div class="form-row"><label>${dcT("Corner radius", "Arrondi des coins")} <span class="meta" id="ap-radius-v">${a.radius}px</span></label><input type="range" id="ap-radius" min="0" max="20" value="${a.radius}"></div>
@@ -2296,9 +2454,11 @@ function appearanceCard() {
     <h3 style="margin-top:6px">${dcT("Animated background", "Fond animé")}</h3>
     <div class="form-grid">
       <div class="form-row"><label>${dcT("Style", "Style")}</label>${seg("bg", [["dots", dcT("Dot grid", "Grille de points")], ["world", dcT("World map", "Planisphère")], ["none", dcT("None", "Aucun")]], a.bg)}</div>
+      <div class="form-row"><label>${dcT("Quality", "Qualité")}</label>${seg("bgQuality", [["high", dcT("High", "Élevée")], ["balanced", dcT("Balanced", "Équilibrée")], ["eco", dcT("Eco", "Économe")]], a.bgQuality)}</div>
       <div class="form-row"><label>${dcT("Intensity", "Intensité")} <span class="meta" id="ap-int-v">${a.bgIntensity}%</span></label><input type="range" id="ap-int" min="10" max="100" step="5" value="${a.bgIntensity}"></div>
       <div class="form-row"><label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="ap-inter" ${a.bgInteractive ? "checked" : ""}> ${dcT("Dots react to the mouse (and ripple on click)", "Les points réagissent à la souris (onde au clic)")}</label></div>
     </div>
+    ${advancedAppearanceBlock(a)}
     <button class="btn-ghost" id="ap-reset">${ico("rotate-ccw")} ${dcT("Reset appearance", "Réinitialiser l'apparence")}</button>
   </div>`;
 }
@@ -2310,6 +2470,16 @@ function bindAppearance() {
   $$(".swatch", card).forEach((el) => el.addEventListener("click", () => { Appearance.set({ accent: el.dataset.accent }); redraw(); }));
   $("#ap-accent", card).addEventListener("input", (e) => Appearance.set({ accent: e.target.value }));
   $("#ap-accent", card).addEventListener("change", redraw);
+  $("#ap-accent-hex", card).addEventListener("change", (e) => { const v = e.target.value.trim(); if (Appearance.isHex(v)) Appearance.set({ accent: v.toLowerCase() }); redraw(); });
+  $$("[data-ctoken]", card).forEach((el) => el.addEventListener("input", () => Appearance.setColor(el.dataset.ctoken, el.value)));
+  $("#ap-derive", card)?.addEventListener("click", () => { const c = Appearance.get().custom; Appearance.deriveFrom(c.bg, c.text); redraw(); });
+  $("#ap-copy-theme", card)?.addEventListener("click", async () => { try { await navigator.clipboard.writeText(Appearance.exportJson()); toast(dcT("Theme copied", "Thème copié"), "success"); } catch { $("#ap-adv", card).open = true; $("#ap-json", card).value = Appearance.exportJson(); } });
+  $("#ap-export", card).addEventListener("click", () => { $("#ap-json", card).value = Appearance.exportJson(); });
+  $("#ap-import", card).addEventListener("click", () => {
+    const r = Appearance.importJson($("#ap-json", card).value);
+    if (r.ok) { toast(dcT("Theme imported", "Thème importé"), "success"); redraw(); } else toast(r.error, "error");
+  });
+  $("#ap-css-apply", card).addEventListener("click", () => { Appearance.set({ customCss: $("#ap-css", card).value }); toast(dcT("CSS applied", "CSS appliqué"), "success"); });
   $("#ap-radius", card).addEventListener("input", (e) => { Appearance.set({ radius: +e.target.value }); $("#ap-radius-v").textContent = e.target.value + "px"; });
   $("#ap-fs", card).addEventListener("input", (e) => { Appearance.set({ fontScale: +e.target.value / 100 }); $("#ap-fs-v").textContent = e.target.value + "%"; });
   $("#ap-int", card).addEventListener("input", (e) => { Appearance.set({ bgIntensity: +e.target.value }); $("#ap-int-v").textContent = e.target.value + "%"; });

@@ -1,4 +1,18 @@
-# MCManager v1.0.9 — Bot Discord complet, domaines, paquets .rpm
+# MCManager v1.1.0 — Fond fluide, couleurs libres, assistant avec outils
+
+## Interface
+- **Fond animé plus fluide** : rendu par zones, cartes opaques, réglage de qualité avec dégradation automatique.
+- **Thème Personnalisé** : 14 couleurs libres, dérivation depuis fond + texte, accent hexadécimal, export / import JSON validé, CSS libre.
+
+## Assistant
+- Réponses **en direct**, bouton **Arrêter**, pastilles d'outils (en cours / en attente / fait / erreur).
+- **Outils pour les cinq fournisseurs** ; les modifications demandent votre **accord** (mode `ask`, défaut) et sont inscrites au journal d'audit.
+- Mode des outils : désactivés, lecture, confirmer, automatique.
+
+## Sécurité
+- `web_fetch` ne peut plus atteindre le réseau local ni les adresses de métadonnées (SSRF corrigé).
+
+## Version précédente — MCManager v1.0.9 — Bot Discord complet, domaines, paquets .rpm
 
 ## 🤖 Bot Discord
 - **Une catégorie par serveur Minecraft**, créée par le bot : salon **statut**, **console en direct** (les rôles autorisés

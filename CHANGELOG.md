@@ -3,6 +3,29 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.1.0] - 2026-11-11 (fond animé fluide, couleurs libres, assistant en flux avec outils)
+### Fond animé plus fluide
+- Mesure : le calcul coûtait peu, c'est la **composition** de la page (`backdrop-filter` devant un canvas animé) qui faisait ramer.
+  `backdrop-filter` retiré de la barre latérale et de l'écran de connexion ; cartes, tuiles et barre latérale **opaques**.
+- `ui.js` : rendu par **rectangle sale** (seule la zone autour du curseur et des ondes est redessinée), **index spatial** (cases de 48 px),
+  points regroupés en **6 niveaux de lueur** tracés en un seul chemin chacun, suivi du curseur quasi direct, résolution plafonnée
+  (1,5 / 1,25 / 1), pause quand l'onglet est masqué, redimensionnement avec délai.
+- Réglage **Qualité** (élevée / équilibrée / économe) et **dégradation automatique** vers « économe » si le dessin dépasse 9 ms pendant 40 images.
+  Mesures disponibles dans la console du navigateur : `window.__mcmPerf`, `BackgroundFX.stats`.
+### Couleurs libres
+- Thème **Personnalisé** : 14 couleurs au choix, bouton « Dériver depuis fond + texte » (palette complète, claire ou sombre selon la luminance),
+  « Copier un thème », accent en **hexadécimal**, export / import JSON **validé** (seules les couleurs `#rrggbb` sont gardées), **CSS libre**
+  (sans ressource externe : `@import` et `url()` non `data:` sont retirés, échappements CSS compris).
+### Assistant : flux et outils
+- Réponses en **streaming** (SSE) pour les cinq fournisseurs, une seule boucle d'agent (8 tours au plus), bouton **Arrêter**.
+- **Outils pour tous les fournisseurs** : état, console, mods, `server.properties` (secrets masqués), sauvegardes, recherche Modrinth, web ;
+  et, après confirmation, installer / supprimer un mod, modifier une propriété, envoyer une commande, sauvegarder, démarrer / arrêter / redémarrer.
+- **Mode des outils** : `off`, `read`, `ask` (défaut), `auto`. Cartes **Approuver / Refuser** (expiration 120 s = refus), actions inscrites au journal d'audit.
+- **Correctif de sécurité (SSRF)** : `web_fetch` pouvait lire n'importe quelle URL, y compris `127.0.0.1` ou `169.254.169.254`. Il refuse désormais
+  les adresses non publiques (DNS épinglé, redirections revérifiées), limite les ports, la taille et les types de contenu.
+- Clé Gemini dans un en-tête (plus dans l'URL). Contenu des outils présenté au modèle comme donnée non fiable.
+- Nouvelles routes : `POST /api/ai/chat/stream`, `POST /api/ai/approve` ; voir `docs/ASSISTANT.md`.
+
 ## [1.0.9] - 2026-10-30 (bot Discord, domaines, droits par serveur, audit, import/export, paquets .rpm)
 ### Nouvelle interface (refonte complète du design)
 - **Design system** sobre (palette neutre, typographie Inter + JetBrains Mono embarquées, bordures fines, états de survol/focus soignés) à la place
