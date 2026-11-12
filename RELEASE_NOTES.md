@@ -1,4 +1,32 @@
-# MCManager v1.0.9 — Bot Discord complet, domaines, paquets .rpm
+# MCManager v1.1.1 — macOS, compatibilité, mise à jour corrigée
+
+## Nouveautés
+- **macOS** : Apple Silicon et Intel, `MCManager.app` dans un `.dmg` (macOS 11+). Non notarisée : au premier lancement, clic droit → Ouvrir ([docs/MACOS.md](docs/MACOS.md)).
+- **Détection de Java** dans les réglages, avec la version requise par votre version de Minecraft.
+- **Linux** : binaires compatibles Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents ; `install.sh` gère x86_64, ARM64, `.deb`, `.rpm` et macOS.
+- Fichier **SHA256SUMS** dans la release.
+
+## Correctifs
+- La **mise à jour automatique** remplaçait l'exécutable par l'archive téléchargée et laissait l'interface d'ancienne version : corrigé (exécutables + `web/`, retour arrière en cas d'échec).
+- Sauvegardes et exports zip **en flux** : plus de pic de mémoire sur les gros mondes.
+- Interface servie compressée.
+
+## Version précédente — v1.1.0
+## Fond fluide, couleurs libres, assistant avec outils
+
+## Interface
+- **Fond animé plus fluide** : rendu par zones, cartes opaques, réglage de qualité avec dégradation automatique.
+- **Thème Personnalisé** : 14 couleurs libres, dérivation depuis fond + texte, accent hexadécimal, export / import JSON validé, CSS libre.
+
+## Assistant
+- Réponses **en direct**, bouton **Arrêter**, pastilles d'outils (en cours / en attente / fait / erreur).
+- **Outils pour les cinq fournisseurs** ; les modifications demandent votre **accord** (mode `ask`, défaut) et sont inscrites au journal d'audit.
+- Mode des outils : désactivés, lecture, confirmer, automatique.
+
+## Sécurité
+- `web_fetch` ne peut plus atteindre le réseau local ni les adresses de métadonnées (SSRF corrigé).
+
+## Version précédente — MCManager v1.0.9 — Bot Discord complet, domaines, paquets .rpm
 
 ## 🤖 Bot Discord
 - **Une catégorie par serveur Minecraft**, créée par le bot : salon **statut**, **console en direct** (les rôles autorisés

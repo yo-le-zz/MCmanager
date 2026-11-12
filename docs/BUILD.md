@@ -11,7 +11,7 @@ cargo build --release
 
 ## `build.sh`
 
-`./build.sh [all|linux|windows|installer]` — voir le script pour le
+`./build.sh [all|linux|linux-arm64|windows|windows-arm64|macos|installer]` — voir le script pour le
 détail. Tous les artefacts sont produits dans `./dist/`.
 
 ### Linux → `.deb`
@@ -19,6 +19,18 @@ Nécessite `dpkg-deb` (paquet `dpkg-dev`, présent par défaut sur
 Debian/Ubuntu). Le script construit une arborescence `usr/bin`,
 `usr/share/mcmanager/web`, un service systemd optionnel
 (`usr/lib/systemd/user/mcmanager.service`) puis appelle `dpkg-deb --build`.
+
+### Compatibilité des binaires Linux (glibc)
+Un binaire Rust est lié à la glibc de la machine qui le compile : compilé sur une distribution récente, il refuse de démarrer
+sur une plus ancienne (`version 'GLIBC_2.38' not found`). Le workflow GitHub compile donc sur **Ubuntu 22.04 (glibc 2.35)** ;
+les binaires tournent sur Debian 12, Ubuntu 22.04+, Raspberry Pi OS Bookworm, RHEL/Rocky/Alma 9+, Fedora et openSUSE récents.
+Pour des systèmes plus anciens (Debian 11, Ubuntu 20.04), utilisez l'image Docker ou compilez sur place.
+
+### macOS
+`./build.sh macos` — **à lancer sur un Mac** (pas de cross-compilation depuis Linux : le SDK Apple n'est pas redistribuable).
+Produit `dist/MCManager.app`, `mcmanager-<version>-macos-<arch>.dmg` et `.tar.gz` pour l'architecture du Mac (`arm64` ou `x86_64`),
+avec une cible minimale macOS 11. L'assemblage est fait par `scripts/make-macos-app.sh` ; la signature est « ad hoc »,
+sans notarisation (voir [MACOS.md](MACOS.md)). Le workflow GitHub compile les deux architectures sur des runners natifs.
 
 ### Docker
 `docker build -t mcmanager .` construit l'image du mode serveur (Dockerfile à la racine, build multi-étapes,
@@ -62,6 +74,10 @@ environnement Windows/WiX pour être généré fiablement.
 
 ## CI recommandée (GitHub Actions)
 
-Une matrice `ubuntu-latest` / `windows-latest` avec `cargo build --release`
-sur chaque OS, plus une étape Docker publiant l'image sur ghcr.io, reproduit fidèlement tout ce que `build.sh` fait
-localement, sans les limitations de cross-compilation.
+Deux workflows sont fournis dans `.github/workflows/` :
+- `ci.yml` (chaque push et pull request) : `cargo test --lib` sur Ubuntu 22.04 et macOS, compilation Windows, `cargo check` avec
+  Rust 1.75 (les versions de dépendances sont épinglées dans `Cargo.toml`), tests de l'interface (`node scripts/test-ui.js`),
+  syntaxe des scripts et cohérence de `scripts/install.*` avec `website/install.*`.
+- `release.yml` (tag `v*.*.*`) : compilation **native** sur chaque architecture — Linux x86_64 et ARM64 (`.deb`, `.rpm`, `.tar.gz`),
+  macOS arm64 et x86_64 (`.dmg`, `.tar.gz`), Windows x86_64 et ARM64 (`.exe`, `.zip`), image Docker multi-architecture sur ghcr.io —
+  puis publication de la release avec un fichier `SHA256SUMS` (`sha256sum -c SHA256SUMS`).

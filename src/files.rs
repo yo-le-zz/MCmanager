@@ -157,7 +157,6 @@ pub fn schematics_dir(server_folder: &Path) -> PathBuf {
 /// back as a download. Written to disk rather than built in memory since
 /// a world folder can be gigabytes - same reasoning as `backup.rs`.
 pub fn export_zip(root: &Path, rel: &str) -> Result<PathBuf> {
-    use std::io::{Read, Write};
     let source = safe_join(root, rel)?;
     if !source.exists() {
         anyhow::bail!("chemin introuvable");
@@ -169,11 +168,10 @@ pub fn export_zip(root: &Path, rel: &str) -> Result<PathBuf> {
 
     if source.is_file() {
         let name = source.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".to_string());
-        zip.start_file(name, options)?;
         let mut f = std::fs::File::open(&source)?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
-        zip.write_all(&buf)?;
+        let big = f.metadata().map(|m| m.len() >= u32::MAX as u64).unwrap_or(false);
+        zip.start_file(name, options.large_file(big))?;
+        std::io::copy(&mut f, &mut zip)?;
     } else {
         for entry in walkdir::WalkDir::new(&source).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
@@ -185,11 +183,10 @@ pub fn export_zip(root: &Path, rel: &str) -> Result<PathBuf> {
             if path.is_dir() {
                 zip.add_directory(format!("{rel_str}/"), options)?;
             } else {
-                zip.start_file(rel_str, options)?;
                 let mut f = std::fs::File::open(path)?;
-                let mut buf = Vec::new();
-                f.read_to_end(&mut buf)?;
-                zip.write_all(&buf)?;
+                let big = f.metadata().map(|m| m.len() >= u32::MAX as u64).unwrap_or(false);
+                zip.start_file(rel_str, options.large_file(big))?;
+                std::io::copy(&mut f, &mut zip)?;
             }
         }
     }
@@ -203,7 +200,6 @@ pub fn export_zip(root: &Path, rel: &str) -> Result<PathBuf> {
 /// zip with a `../../etc/cron.d/x` entry ("zip-slip") is rejected entry by
 /// entry rather than trusted just because it arrived inside a zip.
 pub fn import_zip(root: &Path, rel_dir: &str, zip_bytes: &[u8]) -> Result<usize> {
-    use std::io::Read;
     let dest_root = safe_join(root, rel_dir)?;
     std::fs::create_dir_all(&dest_root)?;
     let reader = std::io::Cursor::new(zip_bytes);
@@ -228,9 +224,9 @@ pub fn import_zip(root: &Path, rel_dir: &str, zip_bytes: &[u8]) -> Result<usize>
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
-        std::fs::write(&target, buf)?;
+        // Extraction en flux (pas de copie complète en mémoire).
+        let mut out = std::fs::File::create(&target)?;
+        std::io::copy(&mut entry, &mut out)?;
         extracted += 1;
     }
     Ok(extracted)

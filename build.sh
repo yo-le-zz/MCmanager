@@ -11,6 +11,7 @@
 #     ./build.sh linux-arm64    # Linux ARM64 : Raspberry Pi 4/5, VPS ARM (cross-compilation)
 #     ./build.sh windows        # cross-build Windows x86_64
 #     ./build.sh windows-arm64  # cross-build Windows ARM64 (zig)
+#     ./build.sh macos          # macOS (à lancer SUR un Mac) : MCManager.app, .dmg et .tar.gz pour l'architecture du Mac
 #     ./build.sh all            # tout : Linux x86_64 + ARM64, Windows x86_64 + ARM64, installateurs
 #     ./build.sh installer      # (re)génère l'installateur/script d'installation
 # ==============================================================================
@@ -371,7 +372,26 @@ LNXEOF
 }
 
 # ------------------------------------------------------------------------------
+# macOS : compilation native (pas de cross-compilation depuis Linux, le SDK Apple n'est pas redistribuable).
+build_macos() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    err "la tâche 'macos' doit être lancée sur un Mac (ou par GitHub Actions : voir .github/workflows/release.yml)"
+    return 1
+  fi
+  local arch_name; case "$(uname -m)" in arm64) arch_name="arm64" ;; x86_64) arch_name="x86_64" ;; *) err "architecture inconnue: $(uname -m)"; return 1 ;; esac
+  # macOS 11 (Big Sur) au minimum : même valeur que LSMinimumSystemVersion dans l'Info.plist.
+  export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
+  if [ "${SKIP_CARGO:-0}" != "1" ]; then
+    log "Compilation macOS ${arch_name} (release, cible >= ${MACOSX_DEPLOYMENT_TARGET})…"
+    cargo build --release --bins
+  fi
+  "$ROOT_DIR/scripts/make-macos-app.sh" "$VERSION" "$arch_name" "target/release" "$DIST_DIR"
+  ok "macOS : dist/MCManager.app, dist/${APP_NAME}-${VERSION}-macos-${arch_name}.dmg et .tar.gz"
+}
+
+# ------------------------------------------------------------------------------
 case "$TASK" in
+  macos)     build_macos ;;
   linux)     build_linux x86_64 ;;
   linux-arm64|arm64) build_linux aarch64 ;;
   windows)   build_windows x86_64 ;;
@@ -387,7 +407,7 @@ case "$TASK" in
     build_installer
     ;;
   *)
-    err "tâche inconnue: $TASK (utilisez: linux|linux-arm64|windows|windows-arm64|installer|all)"
+    err "tâche inconnue: $TASK (utilisez: linux|linux-arm64|windows|windows-arm64|macos|installer|all)"
     exit 1
     ;;
 esac

@@ -28,7 +28,7 @@ CDN, comme dans la maquette d'origine).
   la commande `curl -fsSL mcmanager.pages.dev/install.sh | bash` affichée
   sur le site (carte Linux).
 - `install.ps1` — servi à `mcmanager.pages.dev/install.ps1`, référencé par
-  la commande `iex (irm mcmanager.pages.dev/install.ps1)` (carte Windows).
+  la commande `iex (irm mcmanager.pages.dev/install.ps1)` (carte Windows). Les cartes Linux et macOS utilisent `install.sh`, qui détecte le système (Linux ou macOS) et le processeur (x86_64 ou ARM64).
 
 Ces deux scripts sont identiques à ceux du dossier `/scripts` à la racine
 du dépôt — dupliqués ici uniquement parce qu'ils doivent être servis
@@ -39,7 +39,7 @@ déploiement le permet).
 
 ## Mettre à jour les liens de téléchargement
 
-Le bouton Windows et le texte du site pointent vers
+Les boutons Windows et macOS et le texte du site pointent vers
 `https://github.com/yo-le-zz/MCmanager/releases/latest` (toujours la
 dernière version, pas de numéro de version à modifier à chaque release).
 Les scripts `install.sh`/`install.ps1` résolvent eux aussi la dernière

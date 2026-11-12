@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
+use crate::{ai, ai_agent, ai_tools, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -63,7 +63,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/servers/:id/history", get(get_server_history))
         .route("/api/ai/config", get(get_ai_config).post(save_ai_config))
         .route("/api/ai/models", get(list_ai_models))
+        .route("/api/java/detect", get(detect_java))
         .route("/api/ai/chat", post(ai_chat))
+        .route("/api/ai/chat/stream", post(ai_chat_stream))
+        .route("/api/ai/approve", post(ai_approve))
         .route("/api/ntfy/config", get(get_ntfy_config).post(save_ntfy_config))
         .route("/api/ntfy/test", post(test_ntfy))
         .route("/api/remote/targets", get(remote_targets).post(remote_pair))
@@ -488,6 +491,20 @@ async fn test_java(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, body
     })))
 }
 
+#[derive(Deserialize)]
+struct DetectJavaQuery {
+    mc_version: Option<String>,
+}
+
+/// Installations Java trouvées sur la machine. Avec `mc_version`, indique la version majeure requise et
+/// marque chaque installation `compatible` ou non.
+async fn detect_java(Query(q): Query<DetectJavaQuery>) -> AppResult<Json<serde_json::Value>> {
+    let installs = crate::java::detect().await;
+    let required = q.mc_version.as_deref().map(crate::java::required_major);
+    let list: Vec<_> = installs.iter().map(|j| json!({ "path": j.path, "version": j.version, "major": j.major, "compatible": required.map(|r| j.major.unwrap_or(0) >= r) })).collect();
+    Ok(Json(json!({ "installs": list, "required_major": required })))
+}
+
 async fn delete_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
     {
         let runtime = state.runtime.read().await;
@@ -821,15 +838,19 @@ async fn list_backups(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -
 }
 
 async fn create_backup(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
+    let total = start_backup(&state, id).await?;
+    Ok(Json(json!({ "ok": true, "started": true, "total": total })))
+}
+
+/// Lance une sauvegarde en arrière-plan et renvoie le nombre d'éléments à archiver.
+/// Partagé par la route REST et par l'assistant (outil `create_backup`).
+pub(crate) async fn start_backup(state: &AppState, id: Uuid) -> anyhow::Result<u64> {
     let entry = {
         let servers = state.servers.read().await;
         servers.get(&id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?
     };
-    {
-        let bp = state.backup_progress.read().await;
-        if bp.contains_key(&id) {
-            return Err(AppError(anyhow::anyhow!("une sauvegarde est deja en cours pour ce serveur")));
-        }
+    if state.backup_progress.read().await.contains_key(&id) {
+        anyhow::bail!("une sauvegarde est deja en cours pour ce serveur");
     }
     let folder = PathBuf::from(&entry.folder);
     let folder_for_count = folder.clone();
@@ -854,8 +875,7 @@ async fn create_backup(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) 
             Err(e) => tracing::error!("Tache de sauvegarde annulee pour {id}: {e}"),
         }
     });
-
-    Ok(Json(json!({ "ok": true, "started": true, "total": total })))
+    Ok(total)
 }
 
 async fn backup_progress(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> Json<serde_json::Value> {
@@ -1128,6 +1148,9 @@ struct SaveAiConfigBody {
     ollama_base_url: String,
     #[serde(default)]
     omniroute_base_url: String,
+    /// `off` | `read` | `ask` | `auto` ; vide = on garde le réglage actuel.
+    #[serde(default)]
+    tools_mode: String,
 }
 
 #[derive(Serialize)]
@@ -1136,6 +1159,7 @@ struct AiConfigView {
     model: String,
     ollama_base_url: String,
     omniroute_base_url: String,
+    tools_mode: String,
     has_key: bool,
     masked_key: String,
 }
@@ -1147,6 +1171,7 @@ async fn get_ai_config(State(state): State<AppState>) -> AppResult<Json<AiConfig
         model: cfg.model.clone(),
         ollama_base_url: cfg.ollama_base_url.clone(),
         omniroute_base_url: cfg.omniroute_base_url.clone(),
+        tools_mode: ai_tools::ToolsMode::parse(&cfg.tools_mode).as_str().to_string(),
         has_key: !cfg.api_key.is_empty(),
         masked_key: cfg.masked_key(),
     }))
@@ -1161,12 +1186,16 @@ async fn save_ai_config(State(state): State<AppState>, Json(body): Json<SaveAiCo
     cfg.model = body.model;
     cfg.ollama_base_url = body.ollama_base_url;
     cfg.omniroute_base_url = body.omniroute_base_url;
+    if !body.tools_mode.trim().is_empty() {
+        cfg.tools_mode = ai_tools::ToolsMode::parse(&body.tools_mode).as_str().to_string();
+    }
     ai::save_config(&state.data_dir, &cfg).await?;
     Ok(Json(AiConfigView {
         provider: cfg.provider.clone(),
         model: cfg.model.clone(),
         ollama_base_url: cfg.ollama_base_url.clone(),
         omniroute_base_url: cfg.omniroute_base_url.clone(),
+        tools_mode: ai_tools::ToolsMode::parse(&cfg.tools_mode).as_str().to_string(),
         has_key: !cfg.api_key.is_empty(),
         masked_key: cfg.masked_key(),
     }))
@@ -1188,34 +1217,95 @@ struct AiChatBody {
     server_id: Option<Uuid>,
 }
 
-async fn ai_chat(State(state): State<AppState>, Json(body): Json<AiChatBody>) -> AppResult<Json<serde_json::Value>> {
-    let cfg = ai::load_config(&state.data_dir).await;
-    let context = match body.server_id {
-        Some(id) => {
-            let servers = state.servers.read().await;
-            match servers.get(&id) {
-                Some(entry) => {
-                    let running = state.runtime.read().await.get(&id).map(|rt| rt.running).unwrap_or(false);
-                    let addons = files::list_addons(&PathBuf::from(&entry.folder), entry.loader).unwrap_or_default();
-                    let addon_list = if addons.is_empty() {
-                        "aucun".to_string()
-                    } else {
-                        addons.iter().map(|a| format!("{} ({})", a.file_name, if a.enabled { "actif" } else { "desactive" })).collect::<Vec<_>>().join(", ")
-                    };
-                    format!(
-                        "Serveur \"{}\" - {} {} - {} - mods/plugins installes : {}",
-                        entry.name, entry.loader.as_str(), entry.mc_version,
-                        if running { "en cours d'execution" } else { "arrete" },
-                        addon_list
-                    )
-                }
-                None => "aucun serveur selectionne".to_string(),
-            }
-        }
-        None => "aucun serveur selectionne".to_string(),
+/// Instantané lisible du serveur concerné, inséré dans le prompt système.
+async fn ai_context(state: &AppState, server_id: Option<Uuid>) -> String {
+    let none = "aucun serveur selectionne".to_string();
+    let Some(id) = server_id else { return none };
+    if let Some(label) = state.hub.label_for_server(id).await {
+        return format!("Serveur distant sur la machine \"{label}\" (non pilotable par l'assistant)");
+    }
+    let servers = state.servers.read().await;
+    let Some(entry) = servers.get(&id) else { return none };
+    let running = state.runtime.read().await.get(&id).map(|rt| rt.running).unwrap_or(false);
+    let addons = files::list_addons(&PathBuf::from(&entry.folder), entry.loader).unwrap_or_default();
+    let addon_list = if addons.is_empty() {
+        "aucun".to_string()
+    } else {
+        addons.iter().map(|a| format!("{} ({})", a.file_name, if a.enabled { "actif" } else { "desactive" })).collect::<Vec<_>>().join(", ")
     };
-    let reply = ai::chat(&state.http, &cfg, &state, body.server_id, &context, &body.history, &body.message).await?;
-    Ok(Json(json!({ "reply": reply })))
+    format!(
+        "Serveur \"{}\" - {} {} - {} - mods/plugins installes : {}",
+        entry.name, entry.loader.as_str(), entry.mc_version,
+        if running { "en cours d'execution" } else { "arrete" },
+        addon_list
+    )
+}
+
+/// Qui parle (pour l'audit) : le compte connecté en mode serveur, « local » sinon.
+fn ai_actor(user: &Option<axum::Extension<crate::auth::User>>, peer: &Option<axum::extract::ConnectInfo<std::net::SocketAddr>>) -> (String, String) {
+    let name = user.as_ref().map(|axum::Extension(u)| u.username.clone()).unwrap_or_else(|| "local".to_string());
+    let ip = peer.as_ref().map(|axum::extract::ConnectInfo(a)| a.ip().to_string()).unwrap_or_default();
+    (name, ip)
+}
+
+/// Enveloppe non streamée : collecte les événements de l'agent. Sans interface pour confirmer,
+/// le mode `ask` y est traité comme `read`.
+async fn ai_chat(
+    State(state): State<AppState>,
+    user: Option<axum::Extension<crate::auth::User>>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    Json(body): Json<AiChatBody>,
+) -> AppResult<Json<serde_json::Value>> {
+    let cfg = ai::load_config(&state.data_dir).await;
+    let context = ai_context(&state, body.server_id).await;
+    let (name, ip) = ai_actor(&user, &peer);
+    let params = ai_agent::AgentParams::new(state.clone(), cfg, body.server_id, context, name, ip);
+    let out = ai_agent::run_collect(params, body.history, body.message).await?;
+    Ok(Json(json!({ "reply": out.reply, "tools": out.tools })))
+}
+
+/// Flux SSE : `delta`, `tool_start`, `tool_end`, `error`, `done`. L'agent tourne dans une tâche et s'arrête
+/// dès que le navigateur coupe la connexion (le flux est abandonné, le récepteur se ferme).
+async fn ai_chat_stream(
+    State(state): State<AppState>,
+    user: Option<axum::Extension<crate::auth::User>>,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    Json(body): Json<AiChatBody>,
+) -> axum::response::Response {
+    let cfg = ai::load_config(&state.data_dir).await;
+    let context = ai_context(&state, body.server_id).await;
+    let (name, ip) = ai_actor(&user, &peer);
+    let params = ai_agent::AgentParams::new(state.clone(), cfg, body.server_id, context, name, ip);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(ai_agent::run(params, body.history, body.message, tx));
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        let ev = rx.recv().await?;
+        let v = serde_json::to_value(&ev).unwrap_or_default();
+        let kind = v["type"].as_str().unwrap_or("message").to_string();
+        let chunk = bytes::Bytes::from(format!("event: {kind}\ndata: {v}\n\n"));
+        Some((Ok::<_, std::convert::Infallible>(chunk), rx))
+    });
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .body(Body::from_stream(stream))
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct AiApproveBody {
+    id: String,
+    approve: bool,
+}
+
+/// Réponse de l'utilisateur à une demande de confirmation d'outil (voir `ai_tools::wait_approval`).
+async fn ai_approve(Json(body): Json<AiApproveBody>) -> AppResult<Json<serde_json::Value>> {
+    if ai_tools::resolve_approval(&body.id, body.approve) {
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err(AppError(anyhow::anyhow!("demande inconnue ou expiree")))
+    }
 }
 
 #[derive(Serialize)]

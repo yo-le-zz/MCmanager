@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -56,11 +55,11 @@ pub fn create_backup_tracked(
         if path.is_dir() {
             zip.add_directory(format!("{rel_str}/"), options)?;
         } else {
-            zip.start_file(rel_str, options)?;
+            // Copie en flux : un monde Minecraft peut peser plusieurs Go, on ne le charge jamais en mémoire.
             let mut f = File::open(path)?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            zip.write_all(&buf)?;
+            let big = f.metadata().map(|m| m.len() >= u32::MAX as u64).unwrap_or(false);
+            zip.start_file(rel_str, options.large_file(big))?;
+            std::io::copy(&mut f, &mut zip)?;
         }
     }
     zip.finish()?;

@@ -3,6 +3,49 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.1.1] - 2026-11-11 (macOS, compatibilité, optimisations, mise à jour corrigée)
+### macOS
+- Releases **Apple Silicon (arm64) et Intel (x86_64)** : `MCManager.app` dans un `.dmg` + archive portable, macOS 11 minimum, compilées nativement par le workflow GitHub.
+  Signature « ad hoc » (pas de notarisation : voir `docs/MACOS.md`). `./build.sh macos` et `scripts/make-macos-app.sh`.
+- Le lanceur de l'application complète le `PATH` (Homebrew) pour que Java soit trouvé même depuis le Finder, et rouvre simplement le navigateur si MCManager tourne déjà.
+- Recherche du dossier `web/` élargie (`Contents/Resources`, `../share/mcmanager`, Homebrew). Service permanent : refus explicite hors Linux, modèle `launchd` documenté.
+### Compatibilité
+- **Binaires Linux compilés sur Ubuntu 22.04 (glibc 2.35)** au lieu de « latest » : ils démarrent de nouveau sur Debian 12, Raspberry Pi OS Bookworm, RHEL 9...
+- `install.sh` : détecte l'**architecture** (il pouvait prendre le `.deb` arm64 sur une machine x86_64), gère les **.rpm** (dnf, zypper, yum) et **macOS** ; `install.ps1` choisit l'installateur **ARM64** sur Windows ARM.
+- **Détection de Java** (JAVA_HOME, `/usr/lib/jvm`, Homebrew, `/Library/Java/JavaVirtualMachines`, SDKMAN, `Program Files`) avec la version requise par la version de Minecraft ; bouton « Détecter » dans les réglages (`GET /api/java/detect`).
+- Releases : fichier `SHA256SUMS` ; nouveau workflow `ci.yml` (tests Linux et macOS, compilation Windows, Rust 1.75, tests de l'interface, scripts).
+### Correctifs
+- **Mise à jour automatique** : elle écrivait l'archive `.tar.gz`/`.zip` téléchargée à la place de l'exécutable et ne mettait jamais `web/` à jour. Elle extrait désormais l'archive, remplace `mcmanager`, `mcmanager-server` (s'il est installé) **et** `web/`, avec retour arrière si une étape échoue. Choix de l'archive par système **et** architecture (Windows ARM64 recevait l'archive x86_64). Refusée pour `MCManager.app` et Homebrew.
+- Le résultat du test Java affichait du balisage SVG en clair.
+### Optimisations
+- **Sauvegardes, exports et import de zip en flux** : un monde de plusieurs Go n'est plus chargé en mémoire (fichiers de plus de 4 Gio pris en charge).
+- Fichiers de l'interface servis **compressés** (gzip) : bien plus léger en accès distant.
+### Documentation et site
+- `docs/MACOS.md` (nouveau), README, `docs/BUILD.md`, `docs/SERVER.md`, `docs/API.md` alignés ; site : carte macOS, ARM, assistant, personnalisation, droits et audit, Discord et domaines.
+
+## [1.1.0] - 2026-11-11 (fond animé fluide, couleurs libres, assistant en flux avec outils)
+### Fond animé plus fluide
+- Mesure : le calcul coûtait peu, c'est la **composition** de la page (`backdrop-filter` devant un canvas animé) qui faisait ramer.
+  `backdrop-filter` retiré de la barre latérale et de l'écran de connexion ; cartes, tuiles et barre latérale **opaques**.
+- `ui.js` : rendu par **rectangle sale** (seule la zone autour du curseur et des ondes est redessinée), **index spatial** (cases de 48 px),
+  points regroupés en **6 niveaux de lueur** tracés en un seul chemin chacun, suivi du curseur quasi direct, résolution plafonnée
+  (1,5 / 1,25 / 1), pause quand l'onglet est masqué, redimensionnement avec délai.
+- Réglage **Qualité** (élevée / équilibrée / économe) et **dégradation automatique** vers « économe » si le dessin dépasse 9 ms pendant 40 images.
+  Mesures disponibles dans la console du navigateur : `window.__mcmPerf`, `BackgroundFX.stats`.
+### Couleurs libres
+- Thème **Personnalisé** : 14 couleurs au choix, bouton « Dériver depuis fond + texte » (palette complète, claire ou sombre selon la luminance),
+  « Copier un thème », accent en **hexadécimal**, export / import JSON **validé** (seules les couleurs `#rrggbb` sont gardées), **CSS libre**
+  (sans ressource externe : `@import` et `url()` non `data:` sont retirés, échappements CSS compris).
+### Assistant : flux et outils
+- Réponses en **streaming** (SSE) pour les cinq fournisseurs, une seule boucle d'agent (8 tours au plus), bouton **Arrêter**.
+- **Outils pour tous les fournisseurs** : état, console, mods, `server.properties` (secrets masqués), sauvegardes, recherche Modrinth, web ;
+  et, après confirmation, installer / supprimer un mod, modifier une propriété, envoyer une commande, sauvegarder, démarrer / arrêter / redémarrer.
+- **Mode des outils** : `off`, `read`, `ask` (défaut), `auto`. Cartes **Approuver / Refuser** (expiration 120 s = refus), actions inscrites au journal d'audit.
+- **Correctif de sécurité (SSRF)** : `web_fetch` pouvait lire n'importe quelle URL, y compris `127.0.0.1` ou `169.254.169.254`. Il refuse désormais
+  les adresses non publiques (DNS épinglé, redirections revérifiées), limite les ports, la taille et les types de contenu.
+- Clé Gemini dans un en-tête (plus dans l'URL). Contenu des outils présenté au modèle comme donnée non fiable.
+- Nouvelles routes : `POST /api/ai/chat/stream`, `POST /api/ai/approve` ; voir `docs/ASSISTANT.md`.
+
 ## [1.0.9] - 2026-10-30 (bot Discord, domaines, droits par serveur, audit, import/export, paquets .rpm)
 ### Nouvelle interface (refonte complète du design)
 - **Design system** sobre (palette neutre, typographie Inter + JetBrains Mono embarquées, bordures fines, états de survol/focus soignés) à la place

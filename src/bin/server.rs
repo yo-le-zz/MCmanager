@@ -669,6 +669,11 @@ async fn cmd_remote_call(state: &state::AppState, remote_repl: &RemoteRepl, labe
 /// Needs root for both steps, so it shells out to `sudo` with inherited
 /// stdio (the password prompt appears right here, like running it by hand).
 async fn cmd_remote_install_permanent(remote_repl: &RemoteRepl, port: u16) -> anyhow::Result<()> {
+    if !cfg!(target_os = "linux") {
+        println!("Le service permanent repose sur systemd (Linux). Sur macOS, utilisez launchd (modele dans docs/MACOS.md) ;");
+        println!("sur Windows, une tache planifiee ou NSSM. En attendant : 'mcmanager-server --daemon' dans un terminal ou un multiplexeur.");
+        return Ok(());
+    }
     println!("Configuration du controle a distance permanent (port {port})...");
     println!("  (le service ne peut pas demarrer tant que ce shell tient le verrou de l'instance : quittez-le ensuite avec 'quit')");
     println!("  1. Ecrire 'remote enable {port}' dans /etc/mcmanager/autostart.txt (droits administrateur requis)");

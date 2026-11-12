@@ -94,6 +94,12 @@ impl RemoteHub {
         self.index.read().await.get(&id).cloned()
     }
 
+    /// Tests : déclare qu'un serveur appartient à une machine jumelée.
+    #[cfg(test)]
+    pub async fn test_index_insert(&self, id: Uuid, label: &str) {
+        self.index.write().await.insert(id, label.to_string());
+    }
+
     /// Drops everything known about an instance (it was un-paired).
     pub async fn forget(&self, label: &str) {
         self.targets.write().await.remove(label);

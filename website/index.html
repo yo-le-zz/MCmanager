@@ -4,7 +4,7 @@
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>MCManager — Gérez vos serveurs Minecraft en toute simplicité</title>
-<meta name="description" content="MCManager est un gestionnaire de serveurs Minecraft open source (Vanilla, Paper, Purpur, Spigot, Fabric, Forge, NeoForge) avec interface web, marketplace Modrinth, sauvegardes automatiques et assistant IA. Windows, Linux, NixOS.">
+<meta name="description" content="MCManager est un gestionnaire de serveurs Minecraft open source (Vanilla, Paper, Purpur, Spigot, Fabric, Forge, NeoForge) avec interface web, marketplace Modrinth, sauvegardes automatiques et assistant IA. Windows, macOS, Linux (x86_64 et ARM64, Raspberry Pi), Docker et NixOS.">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
@@ -272,7 +272,7 @@
 <span class="material-symbols-outlined text-primary text-3xl">window</span>
 <h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Windows</h3>
 </div>
-<p class="font-body-md text-on-surface-variant mb-6 h-12">Installateur classique (raccourci menu Démarrer + désinstallation) ou une ligne PowerShell.</p>
+<p class="font-body-md text-on-surface-variant mb-6 h-12">Installateur classique x86_64 et ARM64 (raccourci menu Démarrer + désinstallation) ou une ligne PowerShell.</p>
 <a class="w-full mb-4 inline-flex items-center justify-center bg-surface-container-highest border border-outline-variant/20 text-on-surface font-body-md px-4 py-2 rounded-lg hover:bg-surface-variant transition-colors" href="https://github.com/yo-le-zz/MCmanager/releases/latest" target="_blank" rel="noopener">
 <span class="material-symbols-outlined mr-2">download</span>
                             Télécharger .exe
@@ -291,7 +291,25 @@
 <span class="material-symbols-outlined text-tertiary text-3xl">terminal</span>
 <h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Linux</h3>
 </div>
-<p class="font-body-md text-on-surface-variant mb-6 h-12">Détecte votre distribution (.deb si possible), installe le raccourci dans le menu applications.</p>
+<p class="font-body-md text-on-surface-variant mb-6 h-12">Détecte votre distribution et votre processeur (.deb ou .rpm, x86_64 ou ARM64 / Raspberry Pi) et installe le raccourci dans le menu applications.</p>
+<div class="bg-black/50 rounded-lg p-3 font-code-snippet text-code-snippet border border-outline-variant/10 relative group mt-auto">
+<code class="copy-target text-tertiary-fixed-dim block overflow-x-auto whitespace-nowrap pb-2">curl -fsSL mcmanager.pages.dev/install.sh | bash</code>
+<button aria-label="Copier la commande" class="copy-btn absolute top-2 right-2 p-1.5 bg-surface-container-high rounded text-on-surface-variant hover:text-on-surface opacity-0 group-hover:opacity-100 transition-opacity">
+<span class="material-symbols-outlined text-[16px]">content_copy</span>
+</button>
+</div>
+</div>
+<!-- macOS -->
+<div class="glass-panel rounded-xl p-6 glow-hover transition-all duration-300 flex flex-col">
+<div class="flex items-center gap-3 mb-4">
+<span class="material-symbols-outlined text-secondary text-3xl">laptop_mac</span>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">macOS</h3>
+</div>
+<p class="font-body-md text-on-surface-variant mb-6 h-12">Apple Silicon et Intel (macOS 11+) : MCManager.app dans un .dmg, ou la même ligne que Linux.</p>
+<a class="w-full mb-4 inline-flex items-center justify-center bg-surface-container-highest border border-outline-variant/20 text-on-surface font-body-md px-4 py-2 rounded-lg hover:bg-surface-variant transition-colors" href="https://github.com/yo-le-zz/MCmanager/releases/latest" target="_blank" rel="noopener">
+<span class="material-symbols-outlined mr-2">download</span>
+                            Télécharger .dmg
+                        </a>
 <div class="bg-black/50 rounded-lg p-3 font-code-snippet text-code-snippet border border-outline-variant/10 relative group mt-auto">
 <code class="copy-target text-tertiary-fixed-dim block overflow-x-auto whitespace-nowrap pb-2">curl -fsSL mcmanager.pages.dev/install.sh | bash</code>
 <button aria-label="Copier la commande" class="copy-btn absolute top-2 right-2 p-1.5 bg-surface-container-high rounded text-on-surface-variant hover:text-on-surface opacity-0 group-hover:opacity-100 transition-opacity">
@@ -301,7 +319,7 @@
 </div>
 </div>
 <p class="text-center mt-8 font-label-sm text-label-sm text-on-surface-variant">
-                Un VPS, un Raspberry Pi ou Docker ? Mode serveur avec connexion multi-utilisateurs — voir <a class="text-primary hover:underline" href="https://github.com/yo-le-zz/MCmanager/blob/main/docs/SERVER.md" target="_blank" rel="noopener">mcmanager-server</a>.
+                Un VPS, un Raspberry Pi ou Docker (amd64 et arm64) ? Mode serveur avec connexion multi-utilisateurs — voir <a class="text-primary hover:underline" href="https://github.com/yo-le-zz/MCmanager/blob/main/docs/SERVER.md" target="_blank" rel="noopener">mcmanager-server</a>.
             </p>
 </div>
 </section>
@@ -318,7 +336,7 @@
 <span class="material-symbols-outlined text-[28px]">smart_toy</span>
 </div>
 <h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Assistant IA intégré</h3>
-<p class="font-body-md text-on-surface-variant">Anthropic, OpenAI, Gemini, Ollama local ou OmniRoute — suggère et installe des mods/plugins directement depuis le chat.</p>
+<p class="font-body-md text-on-surface-variant">Anthropic, OpenAI, Gemini, Ollama local ou OmniRoute — réponses en direct, il consulte l'état et la console de votre serveur, cherche sur Modrinth et le web, et installe ou règle ce que vous validez d'un clic.</p>
 </div>
 <div class="flex flex-col gap-4">
 <div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-tertiary">
@@ -355,6 +373,27 @@
 <h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Multilingue</h3>
 <p class="font-body-md text-on-surface-variant">Français, anglais, espagnol — et intégration playit.gg pour exposer un serveur sans configurer son routeur.</p>
 </div>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-primary">
+<span class="material-symbols-outlined text-[28px]">palette</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Interface personnalisable</h3>
+<p class="font-body-md text-on-surface-variant">Six thèmes, ou vos propres couleurs, votre accent en hexadécimal, un fond animé fluide réglable et du CSS libre. Les thèmes s'exportent en JSON.</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-tertiary">
+<span class="material-symbols-outlined text-[28px]">admin_panel_settings</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Droits par serveur et audit</h3>
+<p class="font-body-md text-on-surface-variant">Un niveau par compte et par serveur (lecture, console, contrôle, gestion), refus par défaut, et un journal de qui a fait quoi — y compris les actions de l'assistant.</p>
+</div>
+<div class="flex flex-col gap-4">
+<div class="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center border border-outline-variant/20 text-secondary">
+<span class="material-symbols-outlined text-[28px]">forum</span>
+</div>
+<h3 class="font-headline-md text-headline-md font-semibold text-on-surface">Discord et domaines</h3>
+<p class="font-body-md text-on-surface-variant">Un salon par serveur avec console en direct et pont de chat, plus DNS, nginx et Caddy générés pour vos domaines.</p>
 </div>
 </div>
 </section>

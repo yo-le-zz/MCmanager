@@ -42,8 +42,13 @@ pub fn resolve_web_dir() -> String {
     }
     let candidates = [
         std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("web"))),
+        // Application macOS (MCManager.app/Contents/{MacOS,Resources}) et installations « préfixe » (Homebrew...).
+        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("../Resources/web"))),
+        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("../share/mcmanager/web"))),
         Some(PathBuf::from("web")),
         Some(PathBuf::from("/usr/share/mcmanager/web")),
+        Some(PathBuf::from("/usr/local/share/mcmanager/web")),
+        Some(PathBuf::from("/opt/homebrew/share/mcmanager/web")),
         Some(PathBuf::from("/usr/lib/mcmanager/web")),
         Some(PathBuf::from("/app/web")),
     ];
@@ -58,7 +63,9 @@ pub fn resolve_web_dir() -> String {
 pub fn build_app(state: AppState, opts: WebOptions) -> Router {
     let state_data_dir = state.data_dir.clone();
     let index = format!("{}/index.html", opts.web_dir);
-    let static_service = ServeDir::new(&opts.web_dir).not_found_service(ServeFile::new(&index));
+    // Les fichiers de l'interface (JS, CSS, JSON de la carte) sont compressés : bien plus léger en accès distant.
+    // Seul le service statique est concerné : les flux (SSE de l'assistant, WebSocket) ne passent jamais par ici.
+    let static_service = tower::Layer::layer(&tower_http::compression::CompressionLayer::new(), ServeDir::new(&opts.web_dir).not_found_service(ServeFile::new(&index)));
 
     let mut app = api::router(state).route("/healthz", get(healthz));
     if let Some(rt) = opts.remote.clone() {
@@ -320,6 +327,31 @@ mod tests {
 
     fn cookie_of(resp: &axum::response::Response) -> String {
         resp.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string()
+    }
+
+    /// Les fichiers de l'interface sont compressés à la demande ; l'API (JSON court) et les flux ne le sont pas par ce biais.
+    #[tokio::test]
+    async fn static_files_are_gzip_compressed_on_request() {
+        let dir = std::env::temp_dir().join(format!("mcmanager-gzip-{}", uuid::Uuid::new_v4()));
+        let web_dir = dir.join("web");
+        tokio::fs::create_dir_all(&web_dir).await.unwrap();
+        tokio::fs::write(web_dir.join("index.html"), "<html>accueil</html>").await.unwrap();
+        let big_js = "console.log('mcmanager');\n".repeat(4000);
+        tokio::fs::write(web_dir.join("app.js"), &big_js).await.unwrap();
+        let state = crate::state::build_state_for_test(&dir).await;
+        let app = build_app(state, WebOptions { web_dir: web_dir.to_string_lossy().to_string(), auth: None, remote: None });
+
+        let gz = call(&app, Request::builder().uri("/app.js").header(header::ACCEPT_ENCODING, "gzip").body(Body::empty()).unwrap()).await;
+        assert_eq!(gz.status(), 200);
+        assert_eq!(gz.headers().get(header::CONTENT_ENCODING).map(|v| v.to_str().unwrap()), Some("gzip"));
+        let body = axum::body::to_bytes(gz.into_body(), usize::MAX).await.unwrap();
+        assert!(body.len() < big_js.len() / 10, "le JS répétitif doit être très réduit ({} octets)", body.len());
+
+        // Sans Accept-Encoding : contenu brut, inchangé.
+        let plain = call(&app, get_req("/app.js", None)).await;
+        assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(axum::body::to_bytes(plain.into_body(), usize::MAX).await.unwrap().len(), big_js.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The whole network-facing assembly: login gate on /api, public login

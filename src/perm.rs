@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(c(Method::POST, "/api/servers"), Need::Admin);
         assert_eq!(c(Method::POST, "/api/servers/import"), Need::Admin);
         assert_eq!(c(Method::POST, "/api/servers/import-zip"), Need::Admin);
-        for p in ["/api/settings", "/api/ai/chat", "/api/ai/config", "/api/discord/config", "/api/network", "/api/ntfy/config", "/api/playit/start", "/api/playit/ws", "/api/remote/hub", "/api/remote/targets", "/api/update/apply", "/api/update/check", "/api/server/info", "/api/audit", "/api/inconnue", "/api/servers/pas-un-uuid/status"] {
+        for p in ["/api/settings", "/api/ai/chat", "/api/ai/chat/stream", "/api/ai/approve", "/api/ai/config", "/api/discord/config", "/api/network", "/api/ntfy/config", "/api/playit/start", "/api/playit/ws", "/api/remote/hub", "/api/remote/targets", "/api/update/apply", "/api/update/check", "/api/server/info", "/api/audit", "/api/inconnue", "/api/servers/pas-un-uuid/status"] {
             assert_eq!(c(Method::GET, p), Need::Admin, "{p}");
             assert_eq!(c(Method::POST, p), Need::Admin, "{p}");
         }

@@ -89,3 +89,16 @@ Hors préfixe `/api` : `POST /auth/login` `{username,password}` · `POST /auth/l
   `GET /auth/users` et `GET /auth/me` renvoient `default_level` et `servers`. `POST /auth/users` accepte les mêmes champs.
 - `GET /servers` ne renvoie à un compte non administrateur que ses serveurs, avec `my_level`. Réponse `403` pour toute action non autorisée.
 - `GET /audit?limit=&user=&q=&only_denied=` (administrateurs) : journal d'audit, plus récent d'abord.
+
+## Assistant (v1.1.0)
+Toutes ces routes sont réservées aux administrateurs.
+- `GET|POST /ai/config` : ajoute `tools_mode` (`off` | `read` | `ask` | `auto`, défaut `ask`). Une valeur vide à l'enregistrement conserve le réglage.
+- `POST /ai/chat/stream` `{message, history, server_id}` : flux SSE (`text/event-stream`). Chaque événement a un champ `type` :
+  `delta {text}` · `tool_start {id, name, label_fr, label_en, args, needs_approval}` · `tool_end {id, name, ok, denied, summary}` · `error {message}` · `done`.
+  Fermer la connexion arrête l'agent.
+- `POST /ai/approve` `{id, approve}` : répond à un `tool_start` dont `needs_approval` est vrai. Sans réponse en 120 s, l'action est refusée.
+- `POST /ai/chat` : enveloppe non streamée, renvoie `{reply, tools}`. Sans interface pour confirmer, le mode `ask` y est traité comme `read`.
+
+## Java (v1.1.1)
+- `GET /java/detect?mc_version=1.21.4` (administrateurs) : installations Java trouvées (`{installs:[{path, version, major, compatible}], required_major}`).
+  `mc_version` est facultatif ; sans lui, `compatible` vaut `null` et `required_major` aussi.

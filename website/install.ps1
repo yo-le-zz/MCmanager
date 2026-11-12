@@ -33,7 +33,10 @@ if ($Uninstall) {
 
 Write-Host "Recherche de la derniere version de MCManager..."
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
-$asset = $release.assets | Where-Object { $_.name -like "*setup.exe" } | Select-Object -First 1
+# Architecture de la machine : les installateurs sont nommés mcmanager-<version>-windows-<x86_64|arm64>-setup.exe
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") { "arm64" } else { "x86_64" }
+$asset = $release.assets | Where-Object { $_.name -like "*windows-$arch-setup.exe" } | Select-Object -First 1
+if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -like "*setup.exe" } | Select-Object -First 1 }
 
 if (-not $asset) {
     Write-Error "Aucun installateur .exe trouve dans la derniere release GitHub ($repo)."

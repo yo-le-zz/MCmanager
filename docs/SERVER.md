@@ -235,3 +235,8 @@ actif sur le port web.
 | `MCMANAGER_TRUST_PROXY` | non | `1` : lit l'adresse client dans `X-Forwarded-For` (reverse proxy) |
 | `MCMANAGER_COOKIE_SECURE` | non | `1` : cookie de session `Secure` (HTTPS) |
 | `MCMANAGER_TOKEN` | — | jeton d'API pour `mcmanager cli` (sinon lu dans `<data>/api_token`) |
+
+## Autres systèmes
+Le service permanent fourni (`systemctl enable --now mcmanager-server`) est propre à Linux. Sur **macOS**, un modèle `launchd`
+est donné dans [MACOS.md](MACOS.md) ; sur **Windows**, lancez `mcmanager-server.exe --daemon` depuis une tâche planifiée
+(ou NSSM). La commande interactive « remote install » refuse poliment hors Linux au lieu d'échouer sur `sudo`/`systemctl`.

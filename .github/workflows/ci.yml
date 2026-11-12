@@ -1,0 +1,59 @@
+name: CI
+
+# Vérifie chaque push et chaque pull request : tests Rust sur Linux et macOS (Apple Silicon),
+# compilation Windows, tests de l'interface (Node), syntaxe des scripts d'installation et de build.
+on:
+  push:
+    branches: [main, master]
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+      - run: cargo test --lib
+      - run: cargo build --release --bins
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --bins
+
+  # Le projet reste compilable avec Rust 1.75 (versions des dépendances épinglées dans Cargo.toml).
+  msrv:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - run: cargo check --locked --lib --bins
+
+  ui-and-scripts:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: for f in web/*.js; do node --check "$f"; done
+      - run: node scripts/test-ui.js
+      - run: bash -n build.sh && bash -n scripts/install.sh && bash -n scripts/make-macos-app.sh
+      - run: diff scripts/install.sh website/install.sh && diff scripts/install.ps1 website/install.ps1

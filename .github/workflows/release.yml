@@ -21,11 +21,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Ubuntu 22.04 (glibc 2.35) et non « latest » : un binaire lié à une glibc récente refuse de
+          # démarrer sur Debian 12, Raspberry Pi OS Bookworm, Ubuntu 22.04, RHEL 9... (« GLIBC_2.38 not found »).
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             task: linux
           - arch: aarch64
-            runner: ubuntu-24.04-arm   # Raspberry Pi 4/5, serveurs et VPS ARM64
+            runner: ubuntu-22.04-arm   # Raspberry Pi 4/5, serveurs et VPS ARM64
             task: linux-arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -89,6 +91,32 @@ jobs:
             dist/*.zip
             dist/mcmanager-*-setup.exe
 
+  # ---------------------------------------------------------------- macOS
+  # Compilation native sur chaque architecture (Apple Silicon et Intel). Livre MCManager.app dans un .dmg,
+  # plus une archive portable. Signature « ad hoc » seulement : pas de notarisation (voir docs/MACOS.md).
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest       # Apple Silicon (M1 et suivants)
+          - arch: x86_64
+            runner: macos-15-intel     # Mac Intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"   # macOS 11 Big Sur au minimum (= LSMinimumSystemVersion)
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: chmod +x build.sh scripts/make-macos-app.sh && ./build.sh macos
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.arch }}-artifacts
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+
   # --------------------------------------------------------------- Docker
   # Image multi-architecture (amd64 + arm64) : `docker pull` choisit seul.
   docker:
@@ -120,7 +148,7 @@ jobs:
 
   # -------------------------------------------------------------- Publish
   publish:
-    needs: [linux, windows, docker]
+    needs: [linux, windows, macos, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,6 +161,12 @@ jobs:
         with:
           pattern: "*-artifacts"
           path: artifacts
+      # Empreintes SHA-256 de tous les fichiers publiés (vérification : sha256sum -c SHA256SUMS).
+      - name: Checksums
+        run: |
+          cd artifacts
+          find . -type f ! -name SHA256SUMS | sed 's#^\./##' | sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:

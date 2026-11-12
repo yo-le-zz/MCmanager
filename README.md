@@ -35,10 +35,12 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Interface personnalisable** : 6 thèmes, couleur d'accent libre, densité, polices, fond animé en points (ou planisphère) qui réagit à la souris, carte du monde animée pour les domaines et machines distantes — tout est embarqué, rien n'est chargé depuis Internet.
 - **Bot Discord** : une catégorie par serveur Minecraft (statut, **console en direct** avec envoi de commandes par rôle, **chat Minecraft ⇄ Discord**), détection automatique des rôles, commandes `/mc`, français/anglais — [docs/DISCORD.md](docs/DISCORD.md) · [English](docs/DISCORD.en.md).
 - **Droits par serveur et audit** (mode serveur) : chaque compte a un niveau par serveur (lecture seule → commandes → démarrer/arrêter → gestion complète), refus par défaut, journal de qui a fait quoi — [docs/SERVER.md](docs/SERVER.md).
+- **Assistant avec outils** : réponses en direct, état du serveur, console, mods, web et — après votre accord — modifications du serveur, pour les cinq fournisseurs (Anthropic, OpenAI, Gemini, Ollama, OmniRoute) — [docs/ASSISTANT.md](docs/ASSISTANT.md).
 - **Domaines personnalisés** : DNS (SRV), nginx et Caddy générés pour vos serveurs et l'interface web — [docs/DOMAINS.md](docs/DOMAINS.md).
 - **Service permanent et Docker** : `systemctl enable --now mcmanager-server` (utilisateur dédié, redémarrage automatique) ou `docker compose up -d`. Le contrôle à distance ne s'éteint plus à la fermeture d'un terminal.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
-- **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : .deb, archive portable, Docker multi-arch) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). `./build.sh all` ou le workflow GitHub compilent tout.
+- **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : `.deb`, `.rpm`, archive portable, Docker multi-arch), **macOS** Apple Silicon **et** Intel (`.dmg`, macOS 11+, voir [docs/MACOS.md](docs/MACOS.md)) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). Les binaires Linux sont compilés sur Ubuntu 22.04 (glibc 2.35 : Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents). Le workflow GitHub compile tout, `./build.sh` fait de même en local.
+- **Java détecté automatiquement** : bouton « Détecter » dans les réglages (JAVA_HOME, Homebrew, `/usr/lib/jvm`, `Program Files`...), avec la version requise par votre version de Minecraft.
 
 ### Mise à jour automatique selon le type d'installation
 | Installation | Comportement |
@@ -68,12 +70,18 @@ Variables d'environnement utiles :
 
 ## 🖥 Installation
 
-### Linux (Debian/Ubuntu)
+### Une ligne (Linux et macOS, x86_64 et ARM64)
 ```bash
-sudo dpkg -i mcmanager_1.0.1_amd64.deb
+curl -fsSL https://mcmanager.pages.dev/install.sh | bash
+```
+Le script détecte le système et le processeur : `.deb` (Debian/Ubuntu), `.rpm` (Fedora, RHEL, openSUSE) ou archive portable. Windows : `iex (irm mcmanager.pages.dev/install.ps1)`.
+
+### Linux (Debian/Ubuntu, Raspberry Pi OS)
+```bash
+sudo dpkg -i mcmanager_<version>_amd64.deb      # ou ..._arm64.deb sur Raspberry Pi / VPS ARM
 mcmanager
 ```
-Ou via le script universel : `./install-linux.sh`.
+Ou via le script universel livré dans les releases : `./install-linux.sh`.
 
 ### Docker (serveur)
 ```bash
@@ -94,9 +102,13 @@ sudo dpkg -i mcmanager_*.deb
 sudo systemctl enable --now mcmanager-server
 ```
 
+### macOS (Apple Silicon et Intel, macOS 11+)
+Ouvrez `mcmanager-<version>-macos-arm64.dmg` (ou `-x86_64.dmg` sur un Mac Intel), glissez **MCManager** dans *Applications*.
+L'application n'est pas notarisée : au premier lancement, clic droit → **Ouvrir**. Détails (Java, launchd, limites) : [docs/MACOS.md](docs/MACOS.md).
+
 ### Windows
-Décompressez `mcmanager-1.0.1-windows-x86_64.zip` et lancez `mcmanager.exe`,
-ou utilisez l'installateur généré via `dist/mcmanager.iss` (Inno Setup).
+Lancez `mcmanager-<version>-windows-x86_64-setup.exe` (ou `-arm64-setup.exe` sur Windows ARM), ou décompressez le zip
+portable correspondant et lancez `mcmanager.exe`.
 
 ---
 
@@ -105,7 +117,8 @@ ou utilisez l'installateur généré via `dist/mcmanager.iss` (Inno Setup).
 ```bash
 cargo build --release
 ./build.sh          # génère tous les paquets dans ./dist
-./build.sh linux     # uniquement Linux (.deb + tar.gz)
+./build.sh linux     # uniquement Linux (.deb + .rpm + tar.gz)
+./build.sh macos     # sur un Mac : MCManager.app + .dmg + tar.gz (architecture du Mac)
 ./build.sh windows   # cross-compilation Windows (nécessite mingw-w64)
 ./build.sh installer # scripts d'installation / Inno Setup
 ```
@@ -120,6 +133,9 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 - [docs/API.md](docs/API.md) — toutes les routes de l'API REST/WebSocket
 - [docs/CLI.md](docs/CLI.md) — gérer MCManager en ligne de commande (serveurs distants)
 - [docs/SERVER.md](docs/SERVER.md) — `mcmanager-server` : mode serveur, Docker, multi-utilisateurs, serveurs distants
+- [docs/MACOS.md](docs/MACOS.md) — installer et utiliser MCManager sur macOS
+- [docs/ASSISTANT.md](docs/ASSISTANT.md) — assistant : outils, modes, sécurité
+- [docs/DISCORD.md](docs/DISCORD.md) · [docs/DOMAINS.md](docs/DOMAINS.md) — bot Discord, domaines et reverse proxy
 - [docs/PLAYIT.md](docs/PLAYIT.md) — tutoriel détaillé playit.gg
 - L'onglet **Docs & tutos** de l'application contient aussi un guide intégré.
 
@@ -143,12 +159,24 @@ src/
   presets.rs     préréglages "un clic" (dont le trousseau performance)
   debug.rs       diagnostic automatique de crash (test des addons un par un)
   stats.rs       CPU/RAM + ping Minecraft (joueurs en ligne)
-  updater.rs     auto-mise à jour via GitHub releases
+  updater.rs     auto-mise à jour via GitHub releases (archive portable : exécutables + web/)
+  java.rs        détection des installations Java (Linux, macOS, Windows)
+  ai.rs          configuration chiffrée de l'assistant, liste des modèles, recherche web
+  ai_agent.rs    boucle d'agent (streaming, 8 tours, confirmations) pour les 5 fournisseurs
+  ai_stream.rs   décodage des flux SSE/NDJSON et format des messages par fournisseur
+  ai_tools.rs    outils de l'assistant (lecture/écriture), approbations, audit
+  ai_fetch.rs    web_fetch durci contre le SSRF
+  perm.rs        niveaux de droits par serveur (mode serveur)
+  audit.rs       journal d'audit
+  discord.rs, discord_bridge.rs   bot Discord (salons, console, pont de chat)
+  network.rs     domaines, DNS, nginx, Caddy
+  remote.rs      protocole machine à machine (jumelage, tunnel chiffré)
+  ntfy.rs, sleeper.rs, secrets.rs, history.rs, cli.rs   notifications, mise en veille, chiffrement des secrets, historique, CLI
   hub.rs         serveurs d'autres machines fusionnés dans le tableau de bord (relais, console distante)
   auth.rs        connexion multi-utilisateurs (mode serveur)
   web.rs         assemblage HTTP partagé par les deux binaires
 web/             interface web statique (HTML/CSS/JS, aucune étape de build)
-packaging/       fichiers .deb (dont le service systemd), Windows (Inno Setup)
+packaging/       fichiers .deb/.rpm (dont les services systemd) ; scripts/make-macos-app.sh (MCManager.app, .dmg) ; Windows (Inno Setup, généré par build.sh)
 ```
 
 `mcmanager` (bureau) et `mcmanager-server` (mode serveur, voir

@@ -18,18 +18,15 @@
 //! inherent to a local desktop app with no external secret store, and is
 //! surfaced to the user in the UI rather than hidden.
 //!
-//! Tool use (web search / page fetch) is only wired up for Ollama, exactly
-//! as requested: a local model has no built-in knowledge of e.g. today's
-//! Paper build numbers, so giving it a way to look things up matters more
-//! there. The cloud providers are used for plain suggestion chat without
-//! tools, keeping their integration simple and not dependent on each one's
-//! (quite different) tool-calling schema.
+//! Les outils (web, lecture et modification du serveur) et le streaming sont dans `ai_agent.rs`,
+//! `ai_tools.rs`, `ai_stream.rs` et `ai_fetch.rs` : ce module garde la configuration chiffrée, la liste des modèles
+//! et la recherche web.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::secrets::{self, EncryptedBlob};
 
@@ -55,6 +52,12 @@ pub struct AiConfig {
     /// instance the user runs elsewhere.
     #[serde(default)]
     pub omniroute_base_url: String,
+    /// Mode des outils : `off` | `read` | `ask` (défaut, écritures confirmées) | `auto`. Vide = `ask`.
+    #[serde(default)]
+    pub tools_mode: String,
+    /// Réservé aux tests : remplace l'adresse de l'API (Anthropic, OpenAI, Gemini) par un faux serveur local.
+    #[serde(skip)]
+    pub endpoint_override: String,
 }
 
 /// What actually lands in `ai_config.json`: everything in plain JSON except
@@ -70,11 +73,13 @@ struct StoredAiConfig {
     ollama_base_url: String,
     #[serde(default)]
     omniroute_base_url: String,
+    #[serde(default)]
+    tools_mode: String,
     encrypted_key: Option<EncryptedBlob>,
 }
 
 impl AiConfig {
-    fn ollama_url(&self) -> String {
+    pub(crate) fn ollama_url(&self) -> String {
         if self.ollama_base_url.trim().is_empty() {
             "http://127.0.0.1:11434".to_string()
         } else {
@@ -84,7 +89,7 @@ impl AiConfig {
 
     /// OmniRoute's own docs use `http://localhost:20128/v1` as the default
     /// local base URL (its dashboard runs on a different port, 20129).
-    fn omniroute_url(&self) -> String {
+    pub(crate) fn omniroute_url(&self) -> String {
         if self.omniroute_base_url.trim().is_empty() {
             "http://127.0.0.1:20128/v1".to_string()
         } else {
@@ -120,7 +125,7 @@ pub async fn load_config(data_dir: &Path) -> AiConfig {
         },
         None => String::new(),
     };
-    AiConfig { provider: stored.provider, api_key, model: stored.model, ollama_base_url: stored.ollama_base_url, omniroute_base_url: stored.omniroute_base_url }
+    AiConfig { provider: stored.provider, api_key, model: stored.model, ollama_base_url: stored.ollama_base_url, omniroute_base_url: stored.omniroute_base_url, tools_mode: stored.tools_mode, endpoint_override: String::new() }
 }
 
 pub async fn save_config(data_dir: &Path, cfg: &AiConfig) -> Result<()> {
@@ -135,6 +140,7 @@ pub async fn save_config(data_dir: &Path, cfg: &AiConfig) -> Result<()> {
         model: cfg.model.clone(),
         ollama_base_url: cfg.ollama_base_url.clone(),
         omniroute_base_url: cfg.omniroute_base_url.clone(),
+        tools_mode: cfg.tools_mode.clone(),
         encrypted_key,
     };
     let path = config_path(data_dir);
@@ -203,8 +209,8 @@ pub async fn list_models(http: &reqwest::Client, cfg: &AiConfig) -> Result<Vec<S
             }
         }
         "gemini" => {
-            let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={}", cfg.api_key);
-            let resp = http.get(&url).send().await;
+            // La clé voyage dans un en-tête : une URL se retrouve dans les journaux et les proxys.
+            let resp = http.get("https://generativelanguage.googleapis.com/v1beta/models").header("x-goog-api-key", &cfg.api_key).send().await;
             match resp {
                 Ok(r) if r.status().is_success() => {
                     let body: Value = r.json().await.unwrap_or_default();
@@ -277,229 +283,11 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-/// Runs one assistant turn. `context` is a short, human-readable snapshot of
-/// the current server (loader/version/addons/status) that gets folded into
-/// the system prompt so suggestions are actually specific to what's
-/// installed, not generic Minecraft advice.
+/// Enveloppe non streamée : exécute l'agent et renvoie la réponse complète (voir `ai_agent::run_collect`).
 pub async fn chat(http: &reqwest::Client, cfg: &AiConfig, state: &crate::state::AppState, server_id: Option<uuid::Uuid>, context: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    if !matches!(cfg.provider.as_str(), "ollama") && cfg.api_key.trim().is_empty() {
-        anyhow::bail!("aucune cle API configuree pour {}", cfg.provider);
-    }
-    let system_prompt = format!(
-        "Tu es l'assistant integre a MCManager, un gestionnaire de serveurs Minecraft. \
-         Tu aides l'utilisateur a decider quoi ajouter, modifier ou reparer sur son serveur, \
-         et tu peux agir directement via les outils fournis (installer un mod/plugin, lister ceux \
-         deja installes) quand c'est pertinent - pas seulement le suggerir en texte. \
-         Sois concret et concis (quelques phrases ou une liste courte), propose des mods/plugins \
-         ou reglages precis quand c'est pertinent plutot que des conseils generiques. \
-         Etat actuel du serveur concerne :\n{context}"
-    );
-
-    match cfg.provider.as_str() {
-        "anthropic" => chat_anthropic(http, cfg, state, server_id, &system_prompt, history, message).await,
-        "openai" => chat_openai(http, cfg, &system_prompt, history, message).await,
-        "gemini" => chat_gemini(http, cfg, &system_prompt, history, message).await,
-        "ollama" => chat_ollama(http, cfg, state, server_id, &system_prompt, history, message).await,
-        "omniroute" => chat_omniroute(http, cfg, &system_prompt, history, message).await,
-        other => anyhow::bail!("provider inconnu : {other}"),
-    }
-}
-
-/// MCManager actions the assistant can take directly, beyond plain chat.
-/// Currently: install a mod/plugin, and list what's already installed (so
-/// it doesn't suggest installing something that's already there). Wired
-/// into Anthropic and Ollama, whose tool-calling loops are implemented
-/// below; OpenAI/Gemini stay plain-chat for now.
-async fn execute_mc_tool(state: &crate::state::AppState, server_id: Option<uuid::Uuid>, name: &str, args: &Value) -> Value {
-    let Some(id) = server_id else {
-        return json!({ "error": "aucun serveur n'est selectionne dans MCManager en ce moment" });
-    };
-    let entry = match state.servers.read().await.get(&id).cloned() {
-        Some(e) => e,
-        None => return json!({ "error": "serveur introuvable" }),
-    };
-    match name {
-        "install_addon" => {
-            let project = args["project_id"].as_str().unwrap_or("").trim();
-            if project.is_empty() {
-                return json!({ "error": "project_id manquant" });
-            }
-            let version = match crate::modrinth::latest_matching_version(&state.http, project, entry.loader.modrinth_loader(), &entry.mc_version).await {
-                Ok(Some(v)) => v,
-                Ok(None) => return json!({ "error": format!("aucune version de \"{project}\" compatible avec {} {}", entry.loader.as_str(), entry.mc_version) }),
-                Err(e) => return json!({ "error": e.to_string() }),
-            };
-            let dest = std::path::PathBuf::from(&entry.folder).join(entry.loader.addon_dir());
-            match crate::modrinth::download_version_file(&state.http, &version, &dest).await {
-                Ok(filename) => json!({ "ok": true, "installed_file": filename, "note": "redemarrage du serveur necessaire pour l'activer" }),
-                Err(e) => json!({ "error": e.to_string() }),
-            }
-        }
-        "list_installed_addons" => {
-            match crate::files::list_addons(&std::path::PathBuf::from(&entry.folder), entry.loader) {
-                Ok(list) => json!({ "addons": list.iter().map(|a| json!({ "file": a.file_name, "enabled": a.enabled })).collect::<Vec<_>>() }),
-                Err(e) => json!({ "error": e.to_string() }),
-            }
-        }
-        other => json!({ "error": format!("outil inconnu: {other}") }),
-    }
-}
-
-fn anthropic_mc_tools() -> Value {
-    json!([
-        {
-            "name": "install_addon",
-            "description": "Installe la derniere version compatible d'un mod/plugin Modrinth sur le serveur MCManager actuellement selectionne. Necessite un redemarrage du serveur pour prendre effet.",
-            "input_schema": { "type": "object", "properties": { "project_id": { "type": "string", "description": "slug ou ID du projet Modrinth, ex: lithium, fabric-api" } }, "required": ["project_id"] }
-        },
-        {
-            "name": "list_installed_addons",
-            "description": "Liste les mods/plugins deja installes sur le serveur selectionne, avec leur etat actif/desactive.",
-            "input_schema": { "type": "object", "properties": {} }
-        }
-    ])
-}
-
-async fn chat_anthropic(http: &reqwest::Client, cfg: &AiConfig, state: &crate::state::AppState, server_id: Option<uuid::Uuid>, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    let mut messages: Vec<Value> = history.iter().map(|m| json!({ "role": m.role, "content": m.content })).collect();
-    messages.push(json!({ "role": "user", "content": message }));
-    let model = if cfg.model.trim().is_empty() { "claude-sonnet-4-5" } else { cfg.model.as_str() };
-
-    // Bounded tool-use loop, same reasoning as chat_ollama's: a confused
-    // model shouldn't be able to loop forever installing things.
-    for _ in 0..4 {
-        let resp = http.post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &cfg.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&json!({ "model": model, "max_tokens": 1024, "system": system, "messages": messages, "tools": anthropic_mc_tools() }))
-            .send().await.context("requete Anthropic echouee")?;
-        let status = resp.status();
-        let body: Value = resp.json().await.context("reponse Anthropic invalide")?;
-        if !status.is_success() {
-            anyhow::bail!("Anthropic a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
-        }
-        let content = body["content"].as_array().cloned().unwrap_or_default();
-        let tool_uses: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
-
-        if tool_uses.is_empty() {
-            let text = content.iter().find_map(|b| b["text"].as_str()).unwrap_or("(reponse vide)");
-            return Ok(text.to_string());
-        }
-
-        messages.push(json!({ "role": "assistant", "content": content }));
-        let mut tool_results = Vec::new();
-        for tu in &tool_uses {
-            let name = tu["name"].as_str().unwrap_or("");
-            let tool_use_id = tu["id"].as_str().unwrap_or("");
-            let result = execute_mc_tool(state, server_id, name, &tu["input"]).await;
-            tool_results.push(json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": result.to_string() }));
-        }
-        messages.push(json!({ "role": "user", "content": tool_results }));
-    }
-
-    anyhow::bail!("le modele a enchaine trop d'appels d'outils sans conclure - reessayez avec une question plus precise")
-}
-
-async fn chat_openai(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    let mut messages = vec![json!({ "role": "system", "content": system })];
-    messages.extend(history.iter().map(|m| json!({ "role": m.role, "content": m.content })));
-    messages.push(json!({ "role": "user", "content": message }));
-    let model = if cfg.model.trim().is_empty() { "gpt-4.1-mini" } else { cfg.model.as_str() };
-    let resp = http.post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(&cfg.api_key)
-        .json(&json!({ "model": model, "messages": messages }))
-        .send().await.context("requete OpenAI echouee")?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("reponse OpenAI invalide")?;
-    if !status.is_success() {
-        anyhow::bail!("OpenAI a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
-    }
-    let text = body["choices"][0]["message"]["content"].as_str().unwrap_or("(reponse vide)");
-    Ok(text.to_string())
-}
-
-/// OmniRoute (https://omniroute.online/, https://github.com/diegosouzapw/OmniRoute)
-/// is a self-hosted AI gateway exposing an OpenAI-compatible
-/// `/v1/chat/completions` endpoint in front of 300+ upstream providers -
-/// same request/response shape as `chat_openai` above, just pointed at a
-/// configurable (usually local) base URL instead of api.openai.com. Model
-/// defaults to "auto", OmniRoute's own zero-config smart routing.
-async fn chat_omniroute(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    let mut messages = vec![json!({ "role": "system", "content": system })];
-    messages.extend(history.iter().map(|m| json!({ "role": m.role, "content": m.content })));
-    messages.push(json!({ "role": "user", "content": message }));
-    let model = if cfg.model.trim().is_empty() { "auto" } else { cfg.model.as_str() };
-    let url = format!("{}/chat/completions", cfg.omniroute_url());
-    let resp = http.post(&url)
-        .bearer_auth(&cfg.api_key)
-        .json(&json!({ "model": model, "messages": messages }))
-        .send().await.context("requete OmniRoute echouee - verifiez que l'instance tourne et que l'URL est correcte")?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("reponse OmniRoute invalide")?;
-    if !status.is_success() {
-        anyhow::bail!("OmniRoute a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
-    }
-    let text = body["choices"][0]["message"]["content"].as_str().unwrap_or("(reponse vide)");
-    Ok(text.to_string())
-}
-
-async fn chat_gemini(http: &reqwest::Client, cfg: &AiConfig, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    let model = if cfg.model.trim().is_empty() { "gemini-2.5-flash" } else { cfg.model.as_str() };
-    let mut contents: Vec<Value> = history.iter().map(|m| json!({
-        "role": if m.role == "assistant" { "model" } else { "user" },
-        "parts": [{ "text": m.content }],
-    })).collect();
-    contents.push(json!({ "role": "user", "parts": [{ "text": message }] }));
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={}", cfg.api_key);
-    let resp = http.post(&url)
-        .json(&json!({ "system_instruction": { "parts": [{ "text": system }] }, "contents": contents }))
-        .send().await.context("requete Gemini echouee")?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("reponse Gemini invalide")?;
-    if !status.is_success() {
-        anyhow::bail!("Gemini a renvoye une erreur : {}", body["error"]["message"].as_str().unwrap_or("erreur inconnue"));
-    }
-    let text = body["candidates"][0]["content"]["parts"][0]["text"].as_str().unwrap_or("(reponse vide)");
-    Ok(text.to_string())
-}
-
-// ───────────────────────── Ollama (avec tools web) ─────────────────────────
-
-fn ollama_tools() -> Value {
-    json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "Recherche sur le web (ex: derniere version d'un plugin, compatibilite Minecraft). Retourne une liste de resultats (titre + extrait + URL).",
-                "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "web_fetch",
-                "description": "Recupere le contenu texte d'une page web a partir de son URL.",
-                "parameters": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "install_addon",
-                "description": "Installe la derniere version compatible d'un mod/plugin Modrinth sur le serveur MCManager actuellement selectionne. Necessite un redemarrage du serveur pour prendre effet.",
-                "parameters": { "type": "object", "properties": { "project_id": { "type": "string", "description": "slug ou ID du projet Modrinth, ex: lithium, fabric-api" } }, "required": ["project_id"] }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_installed_addons",
-                "description": "Liste les mods/plugins deja installes sur le serveur selectionne, avec leur etat actif/desactive.",
-                "parameters": { "type": "object", "properties": {} }
-            }
-        }
-    ])
+    let _ = http; // le client HTTP de l'état est utilisé par l'agent
+    let params = crate::ai_agent::AgentParams::new(state.clone(), cfg.clone(), server_id, context.to_string(), "local".into(), String::new());
+    Ok(crate::ai_agent::run_collect(params, history.to_vec(), message.to_string()).await?.reply)
 }
 
 /// DuckDuckGo's HTML endpoint needs no API key, unlike Bing/Google/Serper -
@@ -513,7 +301,7 @@ fn ollama_tools() -> Value {
 /// substitute for "latest plugin version"-style questions, and the tool
 /// result says so explicitly so the model (and the user reading the
 /// console) knows the answer may be less current than a live web result.
-async fn tool_web_search(http: &reqwest::Client, query: &str) -> String {
+pub(crate) async fn tool_web_search(http: &reqwest::Client, query: &str) -> String {
     match duckduckgo_search(http, query).await {
         Some(results) if !results.is_empty() => {
             results.into_iter().enumerate()
@@ -625,21 +413,7 @@ fn urlencoding_light(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("%{:02X}", c as u32) }).collect()
 }
 
-async fn tool_web_fetch(http: &reqwest::Client, url: &str) -> String {
-    match http.get(url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(text) => {
-                let plain = strip_tags(&text);
-                plain.chars().take(4000).collect()
-            }
-            Err(_) => "impossible de lire le contenu de la page".to_string(),
-        },
-        Ok(resp) => format!("la page a repondu avec le statut {}", resp.status()),
-        Err(e) => format!("impossible de recuperer la page : {e}"),
-    }
-}
-
-fn strip_tags(html: &str) -> String {
+pub(crate) fn strip_tags(html: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
     for c in html.chars() {
@@ -653,51 +427,6 @@ fn strip_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-async fn chat_ollama(http: &reqwest::Client, cfg: &AiConfig, state: &crate::state::AppState, server_id: Option<uuid::Uuid>, system: &str, history: &[ChatMessage], message: &str) -> Result<String> {
-    let model = if cfg.model.trim().is_empty() { anyhow::bail!("choisissez un modele Ollama installe localement") } else { cfg.model.as_str() };
-    let mut messages = vec![json!({ "role": "system", "content": system })];
-    messages.extend(history.iter().map(|m| json!({ "role": m.role, "content": m.content })));
-    messages.push(json!({ "role": "user", "content": message }));
-
-    let url = format!("{}/api/chat", cfg.ollama_url());
-
-    // Bounded tool-use loop: the model can call web_search/web_fetch/
-    // install_addon a few times before we force a final answer, so a
-    // confused model can't loop forever burning the user's CPU (or
-    // installing addons in a loop).
-    for _ in 0..4 {
-        let resp = http.post(&url)
-            .json(&json!({ "model": model, "messages": messages, "tools": ollama_tools(), "stream": false }))
-            .send().await.context("impossible de contacter Ollama - est-il lance ? (`ollama serve`)")?;
-        if !resp.status().is_success() {
-            let body: Value = resp.json().await.unwrap_or_default();
-            anyhow::bail!("Ollama a renvoye une erreur : {}", body["error"].as_str().unwrap_or("erreur inconnue"));
-        }
-        let body: Value = resp.json().await.context("reponse Ollama invalide")?;
-        let msg = &body["message"];
-        let tool_calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
-
-        if tool_calls.is_empty() {
-            return Ok(msg["content"].as_str().unwrap_or("(reponse vide)").to_string());
-        }
-
-        messages.push(json!({ "role": "assistant", "content": msg["content"].as_str().unwrap_or(""), "tool_calls": tool_calls }));
-        for call in &tool_calls {
-            let name = call["function"]["name"].as_str().unwrap_or("");
-            let args = &call["function"]["arguments"];
-            let result = match name {
-                "web_search" => tool_web_search(http, args["query"].as_str().unwrap_or("")).await,
-                "web_fetch" => tool_web_fetch(http, args["url"].as_str().unwrap_or("")).await,
-                "install_addon" | "list_installed_addons" => execute_mc_tool(state, server_id, name, args).await.to_string(),
-                other => format!("outil inconnu : {other}"),
-            };
-            messages.push(json!({ "role": "tool", "content": result }));
-        }
-    }
-
-    anyhow::bail!("le modele a enchaine trop d'appels d'outils sans conclure - reessayez avec une question plus precise")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -707,7 +436,7 @@ mod tests {
 
     #[test]
     fn masked_key_shape() {
-        let cfg = AiConfig { provider: "anthropic".into(), api_key: "sk-ant-1234567890abcd".into(), model: String::new(), ollama_base_url: String::new(), omniroute_base_url: String::new() };
+        let cfg = AiConfig { provider: "anthropic".into(), api_key: "sk-ant-1234567890abcd".into(), model: String::new(), ollama_base_url: String::new(), ..Default::default() };
         let masked = cfg.masked_key();
         assert!(masked.contains('…'));
         assert!(!masked.contains("1234567890"));
@@ -715,7 +444,7 @@ mod tests {
 
     #[test]
     fn omniroute_url_defaults_to_local_dashboard_port() {
-        let cfg = AiConfig { provider: "omniroute".into(), api_key: String::new(), model: String::new(), ollama_base_url: String::new(), omniroute_base_url: String::new() };
+        let cfg = AiConfig { provider: "omniroute".into(), api_key: String::new(), model: String::new(), ollama_base_url: String::new(), ..Default::default() };
         assert_eq!(cfg.omniroute_url(), "http://127.0.0.1:20128/v1");
         let cfg2 = AiConfig { omniroute_base_url: "https://my-omniroute.example.com/v1/".into(), ..cfg };
         assert_eq!(cfg2.omniroute_url(), "https://my-omniroute.example.com/v1");
