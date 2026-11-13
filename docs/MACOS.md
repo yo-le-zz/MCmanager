@@ -1,13 +1,18 @@
 # MCManager sur macOS
 
-Depuis la 1.1.1, chaque release contient, pour **Apple Silicon** (M1 et suivants) et pour **Mac Intel** :
+Depuis la 1.1.1, chaque release contient un build **Mac Intel (x86_64)** :
 
 | Fichier | Contenu |
 |---|---|
-| `mcmanager-<version>-macos-arm64.dmg` / `…-macos-x86_64.dmg` | `MCManager.app` à glisser dans *Applications* |
-| `mcmanager-<version>-macos-<arch>.tar.gz` | binaires `mcmanager` et `mcmanager-server` + dossier `web/` (usage en terminal) |
+| `mcmanager-<version>-macos-x86_64.dmg` | `MCManager.app` à glisser dans *Applications* |
+| `mcmanager-<version>-macos-x86_64.tar.gz` | binaires `mcmanager` et `mcmanager-server` + dossier `web/` (usage en terminal) |
 
-Prérequis : **macOS 11 (Big Sur) ou plus récent**. Java n'est pas fourni (voir plus bas).
+**Apple Silicon (M1 et suivants)** : aucun build natif n'est publié (les runners macOS Apple Silicon de GitHub sont trop souvent
+indisponibles). Le build Intel fonctionne via **Rosetta 2**, installée d'une commande :
+`softwareupdate --install-rosetta --agree-to-license`. Pour un binaire natif arm64, compilez sur place (`./build.sh macos`, voir plus bas).
+
+Prérequis : **macOS 11 (Big Sur) ou plus récent**. Java n'est pas fourni (voir plus bas) ; sur un Mac Apple Silicon, choisissez
+de préférence un Java natif arm64 (Homebrew `openjdk`), il est très supérieur à un Java Intel sous Rosetta.
 
 ## Installation
 1. Ouvrez le `.dmg` et glissez **MCManager** dans *Applications*.
@@ -61,5 +66,5 @@ pour l'architecture du Mac (pas de cross-compilation depuis Linux : le SDK Apple
 
 ## Limites connues
 - Pas de notarisation Apple (avertissement au premier lancement, voir plus haut).
-- Pas de binaire « universel » : deux fichiers distincts (arm64 et x86_64).
-- Les releases macOS sont produites par GitHub Actions ; elles n'ont pas pu être essayées sur un vrai Mac avant la publication de la 1.1.1.
+- Pas de build natif Apple Silicon ni de binaire « universel » : Rosetta 2 est nécessaire sur M1 et suivants.
+- La release macOS est produite par GitHub Actions ; elle n'a pas pu être essayée sur un vrai Mac avant la publication de la 1.1.1.

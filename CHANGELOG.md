@@ -5,7 +5,7 @@ Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
 ## [1.1.1] - 2026-11-11 (macOS, compatibilité, optimisations, mise à jour corrigée)
 ### macOS
-- Releases **Apple Silicon (arm64) et Intel (x86_64)** : `MCManager.app` dans un `.dmg` + archive portable, macOS 11 minimum, compilées nativement par le workflow GitHub.
+- Release **Mac Intel (x86_64)** : `MCManager.app` dans un `.dmg` + archive portable, macOS 11 minimum, compilée par le workflow GitHub. Pas de build Apple Silicon (runners trop souvent indisponibles) : Rosetta 2, ou `./build.sh macos` sur place.
   Signature « ad hoc » (pas de notarisation : voir `docs/MACOS.md`). `./build.sh macos` et `scripts/make-macos-app.sh`.
 - Le lanceur de l'application complète le `PATH` (Homebrew) pour que Java soit trouvé même depuis le Finder, et rouvre simplement le navigateur si MCManager tourne déjà.
 - Recherche du dossier `web/` élargie (`Contents/Resources`, `../share/mcmanager`, Homebrew). Service permanent : refus explicite hors Linux, modèle `launchd` documenté.

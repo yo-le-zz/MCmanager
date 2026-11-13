@@ -28,7 +28,7 @@ fi
 OS="$(uname -s)"
 case "$(uname -m)" in
   x86_64|amd64)  ARCH="x86_64"; DEB_ARCH="amd64"; RPM_ARCH="x86_64"; MAC_ARCH="x86_64" ;;
-  aarch64|arm64) ARCH="aarch64"; DEB_ARCH="arm64"; RPM_ARCH="aarch64"; MAC_ARCH="arm64" ;;
+  aarch64|arm64) ARCH="aarch64"; DEB_ARCH="arm64"; RPM_ARCH="aarch64"; MAC_ARCH="x86_64" ;; # Apple Silicon : build Intel via Rosetta 2
   *) err "Architecture non supportée : $(uname -m) (fournies : x86_64 et ARM64 / Apple Silicon)."; exit 1 ;;
 esac
 case "$OS" in
@@ -76,6 +76,9 @@ if [ "$OS" = "Linux" ]; then
   fi
   PORTABLE_PATTERN="linux-${ARCH}\\.tar\\.gz$"
 else
+  if [ "$(uname -m)" = "arm64" ] && ! /usr/bin/pgrep -q oahd 2>/dev/null; then
+    log "Mac Apple Silicon : MCManager est fourni pour Intel et tourne via Rosetta 2. Installez-la si besoin : softwareupdate --install-rosetta --agree-to-license"
+  fi
   PORTABLE_PATTERN="macos-${MAC_ARCH}\\.tar\\.gz$"
 fi
 

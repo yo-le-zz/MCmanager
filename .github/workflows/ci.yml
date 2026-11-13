@@ -1,6 +1,6 @@
 name: CI
 
-# Vérifie chaque push et chaque pull request : tests Rust sur Linux et macOS (Apple Silicon),
+# Vérifie chaque push et chaque pull request : tests Rust sur Linux et macOS (Intel : pas de runner Apple Silicon),
 # compilation Windows, tests de l'interface (Node), syntaxe des scripts d'installation et de build.
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest]
+        os: [ubuntu-22.04, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6

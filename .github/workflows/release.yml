@@ -92,17 +92,16 @@ jobs:
             dist/mcmanager-*-setup.exe
 
   # ---------------------------------------------------------------- macOS
-  # Compilation native sur chaque architecture (Apple Silicon et Intel). Livre MCManager.app dans un .dmg,
-  # plus une archive portable. Signature « ad hoc » seulement : pas de notarisation (voir docs/MACOS.md).
+  # Mac Intel (x86_64) uniquement : les runners macOS Apple Silicon sont rarement disponibles et bloquent les
+  # workflows pendant des heures. Les Mac Apple Silicon lancent ce build via Rosetta 2 (voir docs/MACOS.md).
+  # Livre MCManager.app dans un .dmg, plus une archive portable. Signature « ad hoc » (pas de notarisation).
   macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: arm64
-            runner: macos-latest       # Apple Silicon (M1 et suivants)
           - arch: x86_64
-            runner: macos-15-intel     # Mac Intel
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"   # macOS 11 Big Sur au minimum (= LSMinimumSystemVersion)

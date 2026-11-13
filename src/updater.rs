@@ -67,7 +67,8 @@ fn asset_suffix_for_platform() -> &'static str {
     if cfg!(target_os = "windows") {
         if cfg!(target_arch = "aarch64") { "windows-arm64.zip" } else { "windows-x86_64.zip" }
     } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") { "macos-arm64.tar.gz" } else { "macos-x86_64.tar.gz" }
+        // Seule l'archive Intel est publiée ; sur Apple Silicon elle tourne via Rosetta 2.
+        "macos-x86_64.tar.gz"
     } else if cfg!(target_arch = "aarch64") {
         "linux-aarch64.tar.gz"
     } else {

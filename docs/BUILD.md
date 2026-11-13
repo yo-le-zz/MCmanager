@@ -30,7 +30,7 @@ Pour des systèmes plus anciens (Debian 11, Ubuntu 20.04), utilisez l'image Dock
 `./build.sh macos` — **à lancer sur un Mac** (pas de cross-compilation depuis Linux : le SDK Apple n'est pas redistribuable).
 Produit `dist/MCManager.app`, `mcmanager-<version>-macos-<arch>.dmg` et `.tar.gz` pour l'architecture du Mac (`arm64` ou `x86_64`),
 avec une cible minimale macOS 11. L'assemblage est fait par `scripts/make-macos-app.sh` ; la signature est « ad hoc »,
-sans notarisation (voir [MACOS.md](MACOS.md)). Le workflow GitHub compile les deux architectures sur des runners natifs.
+sans notarisation (voir [MACOS.md](MACOS.md)). Le workflow GitHub ne compile que le build Intel (les Mac Apple Silicon le lancent via Rosetta 2) ; un build arm64 natif se fait en local avec cette commande.
 
 ### Docker
 `docker build -t mcmanager .` construit l'image du mode serveur (Dockerfile à la racine, build multi-étapes,
@@ -79,5 +79,5 @@ Deux workflows sont fournis dans `.github/workflows/` :
   Rust 1.75 (les versions de dépendances sont épinglées dans `Cargo.toml`), tests de l'interface (`node scripts/test-ui.js`),
   syntaxe des scripts et cohérence de `scripts/install.*` avec `website/install.*`.
 - `release.yml` (tag `v*.*.*`) : compilation **native** sur chaque architecture — Linux x86_64 et ARM64 (`.deb`, `.rpm`, `.tar.gz`),
-  macOS arm64 et x86_64 (`.dmg`, `.tar.gz`), Windows x86_64 et ARM64 (`.exe`, `.zip`), image Docker multi-architecture sur ghcr.io —
+  macOS Intel x86_64 (`.dmg`, `.tar.gz` ; pas de runner Apple Silicon : trop souvent indisponible), Windows x86_64 et ARM64 (`.exe`, `.zip`), image Docker multi-architecture sur ghcr.io —
   puis publication de la release avec un fichier `SHA256SUMS` (`sha256sum -c SHA256SUMS`).

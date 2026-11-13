@@ -39,7 +39,7 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Domaines personnalisés** : DNS (SRV), nginx et Caddy générés pour vos serveurs et l'interface web — [docs/DOMAINS.md](docs/DOMAINS.md).
 - **Service permanent et Docker** : `systemctl enable --now mcmanager-server` (utilisateur dédié, redémarrage automatique) ou `docker compose up -d`. Le contrôle à distance ne s'éteint plus à la fermeture d'un terminal.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
-- **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : `.deb`, `.rpm`, archive portable, Docker multi-arch), **macOS** Apple Silicon **et** Intel (`.dmg`, macOS 11+, voir [docs/MACOS.md](docs/MACOS.md)) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). Les binaires Linux sont compilés sur Ubuntu 22.04 (glibc 2.35 : Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents). Le workflow GitHub compile tout, `./build.sh` fait de même en local.
+- **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : `.deb`, `.rpm`, archive portable, Docker multi-arch), **macOS** Intel (`.dmg`, macOS 11+, Apple Silicon via Rosetta 2 ; voir [docs/MACOS.md](docs/MACOS.md)) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). Les binaires Linux sont compilés sur Ubuntu 22.04 (glibc 2.35 : Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents). Le workflow GitHub compile tout, `./build.sh` fait de même en local.
 - **Java détecté automatiquement** : bouton « Détecter » dans les réglages (JAVA_HOME, Homebrew, `/usr/lib/jvm`, `Program Files`...), avec la version requise par votre version de Minecraft.
 
 ### Mise à jour automatique selon le type d'installation
@@ -70,7 +70,7 @@ Variables d'environnement utiles :
 
 ## 🖥 Installation
 
-### Une ligne (Linux et macOS, x86_64 et ARM64)
+### Une ligne (Linux x86_64 et ARM64, macOS)
 ```bash
 curl -fsSL https://mcmanager.pages.dev/install.sh | bash
 ```
@@ -102,8 +102,8 @@ sudo dpkg -i mcmanager_*.deb
 sudo systemctl enable --now mcmanager-server
 ```
 
-### macOS (Apple Silicon et Intel, macOS 11+)
-Ouvrez `mcmanager-<version>-macos-arm64.dmg` (ou `-x86_64.dmg` sur un Mac Intel), glissez **MCManager** dans *Applications*.
+### macOS (Intel, ou Apple Silicon via Rosetta 2 ; macOS 11+)
+Ouvrez `mcmanager-<version>-macos-x86_64.dmg`, glissez **MCManager** dans *Applications*.
 L'application n'est pas notarisée : au premier lancement, clic droit → **Ouvrir**. Détails (Java, launchd, limites) : [docs/MACOS.md](docs/MACOS.md).
 
 ### Windows
@@ -118,7 +118,7 @@ portable correspondant et lancez `mcmanager.exe`.
 cargo build --release
 ./build.sh          # génère tous les paquets dans ./dist
 ./build.sh linux     # uniquement Linux (.deb + .rpm + tar.gz)
-./build.sh macos     # sur un Mac : MCManager.app + .dmg + tar.gz (architecture du Mac)
+./build.sh macos     # sur un Mac : MCManager.app + .dmg + tar.gz (architecture du Mac, y compris arm64 natif)
 ./build.sh windows   # cross-compilation Windows (nécessite mingw-w64)
 ./build.sh installer # scripts d'installation / Inno Setup
 ```

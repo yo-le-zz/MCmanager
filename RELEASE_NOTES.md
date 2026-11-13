@@ -1,7 +1,7 @@
 # MCManager v1.1.1 — macOS, compatibilité, mise à jour corrigée
 
 ## Nouveautés
-- **macOS** : Apple Silicon et Intel, `MCManager.app` dans un `.dmg` (macOS 11+). Non notarisée : au premier lancement, clic droit → Ouvrir ([docs/MACOS.md](docs/MACOS.md)).
+- **macOS** : Mac Intel, `MCManager.app` dans un `.dmg` (macOS 11+) ; Apple Silicon via Rosetta 2. Non notarisée : au premier lancement, clic droit → Ouvrir ([docs/MACOS.md](docs/MACOS.md)).
 - **Détection de Java** dans les réglages, avec la version requise par votre version de Minecraft.
 - **Linux** : binaires compatibles Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents ; `install.sh` gère x86_64, ARM64, `.deb`, `.rpm` et macOS.
 - Fichier **SHA256SUMS** dans la release.
