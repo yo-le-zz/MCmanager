@@ -31,4 +31,6 @@ fournisseurs : Anthropic, OpenAI, Gemini, Ollama et OmniRoute. La clé d'API est
 - Clé Gemini envoyée dans l'en-tête `x-goog-api-key`, jamais dans l'URL.
 
 ## Protocole
+Le flux envoie un commentaire `: ping` après 15 s de silence (une confirmation peut attendre 2 minutes) pour que les reverse proxys ne coupent pas la connexion.
+
 Voir `docs/API.md` (section Assistant).

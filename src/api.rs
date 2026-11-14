@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, ai_agent, ai_tools, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
+use crate::{ai, ai_agent, alerts, ai_tools, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -64,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ai/config", get(get_ai_config).post(save_ai_config))
         .route("/api/ai/models", get(list_ai_models))
         .route("/api/java/detect", get(detect_java))
+        .route("/api/alerts", get(get_alerts))
         .route("/api/ai/chat", post(ai_chat))
         .route("/api/ai/chat/stream", post(ai_chat_stream))
         .route("/api/ai/approve", post(ai_approve))
@@ -90,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/network/geolocate", post(geolocate))
         .route("/api/discord/config", get(get_discord_config).post(save_discord_config))
         .route("/api/discord/status", get(get_discord_status))
+        .route("/api/discord/presence", post(set_discord_presence))
         .route("/api/discord/test", post(test_discord))
         .route("/api/discord/detect", post(detect_discord))
         .route("/api/discord/guild/:id", get(detect_discord_guild))
@@ -489,6 +491,11 @@ async fn test_java(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, body
         "xmx_mb": xmx_mb,
         "output": text.trim(),
     })))
+}
+
+/// Alertes du tableau de bord (disque, sauvegardes, EULA, bot Discord) : voir `alerts.rs`.
+async fn get_alerts(State(state): State<AppState>) -> Json<Vec<alerts::Alert>> {
+    Json(alerts::evaluate(&alerts::gather(&state).await))
 }
 
 #[derive(Deserialize)]
@@ -1278,11 +1285,14 @@ async fn ai_chat_stream(
     let params = ai_agent::AgentParams::new(state.clone(), cfg, body.server_id, context, name, ip);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(ai_agent::run(params, body.history, body.message, tx));
+    // Un ping toutes les 15 s de silence : une confirmation peut attendre jusqu'à 2 minutes et les reverse proxys
+    // coupent les connexions muettes.
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        let ev = rx.recv().await?;
-        let v = serde_json::to_value(&ev).unwrap_or_default();
-        let kind = v["type"].as_str().unwrap_or("message").to_string();
-        let chunk = bytes::Bytes::from(format!("event: {kind}\ndata: {v}\n\n"));
+        let chunk = match tokio::time::timeout(crate::ai_stream::SSE_PING_EVERY, rx.recv()).await {
+            Ok(Some(ev)) => bytes::Bytes::from(ev.to_sse()),
+            Ok(None) => return None,
+            Err(_) => bytes::Bytes::from_static(crate::ai_stream::SSE_PING),
+        };
         Some((Ok::<_, std::convert::Infallible>(chunk), rx))
     });
     axum::response::Response::builder()
@@ -1501,6 +1511,12 @@ struct DiscordConfigView {
     notify_scheduled_restart: bool,
     notify_auto_stop: bool,
     notify_player_join_leave: bool,
+    bot_presence: String,
+    activity_type: String,
+    activity_text: String,
+    join_host: String,
+    /// Lien pour ajouter le bot à un serveur Discord (calculé depuis le token, sans appel réseau).
+    invite_url: Option<String>,
 }
 
 fn discord_view(c: &discord::DiscordConfig) -> DiscordConfigView {
@@ -1525,6 +1541,11 @@ fn discord_view(c: &discord::DiscordConfig) -> DiscordConfigView {
         notify_scheduled_restart: c.notify_scheduled_restart,
         notify_auto_stop: c.notify_auto_stop,
         notify_player_join_leave: c.notify_player_join_leave,
+        bot_presence: if c.bot_presence.is_empty() { "online".into() } else { c.bot_presence.clone() },
+        activity_type: if c.activity_type.is_empty() { "none".into() } else { c.activity_type.clone() },
+        activity_text: c.activity_text.clone(),
+        join_host: c.join_host.clone(),
+        invite_url: discord::invite_url_from_token(&c.bot_token),
     }
 }
 
@@ -1576,6 +1597,9 @@ struct SaveDiscordBody {
     notify_scheduled_restart: bool,
     notify_auto_stop: bool,
     notify_player_join_leave: bool,
+    /// Absent = inchangé.
+    #[serde(default)]
+    join_host: Option<String>,
 }
 
 async fn save_discord_config(State(state): State<AppState>, Json(b): Json<SaveDiscordBody>) -> AppResult<Json<DiscordConfigView>> {
@@ -1612,8 +1636,28 @@ async fn save_discord_config(State(state): State<AppState>, Json(b): Json<SaveDi
     cfg.notify_scheduled_restart = b.notify_scheduled_restart;
     cfg.notify_auto_stop = b.notify_auto_stop;
     cfg.notify_player_join_leave = b.notify_player_join_leave;
+    if let Some(h) = b.join_host {
+        if !discord::valid_join_host(&h) {
+            return Err(AppError(anyhow::anyhow!("adresse publique invalide : un domaine ou une IP, sans http:// ni espace")));
+        }
+        cfg.join_host = h.trim().to_string();
+    }
     discord::save_config(&state.data_dir, &cfg).await?;
     Ok(Json(discord_view(&cfg)))
+}
+
+#[derive(Deserialize)]
+struct PresenceBody {
+    presence: String,
+    activity_type: String,
+    #[serde(default)]
+    activity_text: String,
+}
+
+/// Change le statut du bot (en ligne, absent, ne pas déranger, invisible) et son activité, sans reconnexion.
+async fn set_discord_presence(State(state): State<AppState>, Json(b): Json<PresenceBody>) -> AppResult<Json<DiscordConfigView>> {
+    discord::save_presence(&state.data_dir, &b.presence, &b.activity_type, &b.activity_text).await?;
+    Ok(Json(discord_view(&discord::load_config(&state.data_dir).await)))
 }
 
 async fn test_discord(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {

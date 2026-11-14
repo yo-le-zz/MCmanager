@@ -54,10 +54,21 @@ Déclarées en anglais, **affichées en français** aux clients Discord en fran�
 | `/mc list` | `/mc liste` | tous | serveurs et état 🟢/⚫ (instances distantes comprises) |
 | `/mc status server` | `/mc statut serveur` | tous | en ligne ? joueurs / max |
 | `/mc players server` | `/mc joueurs serveur` | tous | joueurs connectés |
+| `/mc join server` | `/mc rejoindre serveur` | tous | adresse à coller dans Minecraft (voir ci-dessous), version, état |
 | `/mc start server` | `/mc demarrer serveur` | **opérateurs** | démarre |
 | `/mc stop server` | `/mc arreter serveur` | **opérateurs** | arrêt propre |
 | `/mc restart server` | `/mc redemarrer serveur` | **opérateurs** | redémarre |
 | `/mc command server text` | `/mc commande serveur texte` | **opérateurs** | commande console |
+
+## Statut du bot, invitation et adresse (Réglages → Discord)
+- **Statut du bot** : présence (*en ligne*, *absent*, *ne pas déranger*, *invisible*) et activité (*joue à*, *regarde*, *écoute*, *participe à*, ou statut personnalisé).
+  Le texte accepte `{online}` (serveurs en marche) et `{servers}` (nombre de serveurs), rafraîchis chaque minute — par exemple « {online}/{servers} serveurs en ligne ».
+  Le bouton **Appliquer le statut** agit **immédiatement**, sans reconnecter le bot.
+- **Ajouter le bot à votre serveur Discord** : le lien d'invitation apparaît dès que le token est enregistré (calculé localement, sans appel réseau ;
+  il demande les permissions nécessaires pour créer les salons).
+- **Adresse publique** (`/mc rejoindre`) : saisissez le domaine ou l'IP que vos joueurs utilisent, sans le port. La commande affiche `domaine` ou
+  `domaine:port` (le port 25565 est omis), la version de Minecraft et l'état du serveur. Sans adresse configurée, le bot répond qu'il faut la demander à un administrateur.
+- **Webhook sans bot** : un simple webhook suffit pour les notifications (sans commandes, console ni chat). Collez son URL dans « …ou URL de webhook » ; elle est chiffrée sur disque.
 
 ## Langue
 

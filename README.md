@@ -40,6 +40,8 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Service permanent et Docker** : `systemctl enable --now mcmanager-server` (utilisateur dédié, redémarrage automatique) ou `docker compose up -d`. Le contrôle à distance ne s'éteint plus à la fermeture d'un terminal.
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
 - **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : `.deb`, `.rpm`, archive portable, Docker multi-arch), **macOS** Intel (`.dmg`, macOS 11+, Apple Silicon via Rosetta 2 ; voir [docs/MACOS.md](docs/MACOS.md)) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). Les binaires Linux sont compilés sur Ubuntu 22.04 (glibc 2.35 : Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents). Le workflow GitHub compile tout, `./build.sh` fait de même en local.
+- **Double authentification (TOTP)**, **alertes** sur le tableau de bord (disque, sauvegardes, EULA, bot Discord) et **menu mobile** pour le téléphone.
+- **Bot Discord** : statut et activité modifiables à chaud, lien d'invitation, commande `/mc rejoindre` (voir [docs/DISCORD.md](docs/DISCORD.md)).
 - **Java détecté automatiquement** : bouton « Détecter » dans les réglages (JAVA_HOME, Homebrew, `/usr/lib/jvm`, `Program Files`...), avec la version requise par votre version de Minecraft.
 
 ### Mise à jour automatique selon le type d'installation
@@ -135,6 +137,7 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 - [docs/SERVER.md](docs/SERVER.md) — `mcmanager-server` : mode serveur, Docker, multi-utilisateurs, serveurs distants
 - [docs/MACOS.md](docs/MACOS.md) — installer et utiliser MCManager sur macOS
 - [docs/ASSISTANT.md](docs/ASSISTANT.md) — assistant : outils, modes, sécurité
+- [docs/SECURITY.md](docs/SECURITY.md) — comptes, double authentification (TOTP), mise à jour, imports
 - [docs/DISCORD.md](docs/DISCORD.md) · [docs/DOMAINS.md](docs/DOMAINS.md) — bot Discord, domaines et reverse proxy
 - [docs/PLAYIT.md](docs/PLAYIT.md) — tutoriel détaillé playit.gg
 - L'onglet **Docs & tutos** de l'application contient aussi un guide intégré.
@@ -167,6 +170,8 @@ src/
   ai_tools.rs    outils de l'assistant (lecture/écriture), approbations, audit
   ai_fetch.rs    web_fetch durci contre le SSRF
   perm.rs        niveaux de droits par serveur (mode serveur)
+  totp.rs        mots de passe à usage unique (TOTP, RFC 6238) pour la double authentification
+  alerts.rs      alertes du tableau de bord (règles pures + instantané)
   audit.rs       journal d'audit
   discord.rs, discord_bridge.rs   bot Discord (salons, console, pont de chat)
   network.rs     domaines, DNS, nginx, Caddy

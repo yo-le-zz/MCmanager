@@ -109,6 +109,14 @@ pub struct DiscordConfig {
     pub notify_scheduled_restart: bool,
     pub notify_auto_stop: bool,
     pub notify_player_join_leave: bool,
+    /// Statut du bot : `online` | `idle` | `dnd` | `invisible`.
+    pub bot_presence: String,
+    /// Type d'activité : `none` | `playing` | `watching` | `listening` | `competing` | `custom`.
+    pub activity_type: String,
+    /// Texte de l'activité ; `{servers}` (nombre de serveurs) et `{online}` (serveurs en marche) sont remplacés.
+    pub activity_text: String,
+    /// Adresse affichée par `/mc join` (domaine ou IP publique, sans port).
+    pub join_host: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +157,14 @@ struct StoredDiscordConfig {
     notify_auto_stop: bool,
     #[serde(default)]
     notify_player_join_leave: bool,
+    #[serde(default)]
+    bot_presence: String,
+    #[serde(default)]
+    activity_type: String,
+    #[serde(default)]
+    activity_text: String,
+    #[serde(default)]
+    join_host: String,
     encrypted_token: Option<EncryptedBlob>,
     encrypted_webhook: Option<EncryptedBlob>,
 }
@@ -194,10 +210,99 @@ pub async fn load_config(data_dir: &Path) -> DiscordConfig {
         notify_scheduled_restart: stored.notify_scheduled_restart,
         notify_auto_stop: stored.notify_auto_stop,
         notify_player_join_leave: stored.notify_player_join_leave,
+        bot_presence: if stored.bot_presence.is_empty() { "online".into() } else { stored.bot_presence },
+        activity_type: if stored.activity_type.is_empty() { "none".into() } else { stored.activity_type },
+        activity_text: stored.activity_text,
+        join_host: stored.join_host,
     }
 }
 
 pub async fn save_config(data_dir: &Path, cfg: &DiscordConfig) -> anyhow::Result<()> {
+    write_config(data_dir, cfg).await?;
+    // Le bot se reconfigure tout de suite (nouveau token, désactivation...).
+    let signal = restart_signal(data_dir);
+    signal.notify_waiters();
+    signal.notify_one();
+    Ok(())
+}
+
+/// Enregistre uniquement le statut du bot et l'applique **à chaud** (aucune reconnexion à la passerelle).
+pub async fn save_presence(data_dir: &Path, presence: &str, activity_type: &str, activity_text: &str) -> anyhow::Result<()> {
+    let (presence, activity_type, activity_text) = validate_presence(presence, activity_type, activity_text)?;
+    let mut cfg = load_config(data_dir).await;
+    cfg.bot_presence = presence;
+    cfg.activity_type = activity_type;
+    cfg.activity_text = activity_text;
+    write_config(data_dir, &cfg).await?;
+    let signal = presence_signal(data_dir);
+    signal.notify_waiters();
+    signal.notify_one();
+    Ok(())
+}
+
+/// Valide et normalise statut, type et texte d'activité.
+pub fn validate_presence(presence: &str, activity_type: &str, text: &str) -> anyhow::Result<(String, String, String)> {
+    let presence = presence.trim().to_ascii_lowercase();
+    if !["online", "idle", "dnd", "invisible"].contains(&presence.as_str()) {
+        anyhow::bail!("statut inconnu (online, idle, dnd ou invisible)");
+    }
+    let activity_type = activity_type.trim().to_ascii_lowercase();
+    if !["none", "playing", "watching", "listening", "competing", "custom"].contains(&activity_type.as_str()) {
+        anyhow::bail!("type d'activité inconnu");
+    }
+    let text: String = text.trim().chars().filter(|c| !c.is_control()).collect();
+    if text.chars().count() > 128 {
+        anyhow::bail!("le texte d'activité est limité à 128 caractères");
+    }
+    Ok((presence, if text.is_empty() { "none".into() } else { activity_type }, text))
+}
+
+/// Charge utile « presence » de la passerelle Discord (opcode 3, et champ `presence` de l'Identify).
+pub fn presence_payload(cfg: &DiscordConfig, servers: usize, online: usize) -> Value {
+    let text = cfg.activity_text.replace("{servers}", &servers.to_string()).replace("{online}", &online.to_string());
+    let activities = match (cfg.activity_type.as_str(), text.is_empty()) {
+        ("none", _) | (_, true) => vec![],
+        // Le statut personnalisé (type 4) affiche le champ `state`, pas `name`.
+        ("custom", _) => vec![json!({ "name": "Custom Status", "type": 4, "state": text })],
+        (kind, _) => {
+            let t = match kind { "playing" => 0, "listening" => 2, "watching" => 3, "competing" => 5, _ => 0 };
+            vec![json!({ "name": text, "type": t })]
+        }
+    };
+    json!({ "since": null, "activities": activities, "status": if cfg.bot_presence.is_empty() { "online" } else { cfg.bot_presence.as_str() }, "afk": false })
+}
+
+/// Lien d'invitation du bot, calculé **sans appel réseau** : les identifiants d'un token de bot commencent par
+/// l'identifiant (base64) du bot, qui est aussi celui de l'application.
+pub fn invite_url_from_token(token: &str) -> Option<String> {
+    use base64::Engine;
+    let first = token.trim().split('.').next()?;
+    let id = base64::engine::general_purpose::STANDARD_NO_PAD.decode(first.trim_end_matches('=')).ok().or_else(|| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(first.trim_end_matches('=')).ok())?;
+    let id = String::from_utf8(id).ok()?;
+    (id.len() >= 15 && id.len() <= 21 && id.chars().all(|c| c.is_ascii_digit())).then(|| crate::discord_bridge::invite_url(&id))
+}
+
+/// Adresse de connexion à afficher : `hôte:port`, ou seulement le port si aucune adresse n'est configurée.
+pub fn join_address(host: &str, port: u16) -> String {
+    let h = host.trim();
+    if h.is_empty() { format!(":{port}") } else if port == 25565 { h.to_string() } else { format!("{h}:{port}") }
+}
+
+/// Domaine ou IP simple (sans schéma ni port) pour `join_host`.
+pub fn valid_join_host(h: &str) -> bool {
+    let h = h.trim();
+    h.is_empty() || (h.len() <= 253 && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']')) && !h.starts_with('.') && !h.ends_with('.'))
+}
+
+fn presence_signal(data_dir: &Path) -> std::sync::Arc<Notify> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    static N: OnceLock<Mutex<HashMap<PathBuf, Arc<Notify>>>> = OnceLock::new();
+    let mut map = N.get_or_init(|| Mutex::new(HashMap::new())).lock().expect("verrou");
+    map.entry(data_dir.to_path_buf()).or_insert_with(|| Arc::new(Notify::new())).clone()
+}
+
+async fn write_config(data_dir: &Path, cfg: &DiscordConfig) -> anyhow::Result<()> {
     let key = secrets::load_or_create_key(data_dir).await?;
     let enc = |plain: &str| -> anyhow::Result<Option<EncryptedBlob>> {
         if plain.is_empty() {
@@ -225,16 +330,16 @@ pub async fn save_config(data_dir: &Path, cfg: &DiscordConfig) -> anyhow::Result
         notify_scheduled_restart: cfg.notify_scheduled_restart,
         notify_auto_stop: cfg.notify_auto_stop,
         notify_player_join_leave: cfg.notify_player_join_leave,
+        bot_presence: cfg.bot_presence.clone(),
+        activity_type: cfg.activity_type.clone(),
+        activity_text: cfg.activity_text.clone(),
+        join_host: cfg.join_host.clone(),
         encrypted_token: enc(&cfg.bot_token)?,
         encrypted_webhook: enc(&cfg.webhook_url)?,
     };
     let path = config_path(data_dir);
     tokio::fs::write(&path, serde_json::to_string_pretty(&stored)?).await?;
     secrets::restrict_to_owner(&path).await;
-    // Le bot se reconfigure tout de suite (nouveau token, désactivation...).
-    let signal = restart_signal(data_dir);
-    signal.notify_waiters();
-    signal.notify_one();
     Ok(())
 }
 
@@ -658,6 +763,7 @@ fn command_definitions() -> Value {
             sub("list", "liste", "List servers and their state", "Liste des serveurs et leur état", vec![]),
             sub("status", "statut", "Detailed state of a server", "État détaillé d'un serveur", vec![server_opt.clone()]),
             sub("players", "joueurs", "Connected players", "Joueurs connectés", vec![server_opt.clone()]),
+            sub("join", "rejoindre", "How to join a server", "Comment rejoindre un serveur", vec![server_opt.clone()]),
             sub("start", "demarrer", "Start a server (operators)", "Démarrer un serveur (opérateurs)", vec![server_opt.clone()]),
             sub("stop", "arreter", "Stop a server cleanly (operators)", "Arrêter un serveur proprement (opérateurs)", vec![server_opt.clone()]),
             sub("restart", "redemarrer", "Restart a server (operators)", "Redémarrer un serveur (opérateurs)", vec![server_opt.clone()]),
@@ -699,6 +805,23 @@ async fn post_callback(http: &reqwest::Client, api_base: &str, id: &str, token: 
 
 fn option_value(sub: &Value, name: &str) -> Option<String> {
     sub["options"].as_array()?.iter().find(|o| o["name"] == name).and_then(|o| o["value"].as_str().map(|s| s.to_string()))
+}
+
+/// Réponse de `/mc join` : adresse à saisir dans Minecraft, version et état du serveur.
+async fn join_message(state: &AppState, cfg: &DiscordConfig, server: &ServerInfo, l: Lang) -> String {
+    if server.remote.is_some() {
+        return pick(l, "ℹ️ **{n}** tourne sur une autre machine : demandez son adresse à un administrateur.", "ℹ️ **{n}** runs on another machine: ask an administrator for its address.").replace("{n}", &server.label());
+    }
+    let entry = state.servers.read().await.get(&server.id).cloned();
+    let Some(entry) = entry else { return pick(l, "❌ Serveur introuvable.", "❌ Server not found.").to_string() };
+    let loader = entry.loader.as_str();
+    let state_line = if server.running { pick(l, "🟢 en ligne", "🟢 online") } else { pick(l, "⚫ arrêté (demandez à un opérateur de le démarrer)", "⚫ stopped (ask an operator to start it)") };
+    if cfg.join_host.trim().is_empty() {
+        return pick(l, "🎮 **{n}** — {s}\nVersion : Minecraft {v} ({loader}), port **{p}**.\nL'adresse publique n'est pas configurée : demandez-la à un administrateur.", "🎮 **{n}** — {s}\nVersion: Minecraft {v} ({loader}), port **{p}**.\nThe public address is not configured: ask an administrator.")
+            .replace("{n}", &server.label()).replace("{s}", state_line).replace("{v}", &entry.mc_version).replace("{loader}", loader).replace("{p}", &entry.port.to_string());
+    }
+    pick(l, "🎮 **{n}** — {s}\nAdresse : `{a}`\nVersion : Minecraft {v} ({loader})\nMinecraft → Multijoueur → Ajouter un serveur → collez l'adresse.", "🎮 **{n}** — {s}\nAddress: `{a}`\nVersion: Minecraft {v} ({loader})\nMinecraft → Multiplayer → Add Server → paste the address.")
+        .replace("{n}", &server.label()).replace("{s}", state_line).replace("{a}", &join_address(&cfg.join_host, entry.port)).replace("{v}", &entry.mc_version).replace("{loader}", loader)
 }
 
 pub async fn handle_interaction(state: AppState, api_base: String, interaction: Value) {
@@ -775,6 +898,10 @@ pub async fn handle_interaction(state: AppState, api_base: String, interaction: 
                         (true, None) => pick(l, "🟡 **{n}** est démarré (joueurs : indisponible, démarrage en cours ?).", "🟡 **{n}** is running (players unavailable, still starting?).").replace("{n}", &server.label()),
                         (false, _) => pick(l, "⚫ **{n}** est arrêté.", "⚫ **{n}** is stopped.").replace("{n}", &server.label()),
                     };
+                    respond(&http, &api_base, &interaction, &line, false).await;
+                }
+                "join" => {
+                    let line = join_message(&state, &cfg, &server, l).await;
                     respond(&http, &api_base, &interaction, &line, false).await;
                 }
                 "players" => {
@@ -922,6 +1049,13 @@ pub async fn run_forever(state: AppState, gateway_url: String, api_base: String)
     }
 }
 
+/// (nombre de serveurs, nombre de serveurs en marche) pour les textes d'activité.
+async fn presence_counts(state: &AppState) -> (usize, usize) {
+    let servers = state.servers.read().await;
+    let runtime = state.runtime.read().await;
+    (servers.len(), servers.keys().filter(|id| runtime.get(id).map(|r| r.running).unwrap_or(false)).count())
+}
+
 async fn run_session(state: &AppState, cfg: &DiscordConfig, gateway_url: &str, api_base: &str, session: &mut GatewaySession) -> anyhow::Result<SessionEnd> {
     let base = session.resume_url.clone().unwrap_or_else(|| gateway_url.to_string());
     let url = format!("{}/?v=10&encoding=json", base.trim_end_matches('/'));
@@ -938,14 +1072,19 @@ async fn run_session(state: &AppState, cfg: &DiscordConfig, gateway_url: &str, a
 
     // 2. Identify ou Resume
     let can_resume = session.session_id.is_some() && session.resume_url.is_some();
+    let identify_presence = { let (n, on) = presence_counts(state).await; presence_payload(cfg, n, on) };
     let first = if can_resume {
         json!({ "op": 6, "d": { "token": cfg.bot_token, "session_id": session.session_id, "seq": session.seq } })
     } else {
-        json!({ "op": 2, "d": { "token": cfg.bot_token, "intents": if status().message_content_missing { INTENTS_BASIC } else { INTENTS_FULL }, "properties": { "os": std::env::consts::OS, "browser": "mcmanager", "device": "mcmanager" } } })
+        json!({ "op": 2, "d": { "token": cfg.bot_token, "intents": if status().message_content_missing { INTENTS_BASIC } else { INTENTS_FULL }, "properties": { "os": std::env::consts::OS, "browser": "mcmanager", "device": "mcmanager" }, "presence": identify_presence } })
     };
     sink.send(WsMessage::Text(first.to_string())).await?;
 
     let signal = restart_signal(&state.data_dir);
+    let presence_sig = presence_signal(&state.data_dir);
+    let mut live_cfg = cfg.clone();
+    // Le texte d'activité peut contenir {online} / {servers} : on le rafraîchit chaque minute.
+    let mut presence_tick = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(60), Duration::from_secs(60));
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + interval / 2, interval);
     let mut acked = true;
 
@@ -954,6 +1093,17 @@ async fn run_session(state: &AppState, cfg: &DiscordConfig, gateway_url: &str, a
             _ = signal.notified() => {
                 let _ = sink.send(WsMessage::Close(None)).await;
                 return Ok(SessionEnd::Reconfigure);
+            }
+            _ = presence_sig.notified() => {
+                live_cfg = load_config(&state.data_dir).await;
+                let (n, on) = presence_counts(state).await;
+                sink.send(WsMessage::Text(json!({ "op": 3, "d": presence_payload(&live_cfg, n, on) }).to_string())).await?;
+            }
+            _ = presence_tick.tick() => {
+                if live_cfg.activity_text.contains('{') {
+                    let (n, on) = presence_counts(state).await;
+                    sink.send(WsMessage::Text(json!({ "op": 3, "d": presence_payload(&live_cfg, n, on) }).to_string())).await?;
+                }
             }
             _ = heartbeat.tick() => {
                 if !acked {
@@ -1251,9 +1401,9 @@ mod tests {
         assert_eq!(cmd["description_localizations"]["fr"], "Gérer les serveurs Minecraft (MCManager)");
         let subs = cmd["options"].as_array().unwrap();
         let names: Vec<&str> = subs.iter().map(|s| s["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["list", "status", "players", "start", "stop", "restart", "command"]);
+        assert_eq!(names, ["list", "status", "players", "join", "start", "stop", "restart", "command"]);
         let fr: Vec<&str> = subs.iter().map(|s| s["name_localizations"]["fr"].as_str().unwrap()).collect();
-        assert_eq!(fr, ["liste", "statut", "joueurs", "demarrer", "arreter", "redemarrer", "commande"]);
+        assert_eq!(fr, ["liste", "statut", "joueurs", "rejoindre", "demarrer", "arreter", "redemarrer", "commande"]);
         for s in subs {
             for n in [s["name"].as_str().unwrap(), s["name_localizations"]["fr"].as_str().unwrap()] {
                 assert!(n.chars().all(|c| c.is_ascii_lowercase()), "noms sans accent ni majuscule : {n}");
@@ -1520,6 +1670,121 @@ mod tests {
         assert_eq!(st.bot_user_id.as_deref(), Some("BOT1"));
         assert!(st.message_content_missing, "l'interface doit pouvoir expliquer pourquoi console/chat sont indisponibles");
         task.abort();
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    fn cfg(p: &str, t: &str, text: &str) -> DiscordConfig {
+        DiscordConfig { bot_presence: p.into(), activity_type: t.into(), activity_text: text.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn validates_presence_input() {
+        assert_eq!(validate_presence(" DND ", "Playing", "  survie  ").unwrap(), ("dnd".into(), "playing".into(), "survie".into()));
+        assert_eq!(validate_presence("online", "playing", "").unwrap().1, "none", "sans texte, pas d'activité");
+        assert!(validate_presence("absent", "none", "").is_err());
+        assert!(validate_presence("online", "streaming", "x").is_err());
+        assert!(validate_presence("online", "playing", &"x".repeat(129)).is_err());
+        assert_eq!(validate_presence("idle", "custom", "a\nb\u{7}c").unwrap().2, "abc", "caractères de contrôle retirés");
+    }
+
+    #[test]
+    fn builds_gateway_presence_payloads() {
+        let p = presence_payload(&cfg("idle", "watching", "{online}/{servers} serveurs"), 5, 2);
+        assert_eq!(p["status"], "idle");
+        assert_eq!(p["activities"][0], json!({ "name": "2/5 serveurs", "type": 3 }));
+        assert_eq!(presence_payload(&cfg("online", "playing", "x"), 0, 0)["activities"][0]["type"], 0);
+        assert_eq!(presence_payload(&cfg("online", "listening", "x"), 0, 0)["activities"][0]["type"], 2);
+        assert_eq!(presence_payload(&cfg("online", "competing", "x"), 0, 0)["activities"][0]["type"], 5);
+        let custom = presence_payload(&cfg("dnd", "custom", "Bienvenue"), 0, 0);
+        assert_eq!(custom["activities"][0], json!({ "name": "Custom Status", "type": 4, "state": "Bienvenue" }));
+        assert!(presence_payload(&cfg("invisible", "none", "ignoré"), 0, 0)["activities"].as_array().unwrap().is_empty());
+        assert_eq!(presence_payload(&DiscordConfig::default(), 0, 0)["status"], "online", "statut vide = en ligne");
+    }
+
+    #[test]
+    fn invite_link_comes_from_the_token_without_network() {
+        use base64::Engine;
+        let id = "1234567890123456789";
+        let token = format!("{}.GabcDE.fakesecretpart", base64::engine::general_purpose::STANDARD_NO_PAD.encode(id));
+        let url = invite_url_from_token(&token).expect("lien");
+        assert!(url.contains(&format!("client_id={id}")) && url.contains("applications.commands"));
+        assert!(!url.contains("fakesecretpart"), "le secret du token ne doit jamais figurer dans le lien");
+        for bad in ["", "pas un token", "abc.def.ghi", "MTIz.x.y"] {
+            assert!(invite_url_from_token(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn join_address_and_host_validation() {
+        assert_eq!(join_address("play.example.com", 25565), "play.example.com");
+        assert_eq!(join_address(" play.example.com ", 25570), "play.example.com:25570");
+        assert_eq!(join_address("", 25565), ":25565");
+        for ok in ["", "play.example.com", "203.0.113.7", "mc-1.example.org"] {
+            assert!(valid_join_host(ok), "{ok}");
+        }
+        for bad in ["http://x.com", "play example.com", ".example.com", "a/b", "x.com/", "é.com"] {
+            assert!(!valid_join_host(bad), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn saving_presence_keeps_the_rest_of_the_config_and_secrets() {
+        let dir = std::env::temp_dir().join(format!("mcm-presence-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let mut c = testutil::base_cfg();
+        c.webhook_url = "https://discord.com/api/webhooks/1/abc".into();
+        save_config(&dir, &c).await.unwrap();
+        save_presence(&dir, "dnd", "playing", "MCManager").await.unwrap();
+        let back = load_config(&dir).await;
+        assert_eq!((back.bot_presence.as_str(), back.activity_type.as_str(), back.activity_text.as_str()), ("dnd", "playing", "MCManager"));
+        assert_eq!(back.bot_token, "tkn-secret");
+        assert_eq!(back.webhook_url, "https://discord.com/api/webhooks/1/abc");
+        assert_eq!(back.guild_id, "G1");
+        assert!(save_presence(&dir, "nope", "none", "").await.is_err());
+        assert_eq!(load_config(&dir).await.bot_presence, "dnd", "un statut invalide ne change rien");
+        let raw = tokio::fs::read_to_string(config_path(&dir)).await.unwrap();
+        assert!(!raw.contains("tkn-secret") && !raw.contains("webhooks/1/abc"), "secrets chiffrés sur disque");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn join_command_gives_the_address_and_respects_the_guild_rules() {
+        use testutil::*;
+        let (rest, rec) = mock_rest().await;
+        let (state, dir) = temp_state("join").await;
+        let srv_dir = dir.join("srv");
+        tokio::fs::create_dir_all(&srv_dir).await.unwrap();
+        let sid = Uuid::new_v4();
+        let mut entry = sample_server(sid, "Survie", &srv_dir);
+        entry.port = 25570;
+        state.servers.write().await.insert(sid, entry);
+        let opts = json!([{ "name": "server", "type": 3, "value": sid.to_string() }]);
+        let sub = json!([{ "name": "join", "type": 1, "options": opts }]);
+        let last = |rec: &Recorder| rec.find("/interactions/I1/TOK1/callback").pop().expect("callback");
+
+        // Adresse non configurée : le bot le dit au lieu d'inventer une adresse.
+        save_config(&dir, &base_cfg()).await.unwrap();
+        handle_interaction(state.clone(), rest.clone(), interaction(2, "G1", "U9", &[], "fr", sub.clone())).await;
+        let c = last(&rec);
+        assert!(c["data"]["content"].as_str().unwrap().contains("pas configurée"), "{c}");
+        assert!(c["data"]["content"].as_str().unwrap().contains("25570"));
+
+        // Adresse configurée : affichée avec le port non standard, dans la langue du client.
+        let mut cfg = base_cfg();
+        cfg.join_host = "play.example.com".into();
+        save_config(&dir, &cfg).await.unwrap();
+        handle_interaction(state.clone(), rest.clone(), interaction(2, "G1", "U9", &[], "en-US", sub.clone())).await;
+        let text = last(&rec)["data"]["content"].as_str().unwrap().to_string();
+        assert!(text.contains("`play.example.com:25570`") && text.contains("Add Server") && text.contains("stopped"), "{text}");
+
+        // Mauvaise guilde : refusé, aucune adresse divulguée.
+        handle_interaction(state.clone(), rest.clone(), interaction(2, "AUTRE", "U9", &[], "fr", sub)).await;
+        assert!(!last(&rec)["data"]["content"].as_str().unwrap().contains("play.example.com"));
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }

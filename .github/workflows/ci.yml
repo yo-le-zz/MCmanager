@@ -46,6 +46,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.75.0
       - run: cargo check --locked --lib --bins
 
+  # Vrai binaire + Firefox headless : erreurs JavaScript, thème, fond animé, Discord, menu mobile, double authentification.
+  browser:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: browser-${{ hashFiles('Cargo.lock') }}
+      - run: cargo build --bins
+      - run: pip install selenium
+      - run: python3 scripts/browser-test.py --binary target/debug/mcmanager --firefox "$(which firefox)" --geckodriver "$(which geckodriver)"
+
   ui-and-scripts:
     runs-on: ubuntu-22.04
     steps:

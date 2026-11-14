@@ -134,7 +134,17 @@ pub async fn apply_update(client: &reqwest::Client, download_url: &str) -> Resul
             kind.note().unwrap_or("La mise a jour automatique n'est pas disponible pour ce type d'installation.")
         );
     }
-    let bytes = client.get(download_url).send().await?.error_for_status()?.bytes().await?;
+    let bytes = download_limited(client, download_url, MAX_DOWNLOAD).await?;
+    // Empreinte SHA-256 publiée avec la release (fichier SHA256SUMS) : une archive corrompue ou altérée est refusée
+    // avant que le moindre fichier de l'installation ne soit touché.
+    match fetch_expected_sha256(client, download_url).await {
+        Some(expected) => {
+            if !sha256_matches(&bytes, &expected) {
+                anyhow::bail!("l'empreinte SHA-256 de l'archive telechargee ne correspond pas a celle de la release : mise a jour annulee");
+            }
+        }
+        None => tracing::warn!("[update] pas de SHA256SUMS pour cette release : empreinte non verifiee"),
+    }
     let current_exe = std::env::current_exe().context("impossible de localiser l'executable actuel")?;
     let exe_dir = current_exe.parent().context("dossier de l'executable introuvable")?.to_path_buf();
     // Le dossier web de l'installation portable est à côté de l'exécutable ; sinon on n'y touche pas.
@@ -142,6 +152,50 @@ pub async fn apply_update(client: &reqwest::Client, download_url: &str) -> Resul
     let is_zip = download_url.ends_with(".zip");
     tokio::task::spawn_blocking(move || apply_archive(&bytes, is_zip, &exe_dir, web_dir.as_deref())).await.context("tache de mise a jour interrompue")??;
     Ok(())
+}
+
+/// Taille maximale d'une archive de mise à jour (la release la plus lourde fait ~30 Mo).
+const MAX_DOWNLOAD: usize = 200 * 1024 * 1024;
+
+/// Télécharge en flux et s'arrête dès que la limite est dépassée (pas de téléchargement sans fin en mémoire).
+async fn download_limited(client: &reqwest::Client, url: &str, max: usize) -> Result<Vec<u8>> {
+    use futures_util::StreamExt;
+    let resp = client.get(url).send().await?.error_for_status()?;
+    if resp.content_length().map(|n| n as usize > max).unwrap_or(false) {
+        anyhow::bail!("archive de mise a jour trop volumineuse");
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if out.len() + chunk.len() > max {
+            anyhow::bail!("archive de mise a jour trop volumineuse");
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// Empreinte attendue pour l'archive `download_url`, lue dans le `SHA256SUMS` de la même release.
+async fn fetch_expected_sha256(client: &reqwest::Client, download_url: &str) -> Option<String> {
+    let (dir, name) = download_url.rsplit_once('/')?;
+    let text = client.get(format!("{dir}/SHA256SUMS")).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
+    find_checksum(&text, name)
+}
+
+/// Cherche `name` dans un fichier au format `sha256sum` (`<hex>  <chemin>`) ; seul le nom de fichier compte.
+pub fn find_checksum(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let (hash, path) = l.split_once(char::is_whitespace)?;
+        let file = path.trim().trim_start_matches('*').rsplit('/').next()?;
+        (file == name && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+pub fn sha256_matches(bytes: &[u8], expected_hex: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let got = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    got.eq_ignore_ascii_case(expected_hex.trim())
 }
 
 fn exe_names() -> [&'static str; 2] {
@@ -356,6 +410,46 @@ mod tests {
     fn platform_suffix_matches_release_asset_names() {
         let s = asset_suffix_for_platform();
         assert!(["linux-x86_64.tar.gz", "linux-aarch64.tar.gz", "macos-arm64.tar.gz", "macos-x86_64.tar.gz", "windows-x86_64.zip", "windows-arm64.zip"].contains(&s));
+    }
+
+    #[test]
+    fn checksums_are_found_by_file_name_and_verified() {
+        let sums = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  linux-x86_64-artifacts/autre.tar.gz\n\
+                    9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08  linux-x86_64-artifacts/mcmanager-9.9.9-linux-x86_64.tar.gz\n\
+                    pas une ligne valide\n";
+        let h = find_checksum(sums, "mcmanager-9.9.9-linux-x86_64.tar.gz").expect("empreinte");
+        assert_eq!(h, "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08");
+        assert!(sha256_matches(b"test", &h), "sha256(\"test\")");
+        assert!(sha256_matches(b"test", &h.to_uppercase()));
+        assert!(!sha256_matches(b"test altere", &h));
+        assert!(find_checksum(sums, "absent.tar.gz").is_none());
+        assert!(find_checksum("zz  mcmanager.tar.gz", "mcmanager.tar.gz").is_none(), "empreinte mal formée ignorée");
+    }
+
+    #[tokio::test]
+    async fn download_is_capped_and_checksum_fetched_from_the_same_release() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let body: Vec<u8> = if req.starts_with("GET /rel/SHA256SUMS") { b"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08  a/b.tar.gz\n".to_vec() } else if req.starts_with("GET /rel/b.tar.gz") { b"test".to_vec() } else { vec![b'x'; 5000] };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await;
+                    let _ = s.write_all(&body).await;
+                });
+            }
+        });
+        let c = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/rel/b.tar.gz");
+        assert_eq!(download_limited(&c, &url, 100).await.unwrap(), b"test");
+        assert!(download_limited(&c, &format!("http://127.0.0.1:{port}/gros"), 1000).await.is_err(), "limite de taille");
+        let expected = fetch_expected_sha256(&c, &url).await.expect("SHA256SUMS");
+        assert!(sha256_matches(b"test", &expected));
     }
 
     #[test]

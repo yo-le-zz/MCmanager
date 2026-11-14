@@ -14,13 +14,18 @@
 </head>
 <body>
 <canvas id="bg-canvas" aria-hidden="true"></canvas>
+<header class="topbar" id="topbar">
+  <button class="topbar-btn" id="menu-toggle" aria-label="Menu" aria-controls="sidebar" aria-expanded="false"><svg class="i" aria-hidden="true"><use href="assets/icons.svg#menu"/></svg></button>
+  <span class="topbar-title">MCManager</span>
+</header>
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
 <div id="app">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <img src="assets/icon-256.png" alt="MCManager" class="brand-icon-img">
       <div>
         <div class="brand-title">MCManager</div>
-        <div class="brand-version" id="app-version">v1.1.1</div>
+        <div class="brand-version" id="app-version">v1.1.2</div>
       </div>
     </div>
     <nav id="nav">

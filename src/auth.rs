@@ -73,6 +73,21 @@ pub struct User {
     /// Niveaux par serveur : remplacent `default_level` (pour monter ou descendre).
     #[serde(default)]
     pub servers: HashMap<Uuid, Level>,
+    /// Double authentification (TOTP). Le secret est chiffré sur disque avec la clé de l'instance.
+    #[serde(default)]
+    totp: Option<TotpState>,
+    /// Secret généré par « configurer » mais pas encore confirmé par un premier code valide.
+    #[serde(default)]
+    pending_totp: Option<crate::secrets::EncryptedBlob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TotpState {
+    secret: crate::secrets::EncryptedBlob,
+    /// Dernier compteur accepté : refuse le rejeu d'un code déjà utilisé.
+    last_counter: u64,
+    /// Empreintes SHA-256 des codes de secours restants (usage unique).
+    recovery: Vec<String>,
 }
 
 fn legacy_default_level() -> Option<Level> {
@@ -130,6 +145,10 @@ fn users_path(data_dir: &Path) -> PathBuf {
     data_dir.join("users.json")
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
 fn sha256_hex(s: &str) -> String {
     Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -163,6 +182,8 @@ fn make_user(username: &str, password: &str, admin: bool) -> Result<User> {
         // Un nouveau compte n'a accès à aucun serveur tant qu'on ne lui en donne pas.
         default_level: None,
         servers: HashMap::new(),
+        totp: None,
+        pending_totp: None,
     })
 }
 
@@ -257,6 +278,8 @@ impl AuthState {
             new_user.created_at = old.created_at;
             new_user.default_level = old.default_level;
             new_user.servers = old.servers.clone();
+            // Changer de mot de passe ne doit pas désactiver la double authentification.
+            new_user.totp = old.totp.clone();
         }
         users.retain(|u| u.username != username);
         users.push(new_user);
@@ -279,6 +302,86 @@ impl AuthState {
         let snapshot = users.clone();
         drop(users);
         self.persist(&snapshot).await
+    }
+
+    /// Le compte a-t-il la double authentification activée ?
+    pub async fn totp_enabled(&self, username: &str) -> bool {
+        self.users.read().await.iter().find(|u| u.username == username).map(|u| u.totp.is_some()).unwrap_or(false)
+    }
+
+    /// Prépare un secret (non actif tant qu'un code valide n'a pas été saisi) : renvoie le secret et le lien otpauth.
+    pub async fn totp_setup(&self, username: &str) -> Result<(String, String)> {
+        let key = crate::secrets::load_or_create_key(&self.data_dir).await?;
+        let secret = crate::totp::generate_secret();
+        let blob = crate::secrets::encrypt(&key, &secret)?;
+        let mut users = self.users.write().await;
+        let u = users.iter_mut().find(|u| u.username == username).ok_or_else(|| anyhow::anyhow!("utilisateur introuvable"))?;
+        if u.totp.is_some() {
+            anyhow::bail!("la double authentification est deja activee : desactivez-la d'abord");
+        }
+        u.pending_totp = Some(blob);
+        let snapshot = users.clone();
+        drop(users);
+        self.persist(&snapshot).await?;
+        let uri = crate::totp::otpauth_uri(username, "MCManager", &secret);
+        Ok((secret, uri))
+    }
+
+    /// Confirme avec un premier code, active et renvoie les codes de secours (affichés une seule fois).
+    pub async fn totp_enable(&self, username: &str, code: &str) -> Result<Vec<String>> {
+        let key = crate::secrets::load_or_create_key(&self.data_dir).await?;
+        let mut users = self.users.write().await;
+        let u = users.iter_mut().find(|u| u.username == username).ok_or_else(|| anyhow::anyhow!("utilisateur introuvable"))?;
+        let pending = u.pending_totp.clone().ok_or_else(|| anyhow::anyhow!("aucune configuration en cours : cliquez d'abord sur « Configurer »"))?;
+        let secret = crate::secrets::decrypt(&key, &pending)?;
+        let counter = crate::totp::verify(&secret, code, unix_now(), 0).ok_or_else(|| anyhow::anyhow!("code incorrect : verifiez l'heure de votre telephone et reessayez"))?;
+        let codes = crate::totp::generate_recovery_codes(8);
+        u.totp = Some(TotpState { secret: pending, last_counter: counter, recovery: codes.iter().map(|c| sha256_hex(&crate::totp::normalize_recovery(c))).collect() });
+        u.pending_totp = None;
+        let snapshot = users.clone();
+        drop(users);
+        self.persist(&snapshot).await?;
+        Ok(codes)
+    }
+
+    /// Vérifie le second facteur : code à 6 chiffres (sans rejeu) ou code de secours (consommé). Persiste l'état.
+    async fn check_second_factor(&self, username: &str, input: &str) -> bool {
+        let Ok(key) = crate::secrets::load_or_create_key(&self.data_dir).await else { return false };
+        let mut users = self.users.write().await;
+        let Some(state) = users.iter_mut().find(|u| u.username == username).and_then(|u| u.totp.as_mut()) else { return false };
+        let ok = match crate::secrets::decrypt(&key, &state.secret).ok().and_then(|sec| crate::totp::verify(&sec, input, unix_now(), state.last_counter)) {
+            Some(counter) => {
+                state.last_counter = counter;
+                true
+            }
+            None => {
+                let h = sha256_hex(&crate::totp::normalize_recovery(input));
+                match state.recovery.iter().position(|r| *r == h) {
+                    Some(i) if crate::totp::normalize_recovery(input).len() == 10 => {
+                        state.recovery.remove(i);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+        };
+        if ok {
+            let snapshot = users.clone();
+            drop(users);
+            let _ = self.persist(&snapshot).await;
+        }
+        ok
+    }
+
+    /// Désactive la double authentification d'un compte (après vérification, ou par un administrateur).
+    pub async fn totp_disable(&self, username: &str) -> Result<bool> {
+        let mut users = self.users.write().await;
+        let u = users.iter_mut().find(|u| u.username == username).ok_or_else(|| anyhow::anyhow!("utilisateur introuvable"))?;
+        let had = u.totp.take().is_some() | u.pending_totp.take().is_some();
+        let snapshot = users.clone();
+        drop(users);
+        self.persist(&snapshot).await?;
+        Ok(had)
     }
 
     pub async fn remove_user(&self, username: &str) -> Result<bool> {
@@ -478,6 +581,10 @@ pub fn router(auth: Arc<AuthState>) -> Router {
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
         .route("/auth/password", post(change_password))
+        .route("/auth/totp/setup", post(totp_setup))
+        .route("/auth/totp/enable", post(totp_enable))
+        .route("/auth/totp/disable", post(totp_disable))
+        .route("/auth/users/:name/totp", delete(admin_reset_totp))
         .route("/auth/sessions", get(list_sessions))
         .route("/auth/sessions/:id", delete(revoke_session))
         .route("/auth/users", get(list_users).post(create_user))
@@ -490,6 +597,9 @@ pub fn router(auth: Arc<AuthState>) -> Router {
 struct LoginBody {
     username: String,
     password: String,
+    /// Code à 6 chiffres (ou code de secours) quand le compte a la double authentification.
+    #[serde(default)]
+    code: String,
 }
 
 async fn login(State(auth): State<Arc<AuthState>>, peer: Option<ConnectInfo<SocketAddr>>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
@@ -516,9 +626,20 @@ async fn login(State(auth): State<Arc<AuthState>>, peer: Option<ConnectInfo<Sock
         audit::record(&auth.data_dir, Entry::new("auth", &sanitize_for_log(&body.username), &ip).detail("connexion refusée")).await;
         return err(StatusCode::UNAUTHORIZED, "Identifiants incorrects.");
     };
+    if user.totp.is_some() {
+        if body.code.trim().is_empty() {
+            // Mot de passe correct mais second facteur à fournir : ce n'est pas un échec, aucune session n'est créée.
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Code de vérification requis.", "totp_required": true }))).into_response();
+        }
+        if !auth.check_second_factor(&user.username, &body.code).await {
+            auth.record_failure(&ip).await;
+            audit::record(&auth.data_dir, Entry::new("auth", &user.username, &ip).detail("connexion refusée : second facteur incorrect")).await;
+            return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Code de vérification incorrect.", "totp_required": true }))).into_response();
+        }
+    }
     let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
     let token = auth.create_session(&user.username, &ip, ua).await;
-    audit::record(&auth.data_dir, Entry::new("auth", &user.username, &ip).detail("connexion réussie")).await;
+    audit::record(&auth.data_dir, Entry::new("auth", &user.username, &ip).detail(if user.totp.is_some() { "connexion réussie (double authentification)" } else { "connexion réussie" })).await;
     let cookie = format!(
         "{COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
         SESSION_ABSOLUTE.num_seconds(),
@@ -544,7 +665,7 @@ async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Respo
 
 async fn me(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Response {
     match auth.session_from_headers(&headers).await {
-        Some((_, u)) => Json(json!({ "auth_required": true, "username": u.username, "admin": u.admin, "default_level": u.default_level, "servers": u.servers })).into_response(),
+        Some((_, u)) => Json(json!({ "auth_required": true, "username": u.username, "admin": u.admin, "default_level": u.default_level, "servers": u.servers, "totp_enabled": u.totp.is_some() })).into_response(),
         None => err(StatusCode::UNAUTHORIZED, "Connexion requise."),
     }
 }
@@ -570,6 +691,78 @@ async fn change_password(State(auth): State<Arc<AuthState>>, headers: HeaderMap,
             Json(json!({ "ok": true, "relogin": true })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+async fn totp_setup(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Response {
+    if !origin_ok(&headers) {
+        return err(StatusCode::FORBIDDEN, "Origine refusee.");
+    }
+    let Some((_, user)) = auth.session_from_headers(&headers).await else { return err(StatusCode::UNAUTHORIZED, "Connexion requise.") };
+    match auth.totp_setup(&user.username).await {
+        Ok((secret, uri)) => Json(json!({ "secret": secret, "otpauth_uri": uri })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct TotpCodeBody {
+    code: String,
+}
+
+async fn totp_enable(State(auth): State<Arc<AuthState>>, headers: HeaderMap, Json(body): Json<TotpCodeBody>) -> Response {
+    if !origin_ok(&headers) {
+        return err(StatusCode::FORBIDDEN, "Origine refusee.");
+    }
+    let Some((_, user)) = auth.session_from_headers(&headers).await else { return err(StatusCode::UNAUTHORIZED, "Connexion requise.") };
+    match auth.totp_enable(&user.username, &body.code).await {
+        Ok(codes) => {
+            audit::record(&auth.data_dir, Entry::new("auth", &user.username, "").detail("double authentification activée")).await;
+            Json(json!({ "ok": true, "recovery_codes": codes })).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct TotpDisableBody {
+    password: String,
+    code: String,
+}
+
+/// Désactiver exige le mot de passe **et** un code (ou un code de secours) : une session volée ne suffit pas.
+async fn totp_disable(State(auth): State<Arc<AuthState>>, headers: HeaderMap, Json(body): Json<TotpDisableBody>) -> Response {
+    if !origin_ok(&headers) {
+        return err(StatusCode::FORBIDDEN, "Origine refusee.");
+    }
+    let Some((_, user)) = auth.session_from_headers(&headers).await else { return err(StatusCode::UNAUTHORIZED, "Connexion requise.") };
+    if !verify_password(&user, &body.password) || !auth.check_second_factor(&user.username, &body.code).await {
+        return err(StatusCode::UNAUTHORIZED, "Mot de passe ou code incorrect.");
+    }
+    match auth.totp_disable(&user.username).await {
+        Ok(_) => {
+            audit::record(&auth.data_dir, Entry::new("auth", &user.username, "").detail("double authentification désactivée")).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// Un administrateur peut réinitialiser la double authentification d'un compte (téléphone perdu, plus de codes de secours).
+async fn admin_reset_totp(State(auth): State<Arc<AuthState>>, headers: HeaderMap, AxPath(name): AxPath<String>) -> Response {
+    if !origin_ok(&headers) {
+        return err(StatusCode::FORBIDDEN, "Origine refusee.");
+    }
+    let admin = match require_admin(&auth, &headers).await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match auth.totp_disable(&name).await {
+        Ok(_) => {
+            audit::record(&auth.data_dir, Entry::new("auth", &admin.username, "").detail(format!("double authentification de « {} » réinitialisée", sanitize_for_log(&name)))).await;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => err(StatusCode::NOT_FOUND, e.to_string()),
     }
 }
 
@@ -623,7 +816,7 @@ async fn list_users(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> R
     if let Err(r) = require_admin(&auth, &headers).await {
         return r;
     }
-    let users: Vec<_> = auth.list_users().await.into_iter().map(|u| json!({ "username": u.username, "admin": u.admin, "created_at": u.created_at, "default_level": u.default_level, "servers": u.servers })).collect();
+    let users: Vec<_> = auth.list_users().await.into_iter().map(|u| json!({ "username": u.username, "admin": u.admin, "created_at": u.created_at, "default_level": u.default_level, "totp_enabled": u.totp.is_some(), "servers": u.servers })).collect();
     Json(users).into_response()
 }
 

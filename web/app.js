@@ -140,6 +140,7 @@ function showLogin() {
       <div class="subtitle">Connectez-vous pour accéder à vos serveurs.</div>
       <div class="form-row"><label>Utilisateur</label><input id="lg-user" autocomplete="username" autofocus></div>
       <div class="form-row"><label>Mot de passe</label><input id="lg-pass" type="password" autocomplete="current-password"></div>
+      <div class="form-row hidden" id="lg-code-row"><label>Code de vérification <span class="meta">(application d'authentification, ou code de secours)</span></label><input id="lg-code" inputmode="numeric" autocomplete="one-time-code" maxlength="20"></div>
       <button class="btn-blue" id="lg-submit" style="width:100%">Se connecter</button>
       <div id="lg-error" class="login-error"></div>
     </div>`;
@@ -149,14 +150,17 @@ function showLogin() {
     const res = await fetch("/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: $("#lg-user").value.trim(), password: $("#lg-pass").value }),
+      body: JSON.stringify({ username: $("#lg-user").value.trim(), password: $("#lg-pass").value, code: $("#lg-code").value.trim() }),
     });
     const data = await res.json().catch(() => ({}));
-    if (res.ok) location.reload();
-    else $("#lg-error").textContent = data.error || "Échec de la connexion.";
+    if (res.ok) { location.reload(); return; }
+    // Mot de passe juste mais double authentification activée : on demande le code.
+    if (data.totp_required) { $("#lg-code-row").classList.remove("hidden"); $("#lg-code").focus(); }
+    $("#lg-error").textContent = data.error || "Échec de la connexion.";
   };
   $("#lg-submit").addEventListener("click", submit);
   $("#lg-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+  $("#lg-code").addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
 }
 
 function currentServer() {
@@ -165,7 +169,21 @@ function currentServer() {
 
 // ───────────────────────── navigation ─────────────────────────
 
+// Menu mobile : la barre latérale devient un tiroir ouvert par le bouton de la barre du haut.
+function setupMobileMenu() {
+  const toggle = $("#menu-toggle");
+  if (!toggle) return;
+  const set = (open) => { document.body.classList.toggle("menu-open", open); toggle.setAttribute("aria-expanded", String(open)); };
+  toggle.addEventListener("click", () => set(!document.body.classList.contains("menu-open")));
+  $("#sidebar-backdrop").addEventListener("click", () => set(false));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") set(false); });
+  // Choisir une vue referme le tiroir ; repasser en grand écran aussi.
+  $("#sidebar").addEventListener("click", (e) => { if (e.target.closest(".nav-item")) set(false); });
+  window.matchMedia("(min-width: 861px)").addEventListener("change", (e) => { if (e.matches) set(false); });
+}
+
 function setupNav() {
+  setupMobileMenu();
   $$(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => {
       if (btn.dataset.needsServer && !state.currentServerId) {
@@ -342,6 +360,30 @@ async function render() {
 
 // ───────────────────────── dashboard ─────────────────────────
 
+// Alertes : ce qui demande l'attention de l'administrateur (disque, sauvegardes, EULA, bot Discord, sécurité du compte).
+const ALERT_DISMISS_KEY = "mcm-alerts-dismissed";
+function dismissedAlerts() { try { return JSON.parse(localStorage.getItem(ALERT_DISMISS_KEY) || "[]"); } catch { return []; } }
+
+async function loadAlerts() {
+  let list = [];
+  try { list = await api("/alerts"); } catch { /* alertes indisponibles : le tableau de bord s'affiche quand même */ }
+  // Conseil de sécurité propre au compte connecté : un administrateur sans double authentification.
+  if (state.me?.admin && !state.me.totp_enabled) {
+    list.push({ id: "totp", level: "info", fr: "Votre compte administrateur n'a pas la double authentification (Utilisateurs → Double authentification).", en: "Your administrator account has no two-factor authentication (Users → Two-factor authentication)." });
+  }
+  const hidden = dismissedAlerts();
+  return list.filter((a) => a.level === "critical" || !hidden.includes(a.id));
+}
+
+function alertHtml(a) {
+  const color = a.level === "critical" ? "var(--red)" : a.level === "warning" ? "var(--yellow)" : "var(--blue)";
+  return `<div class="card" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-left:3px solid ${color}" role="alert">
+    ${ico(a.level === "info" ? "shield-check" : "triangle-alert")}
+    <span style="flex:1">${escapeHtml(state.lang === "fr" ? a.fr : a.en)}</span>
+    ${a.level === "critical" ? "" : `<button class="btn-ghost btn-sm" data-dismiss-alert="${escapeHtml(a.id)}">${dcT("Hide", "Masquer")}</button>`}
+  </div>`;
+}
+
 async function renderDashboard() {
   const content = $("#content");
   await refreshServerList();
@@ -354,9 +396,11 @@ async function renderDashboard() {
     }
   }));
 
+  const alerts = await loadAlerts();
   content.innerHTML = `
     <h1>${t('view.dashboard')}</h1>
     <div class="subtitle">Vue d'ensemble de tous vos serveurs Minecraft.</div>
+    ${alerts.length ? `<div id="alert-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">${alerts.map(alertHtml).join("")}</div>` : ""}
     <div class="grid">
       <div class="stat-card"><div class="label">Serveurs</div><div class="value">${state.servers.length}</div></div>
       <div class="stat-card"><div class="label">En ligne</div><div class="value">${rows.filter(r => r.status?.running).length}</div></div>
@@ -398,6 +442,12 @@ async function renderDashboard() {
     await api(`/servers/${b.dataset.stop}/stop`, { method: "POST" });
     toast("Arrêt demandé.", "success");
     renderDashboard();
+  }));
+  $$("[data-dismiss-alert]").forEach((b) => b.addEventListener("click", () => {
+    const hidden = dismissedAlerts();
+    hidden.push(b.dataset.dismissAlert);
+    try { localStorage.setItem(ALERT_DISMISS_KEY, JSON.stringify(hidden.slice(-100))); } catch { /* stockage indisponible */ }
+    b.closest(".card").remove();
   }));
 }
 
@@ -1922,11 +1972,24 @@ async function renderUsers() {
       <button class="btn-blue" id="pw-save">Changer (déconnecte tous mes appareils)</button>
     </div>
 
+    ${state.me ? `<div class="card" id="totp-card">
+      <h2>${ico("shield-check")} ${dcT("Two-factor authentication", "Double authentification")}</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px">${dcT("A 6-digit code from an authenticator app (Aegis, 2FAS, Google Authenticator...) is asked after your password. Recommended for administrators, especially when MCManager is reachable from the Internet.", "Un code à 6 chiffres d'une application d'authentification (Aegis, 2FAS, Google Authenticator...) est demandé après votre mot de passe. Recommandé pour les administrateurs, surtout si MCManager est joignable depuis Internet.")}</p>
+      ${state.me.totp_enabled ? `
+        <div style="margin-bottom:8px"><span class="badge badge-green">${dcT("Enabled", "Activée")}</span></div>
+        <div class="form-grid">
+          <div class="form-row"><label>${dcT("Password", "Mot de passe")}</label><input id="totp-off-pass" type="password" autocomplete="current-password"></div>
+          <div class="form-row"><label>${dcT("Current code or recovery code", "Code actuel ou code de secours")}</label><input id="totp-off-code" autocomplete="off"></div>
+        </div>
+        <button class="btn-red" id="totp-off">${dcT("Disable", "Désactiver")}</button>` : `
+        <div id="totp-setup-area"><button class="btn-blue" id="totp-start">${dcT("Set up", "Configurer")}</button></div>`}
+    </div>` : ""}
+
     ${amAdmin ? `
     <div class="card">
       <h2>Comptes</h2>
       <table><thead><tr><th>Utilisateur</th><th>Rôle</th><th>Créé le</th><th></th></tr></thead><tbody>
-        ${users.map((u) => `<tr><td><b>${escapeHtml(u.username)}</b></td><td>${u.admin ? "administrateur" : "utilisateur"}</td><td>${fmtDate(u.created_at)}</td><td style="white-space:nowrap">${u.admin ? "" : `<button class="btn-ghost" data-access="${escapeHtml(u.username)}">${ico("key-round")} ${dcT("Access", "Accès")}</button> `}<button class="btn-red" data-deluser="${escapeHtml(u.username)}">Supprimer</button></td></tr>`).join("")}
+        ${users.map((u) => `<tr><td><b>${escapeHtml(u.username)}</b></td><td>${u.admin ? "administrateur" : "utilisateur"}</td><td>${fmtDate(u.created_at)}</td><td style="white-space:nowrap">${u.totp_enabled ? `<button class="btn-ghost" data-reset-totp="${escapeHtml(u.username)}" title="${dcT("Reset two-factor authentication", "Réinitialiser la double authentification")}">${ico("shield-check")} 2FA ↺</button> ` : ""}${u.admin ? "" : `<button class="btn-ghost" data-access="${escapeHtml(u.username)}">${ico("key-round")} ${dcT("Access", "Accès")}</button> `}<button class="btn-red" data-deluser="${escapeHtml(u.username)}">Supprimer</button></td></tr>`).join("")}
       </tbody></table>
       <div id="access-editor"></div>
       <h2 style="margin-top:16px">Ajouter un compte</h2>
@@ -1951,6 +2014,34 @@ async function renderUsers() {
     await post("/auth/password", { current: $("#pw-cur").value, new: $("#pw-new").value });
     location.reload();
   });
+  $("#totp-start")?.addEventListener("click", async () => {
+    const d = await post("/auth/totp/setup", {});
+    const spaced = d.secret.replace(/(.{4})/g, "$1 ").trim();
+    $("#totp-setup-area").innerHTML = `
+      <p style="font-size:13px">${dcT("1. In your authenticator app choose “enter a setup key” (or open the link on your phone) and use:", "1. Dans votre application d'authentification, choisissez « saisir une clé » (ou ouvrez le lien sur votre téléphone) :")}</p>
+      <p><code style="font-size:15px;user-select:all">${escapeHtml(spaced)}</code> — <a href="${escapeHtml(d.otpauth_uri)}">${dcT("open in app", "ouvrir dans l'application")}</a></p>
+      <p style="font-size:13px">${dcT("2. Type the 6-digit code it shows:", "2. Saisissez le code à 6 chiffres affiché :")}</p>
+      <div style="display:flex;gap:8px"><input id="totp-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" style="width:140px"><button class="btn-green" id="totp-confirm">${dcT("Enable", "Activer")}</button></div>`;
+    $("#totp-confirm").addEventListener("click", async () => {
+      const r = await post("/auth/totp/enable", { code: $("#totp-code").value });
+      $("#totp-setup-area").innerHTML = `
+        <div class="badge badge-red" style="display:block;white-space:normal;margin-bottom:8px">${dcT("Save these recovery codes now: each works once and they will not be shown again.", "Notez ces codes de secours maintenant : chacun ne sert qu'une fois et ils ne seront plus affichés.")}</div>
+        <pre style="user-select:all;font-size:15px;line-height:1.6">${r.recovery_codes.map(escapeHtml).join("\n")}</pre>
+        <button class="btn-blue" id="totp-done">${dcT("I saved them", "C'est noté")}</button>`;
+      $("#totp-done").addEventListener("click", () => { state.me.totp_enabled = true; renderUsers(); });
+    });
+  });
+  $("#totp-off")?.addEventListener("click", async () => {
+    await post("/auth/totp/disable", { password: $("#totp-off-pass").value, code: $("#totp-off-code").value });
+    state.me.totp_enabled = false;
+    toast(dcT("Two-factor authentication disabled", "Double authentification désactivée"), "success");
+    renderUsers();
+  });
+  $$("[data-reset-totp]").forEach((b) => b.addEventListener("click", async () => {
+    if (!await confirmDialog(dcT(`Reset two-factor authentication of “${b.dataset.resetTotp}”?`, `Réinitialiser la double authentification de « ${b.dataset.resetTotp} » ?`))) return;
+    await post(`/auth/users/${encodeURIComponent(b.dataset.resetTotp)}/totp`, null, "DELETE");
+    renderUsers();
+  }));
   $("#nu-add")?.addEventListener("click", async () => {
     await post("/auth/users", { username: $("#nu-name").value.trim(), password: $("#nu-pass").value, admin: $("#nu-admin").checked, default_level: $("#nu-level").value || null });
     toast("Compte créé.", "success");
@@ -2610,6 +2701,25 @@ async function renderSettings(keepDetect = false) {
       </div>
       ${dcDetect.invite_url ? `<p style="font-size:12px;margin:8px 0">${ico("plus")} <a href="${escapeHtml(dcDetect.invite_url)}" target="_blank" rel="noopener">${dcT("Invite the bot to a Discord server (with the permissions needed to create channels)", "Inviter le bot sur un serveur Discord (avec les permissions pour créer les salons)")}</a></p>` : `<p style="color:var(--overlay0);font-size:12px;margin:6px 0">${dcT("Create the bot at", "Créez le bot sur")} <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers</a> (New Application → Bot → copy the token), ${dcT("paste the token, click Detect: the invite link and your servers appear.", "collez le token puis cliquez sur Détecter : le lien d'invitation et vos serveurs apparaissent.")}</p>`}
 
+      <h3 style="margin:14px 0 6px">${dcT("Bot status", "Statut du bot")}</h3>
+      <div class="form-grid">
+        <div class="form-row"><label>${dcT("Presence", "Présence")}</label><select id="dc-presence">${[["online", "En ligne", "Online"], ["idle", "Absent", "Idle"], ["dnd", "Ne pas déranger", "Do not disturb"], ["invisible", "Invisible", "Invisible"]].map(([v, fr, en]) => `<option value="${v}" ${discordCfg.bot_presence === v ? "selected" : ""}>${dcT(en, fr)}</option>`).join("")}</select></div>
+        <div class="form-row"><label>${dcT("Activity", "Activité")}</label><select id="dc-activity-type">${[["none", "Aucune", "None"], ["playing", "Joue à", "Playing"], ["watching", "Regarde", "Watching"], ["listening", "Écoute", "Listening"], ["competing", "Participe à", "Competing in"], ["custom", "Statut personnalisé", "Custom status"]].map(([v, fr, en]) => `<option value="${v}" ${discordCfg.activity_type === v ? "selected" : ""}>${dcT(en, fr)}</option>`).join("")}</select></div>
+        <div class="form-row" style="grid-column:1/-1"><label>${dcT("Activity text", "Texte de l'activité")} <span class="meta">{online} = ${dcT("running servers", "serveurs en marche")}, {servers} = ${dcT("all servers", "tous les serveurs")}</span></label><input id="dc-activity-text" maxlength="128" placeholder="${dcT("e.g. {online}/{servers} servers online", "ex : {online}/{servers} serveurs en ligne")}" value="${escapeHtml(discordCfg.activity_text || "")}"></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0 4px">
+        <button class="btn-blue" id="dc-presence-apply" type="button">${ico("check")} ${dcT("Apply status", "Appliquer le statut")}</button>
+        <span style="font-size:12px;color:var(--overlay0)">${dcT("Applied instantly, without reconnecting the bot.", "Appliqué immédiatement, sans reconnecter le bot.")}</span>
+      </div>
+
+      <h3 style="margin:14px 0 6px">${dcT("Joining", "Rejoindre")}</h3>
+      <div class="form-grid">
+        <div class="form-row"><label>${dcT("Add the bot to your Discord server", "Ajouter le bot à votre serveur Discord")}</label>
+          ${(discordCfg.invite_url || dcDetect.invite_url) ? `<a class="btn-blue" style="display:inline-flex;align-items:center;gap:6px;text-decoration:none" href="${escapeHtml(discordCfg.invite_url || dcDetect.invite_url)}" target="_blank" rel="noopener">${ico("plus")} ${dcT("Invite the bot", "Inviter le bot")}</a>` : `<span style="color:var(--overlay0);font-size:12px">${dcT("Save the bot token first: the invitation link appears here.", "Enregistrez d'abord le token : le lien d'invitation apparaît ici.")}</span>`}</div>
+        <div class="form-row"><label>${dcT("Public address shown by /mc join", "Adresse publique affichée par /mc join")} <span class="meta">${dcT("domain or IP, no port", "domaine ou IP, sans port")}</span></label><input id="dc-join-host" placeholder="play.example.com" value="${escapeHtml(discordCfg.join_host || "")}"></div>
+      </div>
+      <p style="color:var(--overlay0);font-size:12px;margin:2px 0 8px">${dcT("Players type /mc join in Discord to get the address to paste into Minecraft (Multiplayer → Add Server).", "Les joueurs tapent /mc rejoindre dans Discord pour obtenir l'adresse à coller dans Minecraft (Multijoueur → Ajouter un serveur).")}</p>
+
       <h3 style="margin:14px 0 6px">2. ${dcT("Who can do what?", "Qui peut faire quoi ?")}</h3>
       <div class="form-grid">
         <div class="form-row"><label>${dcT("Operators — roles", "Opérateurs — rôles")} <span class="meta">${dcT("start/stop, console commands", "démarrer/arrêter, commandes console")}</span></label>${dcPicker("dc-op-roles", discordCfg.operator_role_ids, dcDetect.roles)}</div>
@@ -2749,6 +2859,7 @@ async function renderSettings(keepDetect = false) {
     webhook_url: $("#dc-webhook").value,
     guild_id: $("#dc-guild").value,
     channel_id: $("#dc-channel").value,
+    join_host: $("#dc-join-host").value.trim(),
     operator_user_ids: ($("#dc-op-users").value || "").split(/[\s,;]+/).filter(Boolean),
     operator_role_ids: dcPickerValue("dc-op-roles"),
     viewer_role_ids: dcPickerValue("dc-view-roles"),
@@ -2757,6 +2868,12 @@ async function renderSettings(keepDetect = false) {
     ...Object.fromEntries(["started", "ready", "stopped", "crash", "backup", "scheduled_restart", "auto_stop", "player_join_leave"].map((k) => ["notify_" + k, $("#dc-n-" + k).checked])),
   });
   const dcSave = () => api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
+  $("#dc-presence-apply").addEventListener("click", async () => {
+    try {
+      await api("/discord/presence", { method: "POST", body: JSON.stringify({ presence: $("#dc-presence").value, activity_type: $("#dc-activity-type").value, activity_text: $("#dc-activity-text").value }) });
+      toast(dcT("Bot status updated", "Statut du bot mis à jour"), "success");
+    } catch (e) { toast(e.message, "error"); }
+  });
   $("#dc-save").addEventListener("click", async () => {
     await dcSave();
     toast(dcT("Discord settings saved.", "Réglages Discord enregistrés."), "success");

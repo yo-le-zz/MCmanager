@@ -93,11 +93,25 @@ Hors préfixe `/api` : `POST /auth/login` `{username,password}` · `POST /auth/l
 ## Assistant (v1.1.0)
 Toutes ces routes sont réservées aux administrateurs.
 - `GET|POST /ai/config` : ajoute `tools_mode` (`off` | `read` | `ask` | `auto`, défaut `ask`). Une valeur vide à l'enregistrement conserve le réglage.
-- `POST /ai/chat/stream` `{message, history, server_id}` : flux SSE (`text/event-stream`). Chaque événement a un champ `type` :
+- `POST /ai/chat/stream` `{message, history, server_id}` : flux SSE (`text/event-stream`) ; un commentaire `: ping` est envoyé après 15 s de silence (garde la connexion à travers les reverse proxys). Chaque événement a un champ `type` :
   `delta {text}` · `tool_start {id, name, label_fr, label_en, args, needs_approval}` · `tool_end {id, name, ok, denied, summary}` · `error {message}` · `done`.
   Fermer la connexion arrête l'agent.
 - `POST /ai/approve` `{id, approve}` : répond à un `tool_start` dont `needs_approval` est vrai. Sans réponse en 120 s, l'action est refusée.
 - `POST /ai/chat` : enveloppe non streamée, renvoie `{reply, tools}`. Sans interface pour confirmer, le mode `ask` y est traité comme `read`.
+
+## Double authentification (v1.1.2)
+- `POST /auth/login` accepte `code` (6 chiffres ou code de secours). Mot de passe juste mais code absent : `401 {"totp_required": true}`, aucune session créée.
+- `POST /auth/totp/setup` → `{secret, otpauth_uri}` ; `POST /auth/totp/enable {code}` → `{recovery_codes}` (8 codes, affichés une seule fois) ;
+  `POST /auth/totp/disable {password, code}` ; `DELETE /auth/users/:name/totp` (administrateur : réinitialisation).
+- `GET /auth/me` et `GET /auth/users` indiquent `totp_enabled`.
+
+## Discord (v1.1.2)
+- `POST /discord/presence {presence, activity_type, activity_text}` : statut du bot, appliqué à chaud. `presence` : `online|idle|dnd|invisible` ;
+  `activity_type` : `none|playing|watching|listening|competing|custom`.
+- `GET|POST /discord/config` : ajoute `bot_presence`, `activity_type`, `activity_text`, `join_host` et `invite_url` (en lecture).
+
+## Alertes (v1.1.2)
+- `GET /alerts` → `[{id, level: critical|warning|info, server_id, fr, en}]` : disque, sauvegardes, EULA, bot Discord.
 
 ## Java (v1.1.1)
 - `GET /java/detect?mc_version=1.21.4` (administrateurs) : installations Java trouvées (`{installs:[{path, version, major, compatible}], required_major}`).

@@ -354,6 +354,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Double authentification de bout en bout : activation, connexion en deux temps, rejeu, codes de secours, désactivation.
+    #[tokio::test]
+    async fn totp_two_step_login_replay_recovery_and_disable() {
+        let dir = std::env::temp_dir().join(format!("mcmanager-2fa-{}", uuid::Uuid::new_v4()));
+        let web_dir = dir.join("web");
+        tokio::fs::create_dir_all(&web_dir).await.unwrap();
+        tokio::fs::write(web_dir.join("index.html"), "<html></html>").await.unwrap();
+        let state = crate::state::build_state_for_test(&dir).await;
+        let auth = AuthState::load(&dir).await.unwrap();
+        auth.add_user("alice", "alice-password", true, false).await.unwrap();
+        let app = build_app(state, WebOptions { web_dir: web_dir.to_string_lossy().to_string(), auth: Some(auth.clone()), remote: None });
+        let login = |body: serde_json::Value| json_req("POST", "/auth/login", body, None);
+        let body_of = |r: axum::response::Response| async move { serde_json::from_slice::<serde_json::Value>(&axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap()).unwrap() };
+        let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        // Les codes sont calculés pour un compteur explicite (et non « maintenant ») : ce test dure plusieurs secondes et
+        // franchit forcément un pas de 30 s de temps en temps.
+        let code_for = |secret: &str, counter: u64| format!("{:06}", crate::totp::code_for_counter(&crate::totp::base32_decode(secret).unwrap(), counter));
+
+        // Connexion normale, puis configuration.
+        let r = call(&app, login(json!({ "username": "alice", "password": "alice-password" }))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let cookie = cookie_of(&r);
+        let setup = body_of(call(&app, json_req("POST", "/auth/totp/setup", json!({}), Some(&cookie))).await).await;
+        let secret = setup["secret"].as_str().unwrap().to_string();
+        assert!(setup["otpauth_uri"].as_str().unwrap().starts_with("otpauth://totp/MCManager:alice?secret="));
+        // Avant confirmation, la connexion ne demande rien de plus.
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "alice-password" }))).await.status(), StatusCode::OK);
+        // Mauvais code : refusé ; bon code : activé, 8 codes de secours.
+        let bad = call(&app, json_req("POST", "/auth/totp/enable", json!({ "code": "000000" }), Some(&cookie))).await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let c0 = crate::totp::counter_at(now());
+        let ok = body_of(call(&app, json_req("POST", "/auth/totp/enable", json!({ "code": code_for(&secret, c0) }), Some(&cookie))).await).await;
+        let recovery: Vec<String> = ok["recovery_codes"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect();
+        assert_eq!(recovery.len(), 8);
+        let me = body_of(call(&app, get_req("/auth/me", Some(&cookie))).await).await;
+        assert_eq!(me["totp_enabled"], true);
+
+        // Le secret n'est jamais en clair sur disque.
+        let raw = tokio::fs::read_to_string(dir.join("users.json")).await.unwrap();
+        assert!(!raw.contains(&secret), "secret TOTP chiffré sur disque");
+
+        // Connexion : mot de passe seul => second facteur demandé, aucune session.
+        let r = call(&app, login(json!({ "username": "alice", "password": "alice-password" }))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(r.headers().get(header::SET_COOKIE).is_none());
+        assert_eq!(body_of(r).await["totp_required"], true);
+        // Mauvais code : refusé.
+        let r = call(&app, login(json!({ "username": "alice", "password": "alice-password", "code": "123456" }))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(r.headers().get(header::SET_COOKIE).is_none());
+        // Le code du pas courant a servi à l'activation : rejeu refusé ; celui du pas suivant passe, une seule fois.
+        let used = code_for(&secret, c0);
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "alice-password", "code": used }))).await.status(), StatusCode::UNAUTHORIZED, "rejeu");
+        let next = code_for(&secret, c0 + 1);
+        let r = call(&app, login(json!({ "username": "alice", "password": "alice-password", "code": next.clone() }))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(r.headers().get(header::SET_COOKIE).is_some());
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "alice-password", "code": next }))).await.status(), StatusCode::UNAUTHORIZED, "rejeu du même code");
+
+        // Code de secours : accepté une fois (casse et tiret indifférents), puis consommé.
+        let rc = recovery[0].to_uppercase().replace('-', " ");
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "alice-password", "code": rc.clone() }))).await.status(), StatusCode::OK);
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "alice-password", "code": rc }))).await.status(), StatusCode::UNAUTHORIZED);
+        // Le mot de passe seul ne suffit pas, même avec un bon code de secours d'un autre compte ou un faux.
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "mauvais", "code": recovery[1].clone() }))).await.status(), StatusCode::UNAUTHORIZED);
+
+        // Changer le mot de passe garde la double authentification.
+        auth.add_user("alice", "nouveau-mot-de-passe", true, true).await.unwrap();
+        let r = call(&app, login(json!({ "username": "alice", "password": "nouveau-mot-de-passe" }))).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "toujours un second facteur après changement de mot de passe");
+
+        // Désactivation : exige mot de passe ET code.
+        let sess = {
+            let r = call(&app, login(json!({ "username": "alice", "password": "nouveau-mot-de-passe", "code": recovery[2].clone() }))).await;
+            assert_eq!(r.status(), StatusCode::OK);
+            cookie_of(&r)
+        };
+        let no = call(&app, json_req("POST", "/auth/totp/disable", json!({ "password": "faux", "code": recovery[3].clone() }), Some(&sess))).await;
+        assert_eq!(no.status(), StatusCode::UNAUTHORIZED);
+        let no = call(&app, json_req("POST", "/auth/totp/disable", json!({ "password": "nouveau-mot-de-passe", "code": "999999" }), Some(&sess))).await;
+        assert_eq!(no.status(), StatusCode::UNAUTHORIZED);
+        let yes = call(&app, json_req("POST", "/auth/totp/disable", json!({ "password": "nouveau-mot-de-passe", "code": recovery[3].clone() }), Some(&sess))).await;
+        assert_eq!(yes.status(), StatusCode::OK);
+        assert_eq!(call(&app, login(json!({ "username": "alice", "password": "nouveau-mot-de-passe" }))).await.status(), StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The whole network-facing assembly: login gate on /api, public login
     /// page + health check, machine-to-machine /remote left to its own
     /// protection, several users connected at once.

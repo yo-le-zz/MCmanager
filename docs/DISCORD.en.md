@@ -52,10 +52,21 @@ Declared in English, **shown in French** to French Discord clients; replies foll
 | `/mc list` | everyone | servers and state 🟢/⚫ (remote instances included) |
 | `/mc status server` | everyone | online? players / max |
 | `/mc players server` | everyone | connected players |
+| `/mc join server` | everyone | address to paste in Minecraft (see below), version, state |
 | `/mc start server` | **operators** | start |
 | `/mc stop server` | **operators** | clean stop |
 | `/mc restart server` | **operators** | restart |
 | `/mc command server text` | **operators** | console command |
+
+## Bot status, invitation and address (Settings → Discord)
+- **Bot status**: presence (*online*, *idle*, *do not disturb*, *invisible*) and activity (*playing*, *watching*, *listening*, *competing in*, or a custom status).
+  The text accepts `{online}` (running servers) and `{servers}` (number of servers), refreshed every minute — e.g. "{online}/{servers} servers online".
+  **Apply status** takes effect **immediately**, without reconnecting the bot.
+- **Add the bot to your Discord server**: the invitation link appears as soon as the token is saved (computed locally, no network call;
+  it requests the permissions needed to create channels).
+- **Public address** (`/mc join`): enter the domain or IP your players use, without the port. The command shows `domain` or `domain:port`
+  (port 25565 is omitted), the Minecraft version and the server state. Without an address, the bot says to ask an administrator.
+- **Webhook without a bot**: a plain webhook is enough for notifications (no commands, console or chat). Paste its URL in "…or webhook URL"; it is encrypted on disk.
 
 ## Language
 

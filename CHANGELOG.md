@@ -3,6 +3,25 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.1.2] - 2026-11-14 (stabilisation : Discord, double authentification, alertes, mobile, tests navigateur)
+### Discord
+- **Statut du bot modifiable** dans Réglages → Discord : présence (en ligne, absent, ne pas déranger, invisible) et activité (joue à, regarde, écoute, participe à, statut personnalisé), texte avec `{online}` et `{servers}`. Appliqué **à chaud** (opcode 3 de la passerelle, sans reconnexion), rafraîchi chaque minute, repris à la reconnexion.
+- **Rejoindre** : lien « Inviter le bot » calculé localement dès que le token est enregistré (sans appel réseau) ; nouvelle commande **`/mc join`** (`/mc rejoindre`) qui donne l'adresse à coller dans Minecraft (adresse publique configurable, port, version, état).
+- Le webhook (sans bot) reste une option de la même section. Docs FR/EN mises à jour.
+### Sécurité
+- **Double authentification (TOTP, RFC 6238)** : activation dans Utilisateurs, connexion en deux temps, anti-rejeu, 8 codes de secours à usage unique, secret chiffré sur disque, désactivation par mot de passe + code, réinitialisation par un administrateur, tout inscrit à l'audit. Vecteurs de test officiels de la RFC.
+- **Mise à jour automatique plus sûre** : empreinte SHA-256 vérifiée (`SHA256SUMS`) avant toute modification, téléchargement plafonné à 200 Mo.
+- **Imports de zip plafonnés** (200 000 fichiers, 64 Go réellement écrits) contre les archives piégées.
+- `docs/SECURITY.md` (nouveau).
+### Interface
+- **Menu mobile** : barre du haut + tiroir latéral (téléphone), tableaux défilants, formulaires sur une colonne.
+- **Alertes** sur le tableau de bord : disque presque plein, sauvegardes absentes ou trop anciennes, EULA non acceptée, bot Discord en erreur, administrateur sans double authentification (`GET /api/alerts`).
+### Fiabilité
+- **Tests dans un vrai navigateur** (`scripts/browser-test.py`, Firefox headless, aussi en CI) : aucune erreur JavaScript dans toutes les vues, thème personnalisé réellement appliqué, import hostile neutralisé, fond animé mesuré (~1-2 ms de dessin par image), détection Java, Discord, menu mobile, double authentification de bout en bout.
+- Assistant : un commentaire `: ping` toutes les 15 s de silence garde le flux ouvert à travers les reverse proxys pendant l'attente d'une confirmation.
+### Pas fait (volontairement)
+- Sauvegardes vers une autre machine, déplacement d'un serveur, modèles de serveur, HTTPS natif, mode serveur Windows : chantiers trop gros pour une version de stabilisation.
+
 ## [1.1.1] - 2026-11-11 (macOS, compatibilité, optimisations, mise à jour corrigée)
 ### macOS
 - Release **Mac Intel (x86_64)** : `MCManager.app` dans un `.dmg` + archive portable, macOS 11 minimum, compilée par le workflow GitHub. Pas de build Apple Silicon (runners trop souvent indisponibles) : Rosetta 2, ou `./build.sh macos` sur place.

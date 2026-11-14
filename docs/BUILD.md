@@ -32,6 +32,16 @@ Produit `dist/MCManager.app`, `mcmanager-<version>-macos-<arch>.dmg` et `.tar.gz
 avec une cible minimale macOS 11. L'assemblage est fait par `scripts/make-macos-app.sh` ; la signature est « ad hoc »,
 sans notarisation (voir [MACOS.md](MACOS.md)). Le workflow GitHub ne compile que le build Intel (les Mac Apple Silicon le lancent via Rosetta 2) ; un build arm64 natif se fait en local avec cette commande.
 
+### Tests de l'interface dans un navigateur
+`scripts/browser-test.py` lance le **vrai binaire** et pilote Firefox headless (Selenium) : aucune erreur JavaScript dans toutes les vues, thème personnalisé,
+fond animé (temps de dessin mesuré), réglages Discord, détection Java, menu mobile et double authentification de bout en bout.
+```bash
+pip install selenium
+cargo build --bins
+python3 scripts/browser-test.py --binary target/debug/mcmanager --firefox "$(which firefox)" --geckodriver "$(which geckodriver)" --shots /tmp/captures
+```
+Il tourne aussi dans `ci.yml` (job `browser`), où Firefox et geckodriver sont préinstallés.
+
 ### Docker
 `docker build -t mcmanager .` construit l'image du mode serveur (Dockerfile à la racine, build multi-étapes,
 Java 21 + 17 dans l'image finale). `docker compose up -d` la lance avec un volume de données.

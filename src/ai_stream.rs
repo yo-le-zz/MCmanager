@@ -25,6 +25,20 @@ pub enum Event {
     Done,
 }
 
+/// Commentaire SSE envoyé quand rien ne se passe (attente d'une confirmation, modèle lent) : il garde la connexion
+/// ouverte à travers les reverse proxys (nginx coupe après 60 s de silence par défaut). Le navigateur l'ignore.
+pub const SSE_PING: &[u8] = b": ping\n\n";
+pub const SSE_PING_EVERY: Duration = Duration::from_secs(15);
+
+impl Event {
+    /// Trame SSE : `event: <type>` + `data: <json>` + ligne vide.
+    pub fn to_sse(&self) -> String {
+        let v = serde_json::to_value(self).unwrap_or_default();
+        let kind = v["type"].as_str().unwrap_or("message");
+        format!("event: {kind}\ndata: {v}\n\n")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
     pub id: String,
@@ -444,6 +458,18 @@ mod tests {
             }
         }
         s
+    }
+
+    #[test]
+    fn sse_frames_are_well_formed_single_data_lines() {
+        let f = Event::Delta { text: "ligne 1\nligne 2 \"cite\"".into() }.to_sse();
+        assert!(f.starts_with("event: delta\ndata: {") && f.ends_with("}\n\n"));
+        assert_eq!(f.matches('\n').count(), 3, "un retour à la ligne dans le texte ne doit pas casser la trame : {f:?}");
+        let v: Value = serde_json::from_str(f.lines().nth(1).unwrap().strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(v["type"], "delta");
+        assert_eq!(v["text"], "ligne 1\nligne 2 \"cite\"");
+        assert_eq!(Event::Done.to_sse(), "event: done\ndata: {\"type\":\"done\"}\n\n");
+        assert!(SSE_PING.starts_with(b":") && SSE_PING.ends_with(b"\n\n"), "un commentaire SSE commence par deux-points");
     }
 
     #[test]

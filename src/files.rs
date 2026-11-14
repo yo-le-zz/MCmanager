@@ -200,11 +200,25 @@ pub fn export_zip(root: &Path, rel: &str) -> Result<PathBuf> {
 /// zip with a `../../etc/cron.d/x` entry ("zip-slip") is rejected entry by
 /// entry rather than trusted just because it arrived inside a zip.
 pub fn import_zip(root: &Path, rel_dir: &str, zip_bytes: &[u8]) -> Result<usize> {
+    import_zip_limited(root, rel_dir, zip_bytes, MAX_ZIP_ENTRIES, MAX_ZIP_BYTES)
+}
+
+/// Garde-fous contre les « zip bombs » : nombre de fichiers et octets réellement écrits (les tailles déclarées dans
+/// l'archive peuvent mentir, on compte donc ce qui sort du décompresseur).
+pub const MAX_ZIP_ENTRIES: usize = 200_000;
+pub const MAX_ZIP_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+pub fn import_zip_limited(root: &Path, rel_dir: &str, zip_bytes: &[u8], max_entries: usize, max_bytes: u64) -> Result<usize> {
+    use std::io::Read;
     let dest_root = safe_join(root, rel_dir)?;
     std::fs::create_dir_all(&dest_root)?;
     let reader = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(reader).context("archive .zip invalide")?;
     let mut extracted = 0usize;
+    if archive.len() > max_entries {
+        anyhow::bail!("archive refusee : {} fichiers (maximum {max_entries})", archive.len());
+    }
+    let mut written_total = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let entry_name = entry.name().to_string();
@@ -226,8 +240,53 @@ pub fn import_zip(root: &Path, rel_dir: &str, zip_bytes: &[u8]) -> Result<usize>
         }
         // Extraction en flux (pas de copie complète en mémoire).
         let mut out = std::fs::File::create(&target)?;
-        std::io::copy(&mut entry, &mut out)?;
+        // On ne copie jamais plus que le budget restant (+1 octet pour détecter le dépassement).
+        let budget = max_bytes.saturating_sub(written_total);
+        let copied = std::io::copy(&mut (&mut entry).take(budget + 1), &mut out)?;
+        written_total += copied;
+        if written_total > max_bytes {
+            drop(out);
+            let _ = std::fs::remove_file(&target);
+            anyhow::bail!("archive refusee : plus de {} Mo decompresses (protection contre les archives piegees)", max_bytes / 1_048_576);
+        }
         extracted += 1;
     }
     Ok(extracted)
+}
+
+#[cfg(test)]
+mod zip_limit_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn zip_with(files: &[(&str, usize)]) -> Vec<u8> {
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (n, size) in files {
+            z.start_file(*n, zip::write::FileOptions::default()).unwrap();
+            z.write_all(&vec![b'a'; *size]).unwrap();
+        }
+        z.finish().unwrap().into_inner()
+    }
+    fn tmp() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("mcm-zip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn normal_archives_extract_and_oversized_ones_are_refused() {
+        let d = tmp();
+        assert_eq!(import_zip_limited(&d, "ok", &zip_with(&[("a.txt", 10), ("dir/b.txt", 20)]), 10, 1000).unwrap(), 2);
+        assert_eq!(std::fs::read(d.join("ok/dir/b.txt")).unwrap().len(), 20);
+        // Trop de fichiers.
+        let e = import_zip_limited(&d, "n", &zip_with(&[("1", 1), ("2", 1), ("3", 1)]), 2, 1000).unwrap_err().to_string();
+        assert!(e.contains("3 fichiers"), "{e}");
+        // Trop d'octets : refusé, et le fichier fautif n'est pas laissé sur le disque.
+        let e = import_zip_limited(&d, "big", &zip_with(&[("gros.bin", 5000)]), 10, 1000).unwrap_err().to_string();
+        assert!(e.contains("piegees"), "{e}");
+        assert!(!d.join("big/gros.bin").exists());
+        // Le budget est cumulé sur l'ensemble des fichiers.
+        assert!(import_zip_limited(&d, "cumul", &zip_with(&[("a", 600), ("b", 600)]), 10, 1000).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

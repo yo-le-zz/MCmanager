@@ -14,11 +14,13 @@
 //! `state::acquire_instance_lock`).
 
 pub mod ai;
+pub mod alerts;
 pub mod ai_agent;
 pub mod ai_fetch;
 pub mod ai_stream;
 pub mod ai_tools;
 pub mod java;
+pub mod totp;
 pub mod api;
 pub mod audit;
 pub mod auth;

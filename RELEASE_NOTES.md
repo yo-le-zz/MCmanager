@@ -1,3 +1,17 @@
+# MCManager v1.1.2 — Stabilisation : Discord, double authentification, alertes, mobile
+
+## Nouveautés
+- **Bot Discord** : statut et activité modifiables à chaud, lien pour inviter le bot, commande `/mc rejoindre` (adresse à coller dans Minecraft). Webhook toujours possible sans bot.
+- **Double authentification (TOTP)** avec codes de secours ([docs/SECURITY.md](docs/SECURITY.md)).
+- **Alertes** sur le tableau de bord : disque, sauvegardes, EULA, bot Discord.
+- **Menu mobile** pour téléphone.
+
+## Sécurité et fiabilité
+- Mise à jour automatique : empreinte SHA-256 vérifiée avant installation.
+- Imports de zip plafonnés. Assistant : flux gardé ouvert pendant les confirmations.
+- Interface testée dans un vrai navigateur (Firefox headless, aussi en CI).
+
+
 # MCManager v1.1.1 — macOS, compatibilité, mise à jour corrigée
 
 ## Nouveautés
