@@ -72,6 +72,7 @@ use rsa::signature::{RandomizedSigner, SignatureEncoding, Verifier};
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use tower::ServiceExt;
 
 use crate::secrets::EncryptedBlob;
@@ -96,7 +97,7 @@ const NONCE_TTL_SECS: i64 = REQUEST_MAX_SKEW_SECS * 2 + 5;
 /// Bodies up to this many raw bytes travel inline in the encrypted JSON;
 /// bigger ones go through the chunked blob store.
 const INLINE_BODY_MAX: usize = 512 * 1024;
-const BLOB_CHUNK: usize = 2 * 1024 * 1024;
+pub const BLOB_CHUNK: usize = 2 * 1024 * 1024;
 /// Largest single tunnelled request/response body. Everything is buffered in
 /// memory on both ends, so this is a deliberate safety valve, not a goal.
 pub const TUNNEL_BODY_MAX: usize = 512 * 1024 * 1024;
@@ -693,15 +694,119 @@ pub async fn dispatch_action(rt: &RemoteRuntime, action: serde_json::Value) -> s
             "blob_get" => {
                 let reference = action["ref"].as_str().context("ref manquant")?;
                 let offset = action["offset"].as_u64().unwrap_or(0);
+                let keep = action["keep"].as_bool().unwrap_or(false);
                 let path = blob_path(&rt.data_dir, reference)?;
-                let bytes = tokio::fs::read(&path).await.context("blob introuvable")?;
-                let start = (offset as usize).min(bytes.len());
-                let end = (start + BLOB_CHUNK).min(bytes.len());
-                let done = end >= bytes.len();
-                if done {
+                // Un seul morceau est lu (jamais le fichier entier) : indispensable pour les mondes de plusieurs Go.
+                let mut f = tokio::fs::File::open(&path).await.context("blob introuvable")?;
+                let total = f.metadata().await?.len();
+                let start = offset.min(total);
+                f.seek(std::io::SeekFrom::Start(start)).await?;
+                let mut chunk = vec![0u8; BLOB_CHUNK.min((total - start) as usize)];
+                f.read_exact(&mut chunk).await?;
+                let end = start + chunk.len() as u64;
+                let done = end >= total;
+                if done && !keep {
                     let _ = tokio::fs::remove_file(&path).await;
                 }
-                Ok(serde_json::json!({ "data_b64": B64.encode(&bytes[start..end]), "next": end, "done": done }))
+                Ok(serde_json::json!({ "data_b64": B64.encode(&chunk), "next": end, "done": done, "size": total }))
+            }
+            "blob_stat" => {
+                // Taille déjà reçue (reprise d'un envoi interrompu) et, sur demande, empreinte SHA-256 du fichier.
+                let reference = action["ref"].as_str().context("ref manquant")?;
+                let path = blob_path(&rt.data_dir, reference)?;
+                let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+                if action["hash"].as_bool().unwrap_or(false) && size > 0 {
+                    let p = path.clone();
+                    let sha = tokio::task::spawn_blocking(move || crate::transfer::sha256_file(&p)).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+                    Ok(serde_json::json!({ "size": size, "sha256": sha }))
+                } else {
+                    Ok(serde_json::json!({ "size": size }))
+                }
+            }
+            "blob_drop" => {
+                let reference = action["ref"].as_str().context("ref manquant")?;
+                let _ = tokio::fs::remove_file(blob_path(&rt.data_dir, reference)?).await;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            "export_server" => {
+                // Prépare le serveur (archive zip) dans le stockage de blobs pour qu'une autre machine le télécharge.
+                let id = server_id.context("server_id manquant")?;
+                let entry = state.servers.read().await.get(&id).cloned().context("serveur introuvable")?;
+                if state.runtime.read().await.get(&id).map(|r| r.running).unwrap_or(false) {
+                    anyhow::bail!("arretez le serveur avant de l'exporter");
+                }
+                let root = PathBuf::from(&entry.folder);
+                let tmp = tokio::task::spawn_blocking(move || crate::files::export_zip(&root, "")).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+                let reference = uuid::Uuid::new_v4().to_string();
+                let dest = blob_path(&rt.data_dir, &reference)?;
+                tokio::fs::create_dir_all(blob_dir(&rt.data_dir)).await?;
+                if tokio::fs::rename(&tmp, &dest).await.is_err() {
+                    tokio::fs::copy(&tmp, &dest).await?;
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                }
+                let size = tokio::fs::metadata(&dest).await?.len();
+                Ok(serde_json::json!({ "ok": true, "ref": reference, "size": size, "entry": {
+                    "name": entry.name, "loader": entry.loader, "mc_version": entry.mc_version, "port": entry.port,
+                    "settings": { "xms_mb": entry.xms_mb, "xmx_mb": entry.xmx_mb, "jar_name": entry.jar_name, "extra_args": entry.extra_args, "aikar_flags": entry.aikar_flags,
+                                  "auto_restart": entry.auto_restart, "auto_restart_delay_secs": entry.auto_restart_delay_secs, "auto_backup_minutes": entry.auto_backup_minutes,
+                                  "backup_retention": entry.backup_retention, "loader_version": entry.loader_version } } }))
+            }
+            "backup_receive" => {
+                // Range une sauvegarde envoyée par une autre machine dans « incoming-backups/<machine>/ ».
+                let reference = action["ref"].as_str().context("ref manquant")?;
+                let source = crate::transfer::clean_source(action["source"].as_str().context("source manquante")?);
+                let file = action["name"].as_str().context("name manquant")?;
+                let dest = crate::transfer::incoming_path(&rt.data_dir, &source, file)?;
+                let from = blob_path(&rt.data_dir, reference)?;
+                if !from.is_file() {
+                    anyhow::bail!("sauvegarde introuvable dans le stockage temporaire");
+                }
+                tokio::fs::create_dir_all(dest.parent().context("chemin")?).await?;
+                if tokio::fs::rename(&from, &dest).await.is_err() {
+                    tokio::fs::copy(&from, &dest).await?;
+                    let _ = tokio::fs::remove_file(&from).await;
+                }
+                Ok(serde_json::json!({ "ok": true, "source": source, "name": file }))
+            }
+            "backup_incoming_list" => Ok(serde_json::json!({ "backups": crate::transfer::list_incoming(&rt.data_dir) })),
+            "backup_incoming_fetch" => {
+                let source = action["source"].as_str().context("source manquante")?;
+                let file = action["name"].as_str().context("name manquant")?;
+                let from = crate::transfer::incoming_path(&rt.data_dir, source, file)?;
+                if !from.is_file() {
+                    anyhow::bail!("sauvegarde introuvable");
+                }
+                let reference = uuid::Uuid::new_v4().to_string();
+                tokio::fs::create_dir_all(blob_dir(&rt.data_dir)).await?;
+                let dest = blob_path(&rt.data_dir, &reference)?;
+                tokio::fs::copy(&from, &dest).await?;
+                Ok(serde_json::json!({ "ok": true, "ref": reference, "size": tokio::fs::metadata(&dest).await?.len() }))
+            }
+            "backup_incoming_delete" => {
+                let source = action["source"].as_str().context("source manquante")?;
+                let file = action["name"].as_str().context("name manquant")?;
+                Ok(serde_json::json!({ "ok": crate::transfer::delete_incoming(&rt.data_dir, source, file)? }))
+            }
+            "update_check" => {
+                let repo = state.config.read().await.update_repo.clone();
+                let info = crate::updater::check_for_update(&state.http, &repo).await?;
+                Ok(serde_json::to_value(&info)?)
+            }
+            "update_apply" => {
+                // Met à jour CETTE machine puis la redémarre : les serveurs en marche sont arrêtés proprement et repartent.
+                let repo = state.config.read().await.update_repo.clone();
+                let info = crate::updater::check_for_update(&state.http, &repo).await?;
+                if !info.update_available {
+                    anyhow::bail!("deja a jour ({})", info.current_version);
+                }
+                let url = info.download_url.clone().context("aucun binaire disponible pour cette plateforme")?;
+                crate::updater::apply_update(&state.http, &url).await?;
+                let st = state.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    crate::resume::restart_process(&st).await;
+                });
+                Ok(serde_json::json!({ "ok": true, "restarting": true, "from": info.current_version, "to": info.latest_version }))
             }
             "list" => {
                 let servers = state.servers.read().await;
@@ -716,7 +821,7 @@ pub async fn dispatch_action(rt: &RemoteRuntime, action: serde_json::Value) -> s
                 let id = server_id.context("server_id manquant")?;
                 let entry = state.servers.read().await.get(&id).cloned().context("serveur introuvable")?;
                 let running = state.runtime.read().await.get(&id).map(|r| r.running).unwrap_or(false);
-                let players = if running { crate::stats::ping_server(entry.port).await.ok() } else { None };
+                let players = if running { crate::stats::ping_entry(&entry).await.ok() } else { None };
                 Ok(serde_json::json!({ "name": entry.name, "running": running, "players": players.map(|(o, m, _)| serde_json::json!({"online": o, "max": m})) }))
             }
             "start" => {
@@ -797,37 +902,42 @@ pub async fn dispatch_action(rt: &RemoteRuntime, action: serde_json::Value) -> s
                 let loader: crate::models::Loader = serde_json::from_value(action["loader"].clone()).context("loader invalide")?;
                 let mc_version = action["mc_version"].as_str().context("mc_version manquant")?.to_string();
                 let port = action["port"].as_u64().unwrap_or(25565) as u16;
-                let zip_bytes = if let Some(r) = action["zip_ref"].as_str() {
-                    blob_read_all(&rt.data_dir, r).await?
-                } else {
-                    B64.decode(action["zip_base64"].as_str().context("zip_ref ou zip_base64 manquant")?).context("archive invalide (base64)")?
-                };
-
                 let id = uuid::Uuid::new_v4();
                 let folder = state.data_dir.join("servers").join(id.to_string());
                 tokio::fs::create_dir_all(&folder).await?;
                 let folder2 = folder.clone();
-                tokio::task::spawn_blocking(move || crate::files::import_zip(&folder2, "", &zip_bytes)).await
-                    .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+                if let Some(r) = action["zip_ref"].as_str() {
+                    // Extraction directement depuis le fichier reçu : jamais chargé en mémoire.
+                    let zip_path = blob_path(&rt.data_dir, r)?;
+                    let zp = zip_path.clone();
+                    tokio::task::spawn_blocking(move || crate::files::import_zip_file(&folder2, "", &zp)).await
+                        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+                    let _ = tokio::fs::remove_file(&zip_path).await;
+                } else {
+                    let zip_bytes = B64.decode(action["zip_base64"].as_str().context("zip_ref ou zip_base64 manquant")?).context("archive invalide (base64)")?;
+                    tokio::task::spawn_blocking(move || crate::files::import_zip(&folder2, "", &zip_bytes)).await
+                        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+                }
+                let st = &action["settings"];
 
                 let java_path = state.config.read().await.java_path.clone();
                 let entry = crate::models::ServerEntry {
                     id, name, loader, mc_version,
-                    loader_version: None,
+                    loader_version: st["loader_version"].as_str().map(String::from),
                     folder: folder.to_string_lossy().to_string(),
-                    jar_name: String::new(),
+                    jar_name: st["jar_name"].as_str().unwrap_or("").to_string(),
                     java_path,
-                    xms_mb: 1024, xmx_mb: 2048, port,
-                    extra_args: vec![],
+                    xms_mb: st["xms_mb"].as_u64().unwrap_or(1024) as u32, xmx_mb: st["xmx_mb"].as_u64().unwrap_or(2048) as u32, port,
+                    extra_args: st["extra_args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
                     eula_accepted: true,
-                    auto_backup_minutes: None,
-                    backup_retention: None,
-                    auto_restart: false,
-                    auto_restart_delay_secs: 5,
+                    auto_backup_minutes: st["auto_backup_minutes"].as_u64().map(|v| v as u32),
+                    backup_retention: st["backup_retention"].as_u64().map(|v| v as u32),
+                    auto_restart: st["auto_restart"].as_bool().unwrap_or(false),
+                    auto_restart_delay_secs: st["auto_restart_delay_secs"].as_u64().unwrap_or(5) as u32,
                     scheduled_restart_minutes: None,
                     stop_when_empty_minutes: None,
                     dynamic_server: false,
-                    aikar_flags: false,
+                    aikar_flags: st["aikar_flags"].as_bool().unwrap_or(false),
                     managed_addons: vec![],
                     created_at: chrono::Utc::now(),
                 };
@@ -853,7 +963,7 @@ pub async fn handle_api_request(rt: &RemoteRuntime, req: ApiRequest) -> Result<A
         let who = format!("machine:{}", label.chars().filter(|c| !c.is_control()).take(40).collect::<String>());
         let name = action["action"].as_str().unwrap_or("");
         match name {
-            "start" | "stop" | "restart" | "send" | "import_server" => Some(crate::audit::Entry::new("remote", &who, "").detail(format!("action « {name} »")).http("POST", &format!("/api/servers/{}", action["server_id"].as_str().unwrap_or("")), None)),
+            "start" | "stop" | "restart" | "send" | "import_server" | "export_server" | "backup_receive" | "backup_incoming_fetch" | "backup_incoming_delete" | "update_apply" => Some(crate::audit::Entry::new("remote", &who, "").detail(format!("action « {name} »")).http("POST", &format!("/api/servers/{}", action["server_id"].as_str().unwrap_or("")), None)),
             "http" if action["method"].as_str().map(|m| !m.eq_ignore_ascii_case("GET")).unwrap_or(false) => Some(crate::audit::Entry::new("remote", &who, "").http(action["method"].as_str().unwrap_or("?"), action["path"].as_str().unwrap_or(""), None)),
             _ => None,
         }
@@ -1558,6 +1668,183 @@ mod tests {
         assert_eq!(idle["lines"], serde_json::json!([]));
         tokio::fs::remove_dir_all(&dir).await.ok();
     }
+
+    // ───────── transferts reprenables et vérifiés (transfer.rs) ─────────
+
+    fn pseudo_data(len: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i * 31 + i / 7) % 251) as u8).collect()
+    }
+
+    #[tokio::test]
+    async fn upload_resumes_after_interruption_and_detects_corruption() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let host = TestHost::start().await;
+        let (identity, target, client_dir) = host.pair_new_client("vps").await;
+        let http = reqwest::Client::new();
+        let data = pseudo_data(5 * 1024 * 1024 + 123);
+        let src = client_dir.join("gros.bin");
+        std::fs::write(&src, &data).unwrap();
+        let reference = crate::transfer::blob_ref_for(&src, data.len() as u64, 1);
+
+        // L'hôte a déjà reçu le premier morceau (envoi interrompu) : on doit reprendre APRÈS lui, pas repartir de zéro.
+        blob_append(&host.dir, &reference, 0, &data[..BLOB_CHUNK]).await.unwrap();
+        let first = AtomicU64::new(u64::MAX);
+        crate::transfer::upload_file(&http, &identity, &target, &src, &reference, &|sent, _| { first.fetch_min(sent, Ordering::SeqCst); }).await.unwrap();
+        assert_eq!(first.load(Ordering::SeqCst), BLOB_CHUNK as u64, "reprise à l'octet où l'hôte s'était arrêté");
+        let received = std::fs::read(blob_path(&host.dir, &reference).unwrap()).unwrap();
+        assert!(received == data, "le fichier reçu est identique à l'original");
+
+        // Début déjà reçu mais CORROMPU (autre fichier de même nom) : l'empreinte finale le détecte, le blob est jeté.
+        let src2 = client_dir.join("autre.bin");
+        std::fs::write(&src2, &data).unwrap();
+        let ref2 = crate::transfer::blob_ref_for(&src2, data.len() as u64, 2);
+        let mut wrong = data[..BLOB_CHUNK].to_vec();
+        wrong[1000] ^= 0xFF;
+        blob_append(&host.dir, &ref2, 0, &wrong).await.unwrap();
+        let err = crate::transfer::upload_file(&http, &identity, &target, &src2, &ref2, &|_, _| {}).await.unwrap_err().to_string();
+        assert!(err.contains("empreinte"), "{err}");
+        assert!(!blob_path(&host.dir, &ref2).unwrap().exists(), "blob corrompu supprimé : la reprise repartira de zéro");
+        // Une seconde tentative réussit.
+        crate::transfer::upload_file(&http, &identity, &target, &src2, &ref2, &|_, _| {}).await.unwrap();
+        assert!(std::fs::read(blob_path(&host.dir, &ref2).unwrap()).unwrap() == data);
+
+        // Un blob distant plus gros que le fichier local (reste d'un autre fichier) est écarté.
+        let small = client_dir.join("petit.bin");
+        std::fs::write(&small, b"petit").unwrap();
+        let ref3 = crate::transfer::blob_ref_for(&small, 5, 3);
+        blob_append(&host.dir, &ref3, 0, &data[..4096]).await.unwrap();
+        crate::transfer::upload_file(&http, &identity, &target, &small, &ref3, &|_, _| {}).await.unwrap();
+        assert_eq!(std::fs::read(blob_path(&host.dir, &ref3).unwrap()).unwrap(), b"petit");
+        let _ = std::fs::remove_dir_all(&client_dir);
+    }
+
+    #[tokio::test]
+    async fn download_resumes_from_a_part_file_and_verifies() {
+        let host = TestHost::start().await;
+        let (identity, target, client_dir) = host.pair_new_client("vps").await;
+        let http = reqwest::Client::new();
+        let data = pseudo_data(3 * 1024 * 1024 + 7);
+        let reference = uuid::Uuid::new_v4().to_string();
+        blob_append(&host.dir, &reference, 0, &data).await.unwrap();
+        let dest = client_dir.join("recu.zip");
+        // Un téléchargement précédent s'est arrêté après 1 Mo : le .part est repris, pas retéléchargé.
+        std::fs::write(dest.with_extension("part"), &data[..1024 * 1024]).unwrap();
+        crate::transfer::download_file(&http, &identity, &target, &reference, &dest, data.len() as u64, &|_, _| {}).await.unwrap();
+        assert!(std::fs::read(&dest).unwrap() == data);
+        assert!(!dest.with_extension("part").exists());
+        assert!(!blob_path(&host.dir, &reference).unwrap().exists(), "blob distant nettoyé après vérification");
+
+        // Un .part corrompu est détecté.
+        let reference2 = uuid::Uuid::new_v4().to_string();
+        blob_append(&host.dir, &reference2, 0, &data).await.unwrap();
+        let dest2 = client_dir.join("corrompu.zip");
+        let mut bad = data[..1024 * 1024].to_vec();
+        bad[5] ^= 1;
+        std::fs::write(dest2.with_extension("part"), bad).unwrap();
+        let err = crate::transfer::download_file(&http, &identity, &target, &reference2, &dest2, data.len() as u64, &|_, _| {}).await.unwrap_err().to_string();
+        assert!(err.contains("corrompu"), "{err}");
+        assert!(!dest2.exists() && !dest2.with_extension("part").exists());
+        let _ = std::fs::remove_dir_all(&client_dir);
+    }
+
+    fn job_state(id: &str) -> (String, String) {
+        let j = crate::transfer::list_jobs().into_iter().find(|j| j.id == id).expect("tâche");
+        (j.state, j.message)
+    }
+
+    #[tokio::test]
+    async fn backups_and_servers_move_between_two_machines() {
+        use crate::transfer::{new_job, run_job, Spec};
+        std::env::set_var("MCMANAGER_MACHINE_NAME", "portable");
+        let host = TestHost::start().await;
+        let (_identity, _target, client_dir) = host.pair_new_client("vps").await;
+        let state = crate::state::build_state_for_test(&client_dir).await;
+
+        // Un serveur local avec un monde, et une sauvegarde.
+        let id = uuid::Uuid::new_v4();
+        let folder = client_dir.join("servers").join(id.to_string());
+        std::fs::create_dir_all(folder.join("world")).unwrap();
+        let world = pseudo_data(300_000);
+        std::fs::write(folder.join("world/level.dat"), &world).unwrap();
+        std::fs::write(folder.join("server.properties"), "motd=Survie\nserver-port=25599\n").unwrap();
+        let mut entry = sample_entry(id, &folder);
+        entry.name = "Survie".into();
+        entry.xmx_mb = 3072;
+        entry.auto_restart = true;
+        state.servers.write().await.insert(id, entry);
+        let bdir = crate::backup::backups_dir(&client_dir, &id);
+        std::fs::create_dir_all(&bdir).unwrap();
+        let backup_bytes = pseudo_data(700_000);
+        std::fs::write(bdir.join("backup-1.zip"), &backup_bytes).unwrap();
+
+        // 1) Sauvegarde envoyée vers l'autre machine : rangée sous le nom de CETTE machine.
+        let spec = Spec::SendBackup { server_id: id, name: "backup-1.zip".into(), label: "vps".into() };
+        let job = new_job(&state, &spec).await;
+        run_job(state.clone(), job.clone(), spec).await;
+        assert_eq!(job_state(&job).0, "done", "{:?}", job_state(&job));
+        let incoming = crate::transfer::list_incoming(&host.dir);
+        assert_eq!(incoming.len(), 1, "{incoming:?}");
+        assert_eq!((incoming[0].source.as_str(), incoming[0].name.as_str()), ("portable", "Survie-backup-1.zip"));
+        assert!(std::fs::read(crate::transfer::incoming_path(&host.dir, "portable", "Survie-backup-1.zip").unwrap()).unwrap() == backup_bytes);
+
+        // 2) Récupérée en retour : un nouveau fichier, sans écraser l'existant.
+        let spec = Spec::PullBackup { label: "vps".into(), source: "portable".into(), name: "Survie-backup-1.zip".into(), server_id: id };
+        let job = new_job(&state, &spec).await;
+        run_job(state.clone(), job.clone(), spec).await;
+        assert_eq!(job_state(&job).0, "done", "{:?}", job_state(&job));
+        assert!(std::fs::read(bdir.join("recuperee-Survie-backup-1.zip")).unwrap() == backup_bytes);
+        assert!(bdir.join("backup-1.zip").exists());
+
+        // 3) Copie du serveur : l'original reste, la copie arrive avec ses réglages.
+        let spec = Spec::MoveServer { server_id: id, label: "vps".into(), delete_source: false };
+        let job = new_job(&state, &spec).await;
+        run_job(state.clone(), job.clone(), spec).await;
+        assert_eq!(job_state(&job).0, "done", "{:?}", job_state(&job));
+        assert!(state.servers.read().await.contains_key(&id), "copie : l'original est conservé");
+        let (remote_id, remote_entry) = { let s = host.rt.app_state.servers.read().await; assert_eq!(s.len(), 1); s.iter().next().map(|(k, v)| (*k, v.clone())).unwrap() };
+        assert_eq!((remote_entry.name.as_str(), remote_entry.xmx_mb, remote_entry.auto_restart), ("Survie", 3072, true), "réglages conservés");
+        assert!(std::fs::read(PathBuf::from(&remote_entry.folder).join("world/level.dat")).unwrap() == world);
+        assert!(std::fs::read_dir(client_dir.join("transfers")).map(|d| d.count()).unwrap_or(0) == 0, "archives temporaires nettoyées");
+
+        // 4) Déplacement : l'original disparaît APRÈS vérification sur l'autre machine.
+        let spec = Spec::MoveServer { server_id: id, label: "vps".into(), delete_source: true };
+        let job = new_job(&state, &spec).await;
+        run_job(state.clone(), job.clone(), spec).await;
+        let (st, msg) = job_state(&job);
+        assert_eq!(st, "done", "{msg}");
+        assert!(msg.contains("supprimé"), "{msg}");
+        assert!(!state.servers.read().await.contains_key(&id) && !folder.exists(), "déplacé : l'original est supprimé");
+        assert_eq!(host.rt.app_state.servers.read().await.len(), 2);
+
+        // 5) Un serveur qui tourne n'est ni déplacé ni copié.
+        let id2 = uuid::Uuid::new_v4();
+        let f2 = client_dir.join("servers").join(id2.to_string());
+        std::fs::create_dir_all(&f2).unwrap();
+        state.servers.write().await.insert(id2, sample_entry(id2, &f2));
+        let mut rt = crate::state::ServerRuntime::default();
+        rt.running = true;
+        state.runtime.write().await.insert(id2, rt);
+        let spec = Spec::MoveServer { server_id: id2, label: "vps".into(), delete_source: true };
+        let job = new_job(&state, &spec).await;
+        run_job(state.clone(), job.clone(), spec.clone()).await;
+        let (st, msg) = job_state(&job);
+        assert_eq!(st, "error");
+        assert!(msg.contains("arrêtez le serveur"), "{msg}");
+        assert!(state.servers.read().await.contains_key(&id2), "rien n'est supprimé");
+        assert!(crate::transfer::retry_spec(&job).is_some(), "une tâche en erreur peut être reprise");
+
+        // 6) Rapatriement d'un serveur distant, avec suppression là-bas.
+        let spec = Spec::PullServer { label: "vps".into(), remote_id, delete_source: true };
+        let job = new_job(&state, &spec).await;
+        run_job(state.clone(), job.clone(), spec).await;
+        let (st, msg) = job_state(&job);
+        assert_eq!(st, "done", "{msg}");
+        assert!(!host.rt.app_state.servers.read().await.contains_key(&remote_id), "supprimé sur la machine d'origine");
+        let local = state.servers.read().await.values().find(|e| e.xmx_mb == 3072).cloned().expect("serveur rapatrié");
+        assert!(std::fs::read(PathBuf::from(&local.folder).join("world/level.dat")).unwrap() == world);
+        let _ = std::fs::remove_dir_all(&client_dir);
+    }
+
 }
 
 #[allow(dead_code)]

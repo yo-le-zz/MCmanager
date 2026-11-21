@@ -25,6 +25,14 @@ de port sur votre routeur** (pas de redirection NAT à configurer).
    Partagez cette adresse à vos amis — c'est celle qu'ils utiliseront pour se
    connecter dans le client Minecraft (pas besoin de connaître votre IP).
 
+## Serveur Bedrock (UDP)
+
+Bedrock utilise le protocole **UDP** (port 19132 par défaut), pas TCP. MCManager ne fait que lancer l'agent
+`playit-agent` : le type de tunnel se choisit sur le site playit.gg, pas dans MCManager.
+Pour un serveur Bedrock, créez dans votre compte playit un tunnel **UDP** (type Minecraft Bedrock s'il est proposé)
+vers le port local du serveur (onglet Serveurs, `19132` par défaut) et donnez l'adresse obtenue à vos joueurs.
+*Cette procédure n'a pas été testée avec un vrai compte playit.* Même chose avec un routeur : redirigez le port en **UDP**.
+
 ## Bon à savoir
 
 - L'agent doit rester **démarré** tant que vous voulez que le serveur soit

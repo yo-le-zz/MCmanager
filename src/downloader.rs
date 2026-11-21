@@ -34,6 +34,7 @@ fn sort_versions_desc(versions: &mut [String]) {
 /// Returns the list of Minecraft versions available for a given loader, newest first.
 pub async fn list_versions(client: &reqwest::Client, loader: Loader) -> Result<Vec<String>> {
     match loader {
+        Loader::Bedrock | Loader::Bedrockpreview | Loader::Pocketmine | Loader::Nukkit => crate::bedrock_dl::list_versions(client, loader).await,
         Loader::Vanilla | Loader::Forge | Loader::Neoforge => {
             let manifest: Value = client.get(MOJANG_MANIFEST).send().await?.json().await?;
             let versions = manifest["versions"]
@@ -151,6 +152,8 @@ pub async fn list_builds(client: &reqwest::Client, loader: Loader, mc_version: &
 pub struct DownloadResult {
     pub jar_name: String,
     pub loader_version: Option<String>,
+    /// Exécutable de lancement à enregistrer (PHP téléchargé pour PocketMine-MP) ; `None` = garder celui fourni.
+    pub runtime_path: Option<String>,
 }
 
 /// Downloads (and for Forge/NeoForge, runs the installer for) the requested server
@@ -165,6 +168,11 @@ pub async fn setup_server(
 ) -> Result<DownloadResult> {
     tokio::fs::create_dir_all(folder).await?;
     match loader {
+        Loader::Bedrock | Loader::Bedrockpreview | Loader::Pocketmine | Loader::Nukkit => {
+            // `java_path` sert de « runtime » : indication de PHP pour PocketMine-MP (ignoré par le serveur officiel).
+            let i = crate::bedrock_dl::setup(client, loader, mc_version, folder, java_path).await?;
+            Ok(DownloadResult { jar_name: i.jar_name, loader_version: i.loader_version, runtime_path: i.runtime_path })
+        }
         Loader::Vanilla => download_vanilla(client, mc_version, folder).await,
         Loader::Paper => download_paper(client, mc_version, loader_version, folder).await,
         Loader::Purpur => download_purpur(client, mc_version, loader_version, folder).await,
@@ -198,7 +206,7 @@ async fn download_vanilla(client: &reqwest::Client, mc_version: &str, folder: &P
         .context("cette version n'a pas de jar serveur (trop ancienne ?)")?;
     let dest = folder.join("server.jar");
     save_stream(client, jar_url, &dest).await?;
-    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: None })
+    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: None, runtime_path: None })
 }
 
 /// Picks a build from a Paper Fill v3 `/builds` response. `wanted` may be a
@@ -230,7 +238,7 @@ async fn download_paper(client: &reqwest::Client, mc_version: &str, loader_versi
     let jar_url = download["url"].as_str().context("url de telechargement manquante dans la reponse Fill API")?;
     let dest = folder.join("server.jar");
     save_stream(client, jar_url, &dest).await?;
-    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(build_id.to_string()) })
+    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(build_id.to_string()), runtime_path: None })
 }
 
 async fn download_purpur(client: &reqwest::Client, mc_version: &str, loader_version: Option<&str>, folder: &Path) -> Result<DownloadResult> {
@@ -238,7 +246,7 @@ async fn download_purpur(client: &reqwest::Client, mc_version: &str, loader_vers
     let url = format!("{PURPUR_API}/purpur/{mc_version}/{build}/download");
     let dest = folder.join("server.jar");
     save_stream(client, &url, &dest).await?;
-    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(build.to_string()) })
+    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(build.to_string()), runtime_path: None })
 }
 
 async fn download_fabric(client: &reqwest::Client, mc_version: &str, loader_version: Option<&str>, folder: &Path) -> Result<DownloadResult> {
@@ -256,7 +264,7 @@ async fn download_fabric(client: &reqwest::Client, mc_version: &str, loader_vers
     let url = format!("{FABRIC_META}/versions/loader/{mc_version}/{loader_ver}/{installer_ver}/server/jar");
     let dest = folder.join("server.jar");
     save_stream(client, &url, &dest).await?;
-    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(loader_ver) })
+    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(loader_ver), runtime_path: None })
 }
 
 async fn download_quilt(client: &reqwest::Client, mc_version: &str, loader_version: Option<&str>, folder: &Path) -> Result<DownloadResult> {
@@ -274,7 +282,7 @@ async fn download_quilt(client: &reqwest::Client, mc_version: &str, loader_versi
     let url = format!("{QUILT_META}/versions/loader/{mc_version}/{loader_ver}/{installer_ver}/server/jar");
     let dest = folder.join("server.jar");
     save_stream(client, &url, &dest).await?;
-    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(loader_ver) })
+    Ok(DownloadResult { jar_name: "server.jar".into(), loader_version: Some(loader_ver), runtime_path: None })
 }
 
 async fn latest_forge_version(client: &reqwest::Client, mc_version: &str) -> Result<String> {
@@ -296,7 +304,7 @@ async fn download_forge(client: &reqwest::Client, mc_version: &str, loader_versi
     save_stream(client, &url, &installer_path).await?;
     run_installer(java_path, &installer_path, folder).await?;
     let jar_name = find_server_jar(folder).await.unwrap_or_else(|| "server.jar".to_string());
-    Ok(DownloadResult { jar_name, loader_version: Some(forge_ver) })
+    Ok(DownloadResult { jar_name, loader_version: Some(forge_ver), runtime_path: None })
 }
 
 async fn download_neoforge(client: &reqwest::Client, mc_version: &str, loader_version: Option<&str>, folder: &Path, java_path: &str) -> Result<DownloadResult> {
@@ -318,7 +326,7 @@ async fn download_neoforge(client: &reqwest::Client, mc_version: &str, loader_ve
     save_stream(client, &url, &installer_path).await?;
     run_installer(java_path, &installer_path, folder).await?;
     let jar_name = find_server_jar(folder).await.unwrap_or_else(|| "server.jar".to_string());
-    Ok(DownloadResult { jar_name, loader_version: Some(neo_ver) })
+    Ok(DownloadResult { jar_name, loader_version: Some(neo_ver), runtime_path: None })
 }
 
 async fn run_installer(java_path: &str, installer_path: &Path, folder: &Path) -> Result<()> {

@@ -21,7 +21,7 @@ function toast(msg, kind = "info") {
 }
 
 async function api(path, opts = {}) {
-  const { headers: extraHeaders, ...rest } = opts;
+  const { headers: extraHeaders, quiet, ...rest } = opts; // quiet : l'appelant gère l'erreur, pas de notification
   const res = await fetch(`/api${path}`, {
     ...rest,
     headers: { ...(opts.body ? { "Content-Type": "application/json" } : {}), ...(extraHeaders || {}) },
@@ -33,7 +33,7 @@ async function api(path, opts = {}) {
   }
   if (!res.ok) {
     const msg = data.error || `Erreur ${res.status}`;
-    toast(msg, "error");
+    if (!quiet) toast(msg, "error");
     throw new Error(msg);
   }
   return data;
@@ -86,6 +86,8 @@ function applyAccess() {
   for (const v of ["files", "addons", "marketplace", "schematics", "whitelist", "properties", "backups"]) {
     $(`#nav .nav-item[data-view="${v}"]`)?.classList.toggle("hidden", !can("manage"));
   }
+  // Les droits viennent d'abord, puis l'édition du serveur actif (Bedrock masque Marketplace et Schematics) : sinon l'un défait l'autre.
+  applyEditionNav(currentServer());
 }
 
 // ───────────────────────── connexion (mode serveur) ─────────────────────────
@@ -167,6 +169,30 @@ function currentServer() {
   return state.servers.find((s) => s.id === state.currentServerId);
 }
 
+// Bedrock Edition : le serveur officiel (binaire natif) ou un serveur communautaire (PocketMine-MP, Nukkit).
+const BEDROCK_LOADERS = ["bedrock", "bedrockpreview", "pocketmine", "nukkit"];
+const isBedrock = (s) => !!s && BEDROCK_LOADERS.includes(s.loader);
+// Libellé court du type de serveur pour les cartes : « BEDROCK », « BEDROCK PREVIEW », « BEDROCK · POCKETMINE-MP »…
+const loaderLabel = (s) => ({ bedrock: "Bedrock", bedrockpreview: "Bedrock Preview", pocketmine: "Bedrock · PocketMine-MP", nukkit: "Bedrock · Nukkit" }[s.loader] || s.loader);
+const isOfficialBedrock = (s) => !!s && (s.loader === "bedrock" || s.loader === "bedrockpreview");
+
+// Le menu suit l'édition du serveur actif : pas de Marketplace (Modrinth) ni de Schematics en Bedrock, « Packs & mondes » au lieu de « Mods / Plugins ».
+function applyEditionNav(cur) {
+  const label = (view, text) => { const el = $(`.nav-item[data-view="${view}"] .nav-label`); if (el) { el.dataset.orig ??= el.textContent; el.textContent = text ?? el.dataset.orig; } };
+  const hideFor = (view, hidden) => { if (hidden) $(`.nav-item[data-view="${view}"]`)?.classList.add("hidden"); };
+  const bed = isBedrock(cur);
+  hideFor("marketplace", bed);
+  hideFor("schematics", bed);
+  label("addons", isOfficialBedrock(cur) ? dcT("Packs & worlds", "Packs & mondes") : cur?.loader === "pocketmine" || cur?.loader === "nukkit" ? "Plugins" : null);
+  label("whitelist", bed ? dcT("Allow list", "Liste d'autorisation") : null);
+}
+
+// Vue sans objet pour ce type de serveur : on l'explique et on propose l'équivalent.
+function renderNotForBedrock(title, text) {
+  const s = currentServer();
+  $("#content").innerHTML = `<h1>${escapeHtml(title)} — ${escapeHtml(s?.name || "")}</h1><div class="empty-state">${text}</div>`;
+}
+
 // ───────────────────────── navigation ─────────────────────────
 
 // Menu mobile : la barre latérale devient un tiroir ouvert par le bouton de la barre du haut.
@@ -213,7 +239,7 @@ function remoteTag(s) {
 
 async function refreshServerList(selectId) {
   state.servers = await api("/servers");
-  try { state.remoteTargets = await api("/remote/hub"); } catch { state.remoteTargets = []; }
+  try { state.remoteTargets = await api("/remote/hub", { quiet: true }); } catch { state.remoteTargets = []; }
   applyAccess();
   const sel = $("#server-select");
   sel.innerHTML = `<option value="">${t("nav.none")}</option>` +
@@ -329,6 +355,7 @@ async function render() {
   const nameEl = $("#nav-server-name");
   if (nameEl) nameEl.textContent = cur ? cur.name : "";
   $$(".nav-item[data-needs-server]").forEach((b) => b.classList.toggle("needs-server-off", !state.currentServerId));
+  applyAccess(); // droits puis édition du serveur actif (menu Bedrock)
   const content = $("#content");
   content.innerHTML = '<div class="empty-state">Chargement…</div>';
   try {
@@ -337,11 +364,11 @@ async function render() {
       case "servers": return renderServers();
       case "console": return renderConsole();
       case "files": return renderFiles();
-      case "addons": return renderAddons();
-      case "marketplace": return renderMarketplace();
-      case "schematics": return renderSchematics();
-      case "whitelist": return renderWhitelist();
-      case "properties": return renderProperties();
+      case "addons": return isOfficialBedrock(cur) ? renderBedrockPacks() : renderAddons();
+      case "marketplace": return isBedrock(cur) ? renderNotForBedrock("Marketplace", dcT("The Modrinth marketplace is for Minecraft Java. For Bedrock, add packs (.mcpack / .mcaddon) in “Packs & worlds”, or plugins in “Plugins”.", "Le marketplace Modrinth concerne Minecraft Java. En Bedrock, ajoutez des packs (.mcpack / .mcaddon) dans « Packs &amp; mondes », ou des plugins dans « Plugins ».")) : renderMarketplace();
+      case "schematics": return isBedrock(cur) ? renderNotForBedrock("Schematics", dcT("Schematics are a Java (WorldEdit) feature. On Bedrock, import a whole world (.mcworld) in “Packs & worlds”.", "Les schematics sont une fonction Java (WorldEdit). En Bedrock, importez un monde entier (.mcworld) dans « Packs &amp; mondes ».")) : renderSchematics();
+      case "whitelist": return isBedrock(cur) ? renderBedrockAllowlist() : renderWhitelist();
+      case "properties": return isBedrock(cur) ? renderBedrockProperties() : renderProperties();
       case "backups": return renderBackups();
       case "stats": return renderStats();
       case "network": return renderNetwork();
@@ -350,12 +377,152 @@ async function render() {
       case "domains": return renderDomains();
       case "docs": return renderDocs();
       case "assistant": return renderAssistant();
+      case "discord": return renderDiscord();
       case "settings": return renderSettings();
       default: content.innerHTML = "";
     }
   } catch (e) {
     console.error(e);
   }
+}
+
+// ───────────────────────── Bedrock : packs, mondes, accès, réglages ─────────────────────────
+
+// Envoi d'un fichier (multipart) vers l'API ; renvoie le JSON ou lève l'erreur du serveur.
+async function uploadForm(path, form) {
+  const res = await fetch(`/api${path}`, { method: "POST", body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
+  return data;
+}
+const restartHint = (r) => r?.restart_needed ? dcT("Restart the server to apply.", "Redémarrez le serveur pour appliquer.") : "";
+
+async function renderBedrockPacks() {
+  const s = currentServer(), content = $("#content");
+  const [packs, worlds] = await Promise.all([api(`/servers/${s.id}/bedrock/packs`), api(`/servers/${s.id}/bedrock/worlds`)]);
+  const kindLabel = { behavior: dcT("Behavior", "Comportement"), resource: dcT("Resources", "Ressources"), skin: "Skins" };
+  content.innerHTML = `
+    <h1>${ico("puzzle")} ${dcT("Packs & worlds", "Packs & mondes")} — ${escapeHtml(s.name)}</h1>
+    <div class="subtitle">${dcT("Add-ons (.mcpack, .mcaddon), resource packs and worlds (.mcworld) for the official Bedrock server. A pack only works once it is active in the world.", "Add-ons (.mcpack, .mcaddon), packs de ressources et mondes (.mcworld) du serveur officiel Bedrock. Un pack ne fonctionne qu'une fois activé dans le monde.")}</div>
+    <div class="card">
+      <h2>${dcT("Installed packs", "Packs installés")} <span class="meta">${dcT("active world", "monde actif")} : ${escapeHtml(packs.level)}</span></h2>
+      ${packs.packs.length ? `<table><thead><tr><th>${dcT("Pack", "Pack")}</th><th>${dcT("Type", "Type")}</th><th>${dcT("Version", "Version")}</th><th>${dcT("Size", "Taille")}</th><th>${dcT("Active", "Actif")}</th><th></th></tr></thead><tbody>
+        ${packs.packs.map((p) => `<tr><td><b>${escapeHtml(p.name)}</b>${p.builtin ? ` <span class="badge">${dcT("built in", "livré")}</span>` : ""}<div style="font-size:12px;color:var(--text-dim)">${escapeHtml(p.description || "")}</div></td>
+          <td>${kindLabel[p.kind] || p.kind}</td><td>${p.version.join(".")}</td><td>${humanSize(p.size_bytes)}</td>
+          <td><input type="checkbox" data-bp-active="${p.uuid}" ${p.active ? "checked" : ""} style="width:auto"></td>
+          <td>${p.builtin ? "" : `<button class="btn-red btn-sm" data-bp-del="${p.uuid}">${t("common.delete")}</button>`}</td></tr>`).join("")}</tbody></table>`
+        : `<div class="empty-state">${dcT("No pack yet.", "Aucun pack pour l'instant.")}</div>`}
+      <h3 style="margin:14px 0 6px">${dcT("Add a pack", "Ajouter un pack")}</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="file" id="bp-file" accept=".mcpack,.mcaddon,.zip">
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="bp-activate" checked style="width:auto"> ${dcT("activate in the world", "activer dans le monde")}</label>
+        <button class="btn-blue" id="bp-upload">${ico("upload")} ${dcT("Install", "Installer")}</button>
+      </div>
+      <p style="color:var(--overlay0);font-size:12px;margin-top:6px">${dcT("Dependencies (for example a resource pack required by an add-on) are activated with it. Restart the server afterwards.", "Les dépendances (par exemple un pack de ressources exigé par un add-on) sont activées avec lui. Redémarrez le serveur ensuite.")}</p>
+    </div>
+    <div class="card">
+      <h2>${dcT("Worlds", "Mondes")}</h2>
+      ${worlds.worlds.length ? `<table><thead><tr><th>${dcT("World", "Monde")}</th><th>${dcT("Size", "Taille")}</th><th></th></tr></thead><tbody>
+        ${worlds.worlds.map((w) => `<tr><td><b>${escapeHtml(w.name)}</b> ${w.active ? `<span class="badge badge-green">${dcT("active", "actif")}</span>` : ""}</td><td>${humanSize(w.size_bytes)}</td>
+          <td style="white-space:nowrap">${w.active ? "" : `<button class="btn-ghost btn-sm" data-bw-activate="${escapeHtml(w.name)}">${dcT("Make active", "Rendre actif")}</button> <button class="btn-red btn-sm" data-bw-del="${escapeHtml(w.name)}">${t("common.delete")}</button> `}
+          <a class="btn-ghost btn-sm" style="text-decoration:none" href="/api/servers/${s.id}/files/export?path=${encodeURIComponent("worlds/" + w.name)}" title="${dcT("Download as a zip (rename to .mcworld to open it in the game)", "Télécharger en .zip (renommez-le en .mcworld pour l'ouvrir dans le jeu)")}">${ico("upload")} ${dcT("Export", "Exporter")}</a></td></tr>`).join("")}</tbody></table>`
+        : `<div class="empty-state">${dcT("No world yet: the server creates one on first start.", "Aucun monde : le serveur en crée un au premier démarrage.")}</div>`}
+      <h3 style="margin:14px 0 6px">${dcT("Import a world (.mcworld)", "Importer un monde (.mcworld)")}</h3>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="file" id="bw-file" accept=".mcworld,.zip">
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="bw-activate" style="width:auto"> ${dcT("make it the active world", "en faire le monde actif")}</label>
+        <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="bw-overwrite" style="width:auto"> ${dcT("replace if it exists", "remplacer s'il existe")}</label>
+        <button class="btn-blue" id="bw-upload">${ico("upload")} ${dcT("Import", "Importer")}</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>${dcT("Server version", "Version du serveur")}</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px">${dcT("Current version", "Version actuelle")} : <b>${escapeHtml(s.mc_version)}</b>. ${dcT("Changing it keeps your settings, allow list and worlds, and makes a safety backup first. The server must be stopped.", "Changer de version conserve vos réglages, la liste d'autorisation et les mondes, après une sauvegarde de sécurité. Le serveur doit être arrêté.")}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><select id="bv-version"><option>${dcT("Loading…", "Chargement…")}</option></select><button class="btn-ghost" id="bv-apply">${dcT("Install this version", "Installer cette version")}</button></div>
+    </div>`;
+  const refresh = () => renderBedrockPacks();
+  const run = async (fn, ok) => { try { const r = await fn(); toast([ok, restartHint(r)].filter(Boolean).join(" "), "success"); refresh(); } catch (e) { toast(e.message, "error"); } };
+  $$("[data-bp-active]").forEach((c) => c.addEventListener("change", () => run(() => api(`/servers/${s.id}/bedrock/packs/${c.dataset.bpActive}/activate`, { method: "POST", body: JSON.stringify({ on: c.checked }) }), dcT("Pack updated.", "Pack mis à jour."))));
+  $$("[data-bp-del]").forEach((b) => b.addEventListener("click", async () => { if (await confirmDialog(dcT("Delete this pack?", "Supprimer ce pack ?"))) run(() => api(`/servers/${s.id}/bedrock/packs/${b.dataset.bpDel}`, { method: "DELETE" }), dcT("Pack deleted.", "Pack supprimé.")); }));
+  $("#bp-upload").addEventListener("click", () => {
+    const f = $("#bp-file").files[0]; if (!f) { toast(dcT("Choose a file first.", "Choisissez d'abord un fichier."), "error"); return; }
+    const fd = new FormData(); fd.append("activate", $("#bp-activate").checked ? "true" : "false"); fd.append("file", f);
+    run(() => uploadForm(`/servers/${s.id}/bedrock/packs/upload`, fd), dcT("Pack installed.", "Pack installé."));
+  });
+  $$("[data-bw-activate]").forEach((b) => b.addEventListener("click", () => run(() => api(`/servers/${s.id}/bedrock/worlds/${encodeURIComponent(b.dataset.bwActivate)}/activate`, { method: "POST" }), dcT("Active world changed.", "Monde actif changé."))));
+  $$("[data-bw-del]").forEach((b) => b.addEventListener("click", async () => { if (await confirmDialog(dcT("Delete this world for good?", "Supprimer ce monde définitivement ?"))) run(() => api(`/servers/${s.id}/bedrock/worlds/${encodeURIComponent(b.dataset.bwDel)}`, { method: "DELETE" }), dcT("World deleted.", "Monde supprimé.")); }));
+  $("#bw-upload").addEventListener("click", () => {
+    const f = $("#bw-file").files[0]; if (!f) { toast(dcT("Choose a file first.", "Choisissez d'abord un fichier."), "error"); return; }
+    const fd = new FormData(); fd.append("activate", $("#bw-activate").checked); fd.append("overwrite", $("#bw-overwrite").checked); fd.append("file", f);
+    run(() => uploadForm(`/servers/${s.id}/bedrock/worlds/import`, fd), dcT("World imported.", "Monde importé."));
+  });
+  api(`/loaders/${s.loader}/versions`, { quiet: true }).then((v) => { $("#bv-version").innerHTML = v.map((x) => `<option ${x === s.mc_version ? "selected" : ""}>${escapeHtml(x)}</option>`).join(""); }).catch(() => { $("#bv-version").innerHTML = `<option value="">${dcT("List unavailable", "Liste indisponible")}</option>`; });
+  $("#bv-apply").addEventListener("click", async () => {
+    const version = $("#bv-version").value;
+    if (!version || !await confirmDialog(dcT(`Install version ${version}? A safety backup is made first.`, `Installer la version ${version} ? Une sauvegarde de sécurité est faite d'abord.`))) return;
+    try { await api(`/servers/${s.id}/bedrock/update`, { method: "POST", body: JSON.stringify({ version }) }); toast(dcT("Version installed.", "Version installée."), "success"); const sv = await api("/servers"); state.servers = sv; refresh(); } catch (e) { toast(e.message, "error"); }
+  });
+}
+
+async function renderBedrockAllowlist() {
+  const s = currentServer(), content = $("#content");
+  const d = await api(`/servers/${s.id}/bedrock/allowlist`);
+  const levels = [["visitor", dcT("Visitor", "Visiteur")], ["member", dcT("Member", "Membre")], ["operator", dcT("Operator", "Opérateur")]];
+  content.innerHTML = `
+    <h1>${ico("shield-check")} ${dcT("Allow list & permissions", "Liste d'autorisation & permissions")} — ${escapeHtml(s.name)}</h1>
+    <div class="subtitle">${dcT("Only the players below can join when “Allow list” is enabled in the server properties. Gamertags are Xbox names.", "Seuls les joueurs ci-dessous peuvent rejoindre quand « Liste d'autorisation » est activée dans les propriétés du serveur. Les pseudos sont les noms Xbox (gamertags).")}${d.running ? " " + dcT("Changes apply immediately.", "Les changements s'appliquent immédiatement.") : ""}</div>
+    <div class="card">
+      <h2>${dcT("Allow list", "Liste d'autorisation")}</h2>
+      ${d.allowlist.length ? `<table><thead><tr><th>Gamertag</th><th>XUID</th><th></th></tr></thead><tbody>${d.allowlist.map((e) => `<tr><td><b>${escapeHtml(e.name)}</b></td><td>${escapeHtml(e.xuid || "—")}</td><td><button class="btn-red btn-sm" data-al-del="${escapeHtml(e.name)}">${t("common.delete")}</button></td></tr>`).join("")}</tbody></table>` : `<div class="empty-state">${dcT("Nobody yet.", "Personne pour l'instant.")}</div>`}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><input id="al-name" placeholder="Gamertag" maxlength="32"><input id="al-xuid" placeholder="XUID (${dcT("optional", "facultatif")})" style="width:200px"><button class="btn-blue" id="al-add">${dcT("Add", "Ajouter")}</button></div>
+    </div>
+    ${d.official ? `<div class="card">
+      <h2>${dcT("Permission levels", "Niveaux de permission")}</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:8px">${dcT("Operators can use commands. Players are identified by XUID, shown in the console when they join (“Player connected: name, xuid: …”).", "Les opérateurs peuvent utiliser les commandes. Les joueurs sont identifiés par leur XUID, affiché dans la console à leur connexion (« Player connected: nom, xuid: … »).")}</p>
+      ${d.permissions.length ? `<table><thead><tr><th>XUID</th><th>${dcT("Level", "Niveau")}</th><th></th></tr></thead><tbody>${d.permissions.map((e) => `<tr><td>${escapeHtml(e.xuid)}</td><td><select data-pm-set="${escapeHtml(e.xuid)}">${levels.map(([v, l]) => `<option value="${v}" ${e.permission === v ? "selected" : ""}>${l}</option>`).join("")}</select></td><td><button class="btn-red btn-sm" data-pm-del="${escapeHtml(e.xuid)}">${t("common.delete")}</button></td></tr>`).join("")}</tbody></table>` : `<div class="empty-state">${dcT("No specific permission: everybody gets the default level.", "Aucune permission particulière : tout le monde a le niveau par défaut.")}</div>`}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><input id="pm-xuid" placeholder="XUID" style="width:220px"><select id="pm-level">${levels.map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select><button class="btn-blue" id="pm-add">${dcT("Set", "Définir")}</button></div>
+    </div>` : ""}`;
+  const go = async (fn) => { try { await fn(); renderBedrockAllowlist(); } catch (e) { toast(e.message, "error"); } };
+  $("#al-add").addEventListener("click", () => go(() => api(`/servers/${s.id}/bedrock/allowlist`, { method: "POST", body: JSON.stringify({ name: $("#al-name").value, xuid: $("#al-xuid").value.trim() || null }) })));
+  $$("[data-al-del]").forEach((b) => b.addEventListener("click", () => go(() => api(`/servers/${s.id}/bedrock/allowlist/${encodeURIComponent(b.dataset.alDel)}`, { method: "DELETE" }))));
+  const setPerm = (xuid, level) => go(() => api(`/servers/${s.id}/bedrock/permissions`, { method: "POST", body: JSON.stringify({ xuid, level }) }));
+  $("#pm-add")?.addEventListener("click", () => setPerm($("#pm-xuid").value.trim(), $("#pm-level").value));
+  $$("[data-pm-set]").forEach((sel) => sel.addEventListener("change", () => setPerm(sel.dataset.pmSet, sel.value)));
+  $$("[data-pm-del]").forEach((b) => b.addEventListener("click", () => setPerm(b.dataset.pmDel, "none")));
+}
+
+async function renderBedrockProperties() {
+  const s = currentServer(), content = $("#content");
+  let raw = "";
+  try { raw = (await api(`/servers/${s.id}/files/content?path=${encodeURIComponent("server.properties")}`)).content || ""; }
+  catch { content.innerHTML = `<h1>${ico("sliders-horizontal")} ${t("view.properties")} — ${escapeHtml(s.name)}</h1><div class="empty-state">${t("view.propertiesMissing")}</div>`; return; }
+  const [schema, status] = await Promise.all([api(`/bedrock/properties-schema?loader=${s.loader}`), api(`/servers/${s.id}/status`)]);
+  const props = parseProperties(raw);
+  const fr = state.lang === "fr";
+  const field = (p) => {
+    const val = props[p.key] ?? "", label = fr ? p.label_fr : p.label_en, help = fr ? p.help_fr : p.help_en;
+    const hint = help ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px">${escapeHtml(help)}</div>` : "";
+    if (p.kind === "bool") return `<div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" class="bp-field" data-key="${p.key}" data-kind="bool" style="width:auto" ${val === "true" ? "checked" : ""}> ${escapeHtml(label)}</label>${hint}</div>`;
+    if (p.kind === "select") return `<div class="form-row"><label>${escapeHtml(label)}</label><select class="bp-field" data-key="${p.key}" data-kind="select">${p.options.map((o) => `<option value="${o}" ${val.toLowerCase() === o.toLowerCase() ? "selected" : ""}>${o}</option>`).join("")}${val && !p.options.some((o) => o.toLowerCase() === val.toLowerCase()) ? `<option value="${escapeHtml(val)}" selected>${escapeHtml(val)}</option>` : ""}</select>${hint}</div>`;
+    return `<div class="form-row"><label>${escapeHtml(label)}</label><input class="bp-field" data-key="${p.key}" data-kind="${p.kind}" type="${p.kind === "number" ? "number" : "text"}" ${p.min != null ? `min="${p.min}"` : ""} ${p.max != null ? `max="${p.max}"` : ""} value="${escapeHtml(val)}">${hint}</div>`;
+  };
+  content.innerHTML = `
+    <h1>${ico("sliders-horizontal")} ${t("view.properties")} — ${escapeHtml(s.name)}</h1>
+    <div class="subtitle">${dcT("Bedrock settings, checked before saving (types, limits, allowed values).", "Réglages Bedrock, vérifiés avant l'enregistrement (types, bornes, valeurs permises).")} ${status.running ? dcT("A restart is needed to apply changes.", "Un redémarrage est nécessaire pour appliquer les changements.") : ""}</div>
+    <div class="card"><div class="form-grid">${schema.properties.map(field).join("")}</div><button class="btn-green" id="bprops-save">${t("common.save")}</button></div>
+    <div class="card"><h2>${dcT("Full file (advanced)", "Fichier complet (avancé)")}</h2>
+      <textarea id="bprops-raw" style="width:100%;min-height:220px;font-family:Consolas,monospace;font-size:12.5px">${escapeHtml(raw)}</textarea>
+      <button class="btn-blue" id="bprops-save-raw" style="margin-top:8px">${dcT("Save the full file", "Enregistrer le fichier complet")}</button></div>`;
+  $("#bprops-save").addEventListener("click", async () => {
+    const changes = {};
+    $$(".bp-field").forEach((el) => { changes[el.dataset.key] = el.dataset.kind === "bool" ? (el.checked ? "true" : "false") : el.value; });
+    try { const r = await api(`/servers/${s.id}/bedrock/properties`, { method: "PUT", body: JSON.stringify({ changes }) }); toast([dcT("Settings saved.", "Réglages enregistrés."), restartHint(r)].filter(Boolean).join(" "), "success"); const sv = await api("/servers"); state.servers = sv; renderBedrockProperties(); }
+    catch (e) { toast(e.message, "error"); }
+  });
+  $("#bprops-save-raw").addEventListener("click", async () => {
+    await api(`/servers/${s.id}/files/content`, { method: "PUT", body: JSON.stringify({ path: "server.properties", content: $("#bprops-raw").value }) });
+    toast("server.properties", "success"); renderBedrockProperties();
+  });
 }
 
 // ───────────────────────── dashboard ─────────────────────────
@@ -415,7 +582,7 @@ async function renderDashboard() {
           ${rows.map(({ s, status }) => `
             <tr>
               <td><b>${escapeHtml(s.name)}</b> ${remoteTag(s)}</td>
-              <td>${s.loader}</td>
+              <td>${escapeHtml(loaderLabel(s))}</td>
               <td>${s.mc_version}</td>
               <td>${status?.running ? '<span class="badge badge-green">En ligne</span>' : '<span class="badge badge-red">Arrêté</span>'}</td>
               <td>${status?.players_online != null ? `${status.players_online}/${status.players_max}` : '—'}</td>
@@ -474,11 +641,13 @@ async function renderServers() {
     <div class="subtitle">Créez et gérez vos serveurs Minecraft.</div>
     <div class="toolbar">
       ${isAdmin() ? `<button class="btn-blue" id="new-server-btn">+ Nouveau serveur</button>
-      <button class="btn-ghost" id="import-server-btn">${ico("folder-open")} Importer un serveur existant</button>` : ""}
+      <button class="btn-ghost" id="import-server-btn">${ico("folder-open")} Importer un serveur existant</button>
+      <button class="btn-ghost" id="templates-btn">${ico("copy")} ${dcT("Server templates", "Modèles de serveur")}</button>` : ""}
     </div>
     <div id="server-list" class="grid"></div>
     <div id="wizard" class="card hidden"></div>
     <div id="import-form" class="card hidden"></div>
+    <div id="tpl-form" class="card hidden"></div>
   `;
   const list = $("#server-list");
   if (state.servers.length === 0) {
@@ -486,7 +655,7 @@ async function renderServers() {
   } else {
     list.innerHTML = state.servers.map((s) => `
       <div class="stat-card">
-        <div class="label">${s.loader.toUpperCase()} · ${s.mc_version}</div>
+        <div class="label">${escapeHtml(loaderLabel(s))} · ${s.mc_version}${isBedrock(s) ? ` · UDP ${s.port}` : ""}</div>
         <div class="value" style="font-size:16px">${escapeHtml(s.name)}</div>
         ${s.remote ? `<div style="margin-top:6px">${remoteTag(s)}</div>` : ""}
         ${s.domain ? `<div style="margin-top:6px;font-size:12px;color:var(--subtext1)" title="Domaine configuré dans l'onglet Réseau">${ico("globe")} ${escapeHtml(s.domain)}${s.public_port && s.public_port !== 25565 ? ":" + s.public_port : ""}</div>` : ""}
@@ -494,10 +663,12 @@ async function renderServers() {
           <button class="btn-ghost" data-open="${s.id}">Ouvrir</button>
           ${s.remote ? "" : `<button class="btn-ghost" data-explorer="${s.id}">${ico("folder-open")} ${t('files.openExplorer')}</button>`}
           <a class="btn-ghost" style="text-decoration:none;display:inline-flex;align-items:center" href="/api/servers/${s.id}/files/export?path=" title="Télécharger tout le serveur en .zip (réimportable via « Importer un serveur existant »)">${ico("upload")} Exporter</a>
+          ${isAdmin() && !s.remote ? `<button class="btn-ghost" data-tpl-save="${s.id}" title="${dcT("Save this server's configuration as a reusable template", "Enregistrer la configuration de ce serveur comme modèle réutilisable")}">${ico("copy")} ${dcT("Template", "Modèle")}</button>` : ""}
           ${isAdmin() ? `<button class="btn-red" data-del="${s.id}">${t('common.delete')}</button>` : ""}
         </div>
       </div>
     `).join("");
+    $$("[data-tpl-save]").forEach((b) => b.addEventListener("click", () => openTemplates(b.dataset.tplSave)));
     $$("[data-open]").forEach((b) => b.addEventListener("click", () => {
       state.currentServerId = b.dataset.open;
       $("#server-select").value = state.currentServerId;
@@ -534,6 +705,55 @@ async function renderServers() {
     $("#wizard").classList.add("hidden");
     openImportForm();
   });
+  $("#templates-btn")?.addEventListener("click", () => {
+    $("#wizard").classList.add("hidden");
+    $("#import-form").classList.add("hidden");
+    openTemplates(null);
+  });
+}
+
+// Modèles de serveur : enregistrer la configuration d'un serveur (plugins, réglages, éventuellement le monde) puis en créer d'autres en un clic.
+async function openTemplates(saveServerId) {
+  const box = $("#tpl-form");
+  box.classList.remove("hidden");
+  const list = await api("/templates", { quiet: true }).catch(() => []);
+  const src = saveServerId ? state.servers.find((x) => x.id === saveServerId) : null;
+  box.innerHTML = `<h2>${ico("copy")} ${dcT("Server templates", "Modèles de serveur")}</h2>
+    <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">${dcT("A template keeps a server's settings, server.properties, plugins/mods and configuration (never logs). Creating from a template needs no download.", "Un modèle conserve les réglages d'un serveur, son server.properties, ses plugins/mods et leur configuration (jamais les journaux). Créer depuis un modèle ne télécharge rien.")}</p>
+    ${src ? `<div class="form-grid">
+      <div class="form-row"><label>${dcT("Save “" + src.name + "” as a template", "Enregistrer « " + src.name + " » comme modèle")}</label><input id="tpl-name" value="${escapeHtml(src.name)}" maxlength="80"></div>
+      <div class="form-row"><label>${dcT("Description (optional)", "Description (facultative)")}</label><input id="tpl-desc" maxlength="300"></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;margin:6px 0"><input type="checkbox" id="tpl-world" style="width:auto"> ${dcT("Include the world (the server must be stopped)", "Inclure le monde (le serveur doit être arrêté)")}</label>
+    <button class="btn-green" id="tpl-save">${dcT("Save the template", "Enregistrer le modèle")}</button><hr style="margin:14px 0;border:0;border-top:1px solid var(--border)">` : ""}
+    ${list.length ? `<table><thead><tr><th>${dcT("Template", "Modèle")}</th><th>${dcT("Server", "Serveur")}</th><th>RAM</th><th>${dcT("Size", "Taille")}</th><th>${dcT("New server", "Nouveau serveur")}</th><th></th></tr></thead><tbody>
+      ${list.map((m) => `<tr>
+        <td><b>${escapeHtml(m.name)}</b>${m.include_world ? ` <span class="badge badge-blue">${dcT("with world", "avec monde")}</span>` : ""}<div style="font-size:12px;color:var(--text-dim)">${escapeHtml(m.description || "")}</div></td>
+        <td>${m.loader.toUpperCase()} ${escapeHtml(m.mc_version)}</td><td>${m.xmx_mb} Mo</td><td>${humanSize(m.size_bytes)}</td>
+        <td style="white-space:nowrap"><input data-tpl-new="${m.id}" placeholder="${dcT("name", "nom")}" style="width:130px"> <input data-tpl-port="${m.id}" placeholder="${dcT("port (auto)", "port (auto)")}" style="width:100px"> <button class="btn-blue btn-sm" data-tpl-create="${m.id}">${dcT("Create", "Créer")}</button></td>
+        <td><button class="btn-red btn-sm" data-tpl-del="${m.id}">${t('common.delete')}</button></td></tr>`).join("")}</tbody></table>`
+      : `<div class="empty-state">${dcT("No template yet. Use the “Template” button on a server card.", "Aucun modèle. Utilisez le bouton « Modèle » sur la carte d'un serveur.")}</div>`}`;
+  $("#tpl-save")?.addEventListener("click", async () => {
+    try {
+      await api("/templates", { method: "POST", body: JSON.stringify({ server_id: saveServerId, name: $("#tpl-name").value, description: $("#tpl-desc").value, include_world: $("#tpl-world").checked }) });
+      toast(dcT("Template saved.", "Modèle enregistré."), "success");
+      openTemplates(null);
+    } catch (e) { toast(e.message, "error"); }
+  });
+  $$("[data-tpl-create]").forEach((b) => b.addEventListener("click", async () => {
+    const id = b.dataset.tplCreate, name = $(`[data-tpl-new="${id}"]`).value.trim(), port = parseInt($(`[data-tpl-port="${id}"]`).value, 10);
+    if (!name) { toast(dcT("Give the new server a name.", "Donnez un nom au nouveau serveur."), "error"); return; }
+    try {
+      await api(`/templates/${id}/create`, { method: "POST", body: JSON.stringify({ name, port: Number.isInteger(port) ? port : null }) });
+      toast(dcT("Server created from the template.", "Serveur créé depuis le modèle."), "success");
+      renderServers();
+    } catch (e) { toast(e.message, "error"); }
+  }));
+  $$("[data-tpl-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!await confirmDialog(dcT("Delete this template? Servers already created from it are not affected.", "Supprimer ce modèle ? Les serveurs déjà créés ne sont pas touchés."))) return;
+    await api(`/templates/${b.dataset.tplDel}`, { method: "DELETE" });
+    openTemplates(null);
+  }));
 }
 
 async function openImportForm() {
@@ -556,6 +776,12 @@ async function openImportForm() {
           <option value="quilt">Quilt</option>
           <option value="forge">Forge</option>
           <option value="neoforge">NeoForge</option>
+          <optgroup label="Bedrock Edition">
+            <option value="bedrock">Bedrock — serveur officiel</option>
+            <option value="bedrockpreview">Bedrock — Preview</option>
+            <option value="pocketmine">PocketMine-MP</option>
+            <option value="nukkit">Nukkit</option>
+          </optgroup>
         </select>
       </div>
       <div class="form-row"><label>Version de Minecraft</label><input id="i-version" placeholder="1.21.11"></div>
@@ -619,17 +845,15 @@ async function openWizard() {
     </div>
     <div class="form-grid">
       <div class="form-row">
-        <label>Type de serveur</label>
-        <select id="w-loader">
-          <option value="vanilla">Vanilla (officiel Mojang)</option>
-          <option value="paper" selected>Paper (plugins, performant — recommandé)</option>
-          <option value="purpur">Purpur (Paper + options avancées)</option>
-          <option value="spigot">Spigot</option>
-          <option value="fabric">Fabric (mods, léger)</option>
-          <option value="quilt">Quilt (mods, fork moderne de Fabric)</option>
-          <option value="forge">Forge (mods)</option>
-          <option value="neoforge">NeoForge (mods, successeur de Forge)</option>
+        <label>${dcT("Edition of Minecraft", "Édition de Minecraft")}</label>
+        <select id="w-edition">
+          <option value="java">Java Edition (PC — Windows, macOS, Linux)</option>
+          <option value="bedrock">Bedrock Edition (mobile, console, Windows 10/11)</option>
         </select>
+      </div>
+      <div class="form-row">
+        <label>Type de serveur</label>
+        <select id="w-loader"></select>
       </div>
       <div class="form-row">
         <label>Version de Minecraft</label>
@@ -648,15 +872,16 @@ async function openWizard() {
         <input id="w-xmx" type="number" value="2048">
       </div>
       <div class="form-row">
-        <label>Port</label>
+        <label id="w-port-label">Port</label>
         <input id="w-port" type="number" value="25565">
       </div>
       <div class="form-row">
         <label style="display:flex;align-items:center;gap:8px;margin-top:20px">
-          <input id="w-eula" type="checkbox" style="width:auto"> J'accepte l'EULA Minecraft (mojang.com/eula)
+          <input id="w-eula" type="checkbox" style="width:auto"> <span id="w-eula-text">J'accepte l'EULA Minecraft (mojang.com/eula)</span>
         </label>
       </div>
     </div>
+    <div id="w-bedrock-note" class="hidden" style="margin:6px 0 12px;padding:10px 12px;border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:var(--radius);font-size:13px;color:var(--text-dim)"></div>
     <details style="margin:6px 0 16px">
       <summary style="cursor:pointer;color:var(--subtext1);font-size:13px">Options avancées</summary>
       <div class="form-grid" style="margin-top:12px">
@@ -675,7 +900,7 @@ async function openWizard() {
           <input id="w-autobackup" type="number" placeholder="ex: 60">
         </div>
         <div class="form-row">
-          <label>Arguments JVM additionnels (séparés par des espaces)</label>
+          <label id="w-extraargs-label">Arguments JVM additionnels (séparés par des espaces)</label>
           <input id="w-extraargs" placeholder="ex: -Dfile.encoding=UTF-8">
         </div>
       </div>
@@ -691,6 +916,45 @@ async function openWizard() {
 
   const LOADERS_WITH_BUILDS = ["paper", "purpur", "fabric", "quilt", "forge"];
 
+  // Édition Java ou Bedrock : la liste des types, le port par défaut (TCP 25565 / UDP 19132), la mémoire et l'EULA changent.
+  const LOADERS = {
+    java: [["vanilla", "Vanilla (officiel Mojang)"], ["paper", "Paper (plugins, performant — recommandé)"], ["purpur", "Purpur (Paper + options avancées)"], ["spigot", "Spigot"],
+           ["fabric", "Fabric (mods, léger)"], ["quilt", "Quilt (mods, fork moderne de Fabric)"], ["forge", "Forge (mods)"], ["neoforge", "NeoForge (mods, successeur de Forge)"]],
+    bedrock: [["bedrock", dcT("Official Bedrock Dedicated Server (Mojang) — recommended", "Serveur dédié officiel Bedrock (Mojang) — recommandé")],
+              ["bedrockpreview", dcT("Official server — Preview (beta versions)", "Serveur officiel — Preview (versions bêta)")],
+              ["pocketmine", dcT("PocketMine-MP (plugins in PHP, runs on ARM)", "PocketMine-MP (plugins en PHP, tourne sur ARM)")],
+              ["nukkit", dcT("Nukkit (plugins in Java, runs on ARM)", "Nukkit (plugins en Java, tourne sur ARM)")]],
+  };
+  const editionSel = $("#w-edition");
+  function applyEdition() {
+    const ed = editionSel.value, bed = ed === "bedrock";
+    loaderSel.innerHTML = LOADERS[ed].map(([v, l], i) => `<option value="${v}" ${(bed ? i === 0 : v === "paper") ? "selected" : ""}>${escapeHtml(l)}</option>`).join("");
+    $("#w-port").value = bed ? 19132 : 25565;
+    $("#w-port-label").textContent = bed ? "Port (UDP)" : "Port";
+    $("#w-eula-text").textContent = bed ? dcT("I accept the Minecraft End User License Agreement and Privacy Policy (minecraft.net/eula)", "J'accepte le contrat de licence et la politique de confidentialité de Minecraft (minecraft.net/eula)") : "J'accepte l'EULA Minecraft (mojang.com/eula)";
+    $("#w-aikar").closest(".form-row").classList.toggle("hidden", bed);
+    $("#w-extraargs-label").textContent = bed ? dcT("Additional arguments (space separated)", "Arguments additionnels (séparés par des espaces)") : "Arguments JVM additionnels (séparés par des espaces)";
+    updateBedrockFields();
+  }
+  // Mémoire : réglable pour Java et Nukkit (JVM) ; sans objet pour le serveur officiel (binaire natif) et PocketMine (PHP).
+  function updateBedrockFields() {
+    const l = loaderSel.value, noRam = l === "bedrock" || l === "bedrockpreview" || l === "pocketmine";
+    $("#w-xms").closest(".form-row").classList.toggle("hidden", noRam);
+    $("#w-xmx").closest(".form-row").classList.toggle("hidden", noRam);
+    const note = $("#w-bedrock-note");
+    const notes = {
+      bedrock: dcT("The official server is a native program from Mojang: x86_64 only (Windows, Linux — not ARM / Raspberry Pi, not macOS). Players connect over UDP; open port 19132 (UDP). Hot backups are safe (save hold).", "Le serveur officiel est un programme natif de Mojang : x86_64 uniquement (Windows, Linux — pas ARM / Raspberry Pi, pas macOS). Les joueurs se connectent en UDP ; ouvrez le port 19132 (UDP). Les sauvegardes à chaud sont sûres (save hold)."),
+      bedrockpreview: dcT("Preview versions are betas and may break worlds: use a separate world. Same platform limits as the official server.", "Les versions Preview sont des bêtas qui peuvent abîmer un monde : utilisez un monde à part. Mêmes limites de plateforme que le serveur officiel."),
+      pocketmine: dcT("PocketMine-MP needs PHP 8 with the pmmpthread extension: MCManager downloads the official PHP binaries for you when yours is not suitable. Works on ARM. Plugins are .phar files.", "PocketMine-MP exige PHP 8 avec l'extension pmmpthread : MCManager télécharge pour vous les binaires PHP officiels si le vôtre ne convient pas. Fonctionne sur ARM. Les plugins sont des fichiers .phar."),
+      nukkit: dcT("Nukkit is a community server written in Java (Java 17+ recommended). Works on ARM. Fewer vanilla features than the official server.", "Nukkit est un serveur communautaire écrit en Java (Java 17+ conseillé). Fonctionne sur ARM. Moins de fonctions vanilla que le serveur officiel."),
+    };
+    note.textContent = notes[l] || "";
+    note.classList.toggle("hidden", !notes[l]);
+  }
+  applyEdition();
+  editionSel.addEventListener("change", async () => { applyEdition(); await loadVersions(); });
+  loaderSel.addEventListener("change", updateBedrockFields);
+
   async function loadBuilds() {
     if (!LOADERS_WITH_BUILDS.includes(loaderSel.value) || !versionSel.value) {
       buildRow.classList.add("hidden");
@@ -699,14 +963,23 @@ async function openWizard() {
     buildRow.classList.remove("hidden");
     buildSel.innerHTML = '<option value="">Dernière stable (recommandé)</option>';
     try {
-      const builds = await api(`/loaders/${loaderSel.value}/builds?version=${encodeURIComponent(versionSel.value)}`);
+      const builds = await api(`/loaders/${loaderSel.value}/builds?version=${encodeURIComponent(versionSel.value)}`, { quiet: true });
       buildSel.innerHTML += builds.map((b) => `<option value="${escapeHtml(b.value)}">${escapeHtml(b.label)}</option>`).join("");
     } catch { /* garde juste l'option par défaut */ }
   }
 
   async function loadVersions() {
     versionSel.innerHTML = "<option>Chargement…</option>";
-    const versions = await api(`/loaders/${loaderSel.value}/versions`);
+    let versions;
+    try { versions = await api(`/loaders/${loaderSel.value}/versions`, { quiet: true }); }
+    catch (e) {
+      // Hors ligne ou source injoignable : on le dit dans la liste au lieu de laisser « Chargement… » et une erreur muette.
+      versionSel.innerHTML = `<option value="">${dcT("Version list unavailable — check your connection", "Liste des versions indisponible — vérifiez la connexion")}</option>`;
+      $("#w-status").textContent = String(e?.message || e);
+      buildRow.classList.add("hidden");
+      return;
+    }
+    $("#w-status").textContent = "";
     versionSel.innerHTML = versions.map((v) => `<option value="${v}">${v}</option>`).join("");
     await loadBuilds();
   }
@@ -730,8 +1003,8 @@ async function openWizard() {
         loader: loaderSel.value,
         mc_version: versionSel.value,
         loader_version: buildSel.value || null,
-        xms_mb: parseInt($("#w-xms").value, 10),
-        xmx_mb: parseInt($("#w-xmx").value, 10),
+        xms_mb: parseInt($("#w-xms").value, 10) || 1024,
+        xmx_mb: parseInt($("#w-xmx").value, 10) || 2048,
         port: parseInt($("#w-port").value, 10),
         eula_accepted: true,
         aikar_flags: $("#w-aikar").checked,
@@ -758,7 +1031,7 @@ function renderConsole() {
   const content = $("#content");
   content.innerHTML = `
     <h1>${t('view.console')} — ${escapeHtml(s.name)}</h1>
-    <div class="subtitle">${s.loader} · ${s.mc_version} · port ${s.port}</div>
+    <div class="subtitle">${escapeHtml(loaderLabel(s))} · ${s.mc_version} · port ${s.port}${isBedrock(s) ? " (UDP)" : ""}</div>
     <div class="toolbar">
       ${can("control") ? `<button class="btn-green" id="c-start">${ico("play")} Démarrer</button>
       <button class="btn-yellow" id="c-restart">${ico("rotate-cw")} Redémarrer</button>
@@ -1677,9 +1950,9 @@ function fmtDate(iso) {
 async function renderRemote() {
   const content = $("#content");
   const hub = await api("/remote/hub");
-  const net = await api("/network").catch(() => null);
+  const net = await api("/network", { quiet: true }).catch(() => null);
   let info = null;
-  try { info = await api("/server/info"); } catch {}
+  try { info = await api("/server/info", { quiet: true }); } catch {}
 
   content.innerHTML = `
     <h1>${ico("network")} ${t('view.remote')}</h1>
@@ -1695,7 +1968,7 @@ async function renderRemote() {
           <td>${h.online ? '<span class="badge badge-green">En ligne</span>' : `<span class="badge badge-red" title="${escapeHtml(h.last_error || "")}">Injoignable</span>`}${h.online ? "" : `<div style="font-size:11px;color:var(--overlay0);max-width:320px">${escapeHtml(h.last_error || "")}</div>`}</td>
           <td>${h.server_count}</td>
           <td>${h.latency_ms != null ? h.latency_ms + " ms" : "—"}</td>
-          <td><button class="btn-red" data-rm-forget="${escapeHtml(h.label)}">Oublier</button></td>
+          <td style="white-space:nowrap">${h.online ? `<button class="btn-ghost btn-sm" data-rm-update="${escapeHtml(h.label)}" title="${dcT("Check and install the latest MCManager on this machine", "Vérifier et installer la dernière version de MCManager sur cette machine")}">${ico("download")} ${dcT("Update", "Mettre à jour")}</button> ` : ""}<button class="btn-red" data-rm-forget="${escapeHtml(h.label)}">Oublier</button></td>
         </tr>`).join("")}</tbody></table>
         <p style="color:var(--overlay0);font-size:12px;margin-top:10px">Leurs serveurs sont dans le <b>Tableau de bord</b> et la liste des <b>Serveurs</b> (étiquette ${ico("network")} distant). Pour en créer un directement sur une instance, choisissez « Héberger sur » dans l'assistant de création.</p>`
         : '<div class="empty-state">Aucune instance jumelée pour l\'instant.</div>'}
@@ -1715,19 +1988,8 @@ async function renderRemote() {
       <span id="rm-pair-status" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
 
-    ${hub.length ? `
-    <div class="card">
-      <h2>Envoyer un serveur local vers une instance</h2>
-      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">Copie le dossier complet du serveur local choisi vers l'instance distante et l'y enregistre comme nouveau serveur (la copie locale reste en place). Transfert par blocs chiffrés, limité à 512 Mo : pour un très gros monde, préférez rsync/scp.</p>
-      <div style="display:flex;gap:8px">
-        <select id="rm-deploy-target">${hub.map((h) => `<option value="${escapeHtml(h.label)}">${escapeHtml(h.label)}</option>`).join("")}</select>
-        <select id="rm-deploy-select" style="flex:1">
-          ${state.servers.filter((s) => !s.remote).map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.loader} ${s.mc_version})</option>`).join("")}
-        </select>
-        <button class="btn-mauve" id="rm-deploy">${ico("upload")} Envoyer</button>
-      </div>
-      <div id="rm-deploy-result" style="margin-top:8px;font-size:13px"></div>
-    </div>` : ""}
+    ${hub.length ? transfersCard(hub) : ""}
+    <div class="card" id="incoming-card"></div>
 
     ${info ? `
     <div class="card">
@@ -1775,24 +2037,149 @@ async function renderRemote() {
     renderRemote();
   }));
 
-  $("#rm-deploy")?.addEventListener("click", async () => {
-    const serverId = $("#rm-deploy-select").value;
-    const label = $("#rm-deploy-target").value;
-    if (!serverId) return;
-    const btn = $("#rm-deploy");
-    btn.disabled = true;
-    btn.textContent = "Envoi en cours…";
+  bindTransfers(hub);
+}
+
+// ───────────────────────── transferts entre machines ─────────────────────────
+// Déplacer / copier un serveur, rapatrier un serveur distant, envoyer ou récupérer des sauvegardes, miroir automatique.
+// Les transferts se font en flux, sont vérifiés (SHA-256) et reprenables ; la suite du suivi est affichée en direct.
+
+function transfersCard(hub) {
+  const locals = state.servers.filter((s) => !s.remote);
+  const remotes = state.servers.filter((s) => s.remote);
+  const machines = hub.map((h) => `<option value="${escapeHtml(h.label)}">${escapeHtml(h.label)}</option>`).join("");
+  const localOpts = locals.map((s) => `<option value="${s.id}">${escapeHtml(s.name)} (${s.loader} ${s.mc_version})</option>`).join("");
+  const remoteOpts = remotes.map((s) => `<option value="${escapeHtml(s.remote.label)}|${s.id}">${escapeHtml(s.name)} — ${escapeHtml(s.remote.label)}</option>`).join("");
+  return `<div class="card" id="transfers-card">
+    <h2>${ico("upload")} ${dcT("Transfers between machines", "Transferts entre machines")}</h2>
+    <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">${dcT("Streamed (large worlds are fine), verified with a SHA-256 checksum and resumable: if the connection drops, press Resume and it continues where it stopped. The server must be stopped. “Move” deletes the original only after the copy has been found on the other machine.", "En flux (les gros mondes passent), vérifiés par empreinte SHA-256 et reprenables : si la connexion coupe, « Reprendre » continue là où ça s'est arrêté. Le serveur doit être arrêté. « Déplacer » ne supprime l'original qu'après avoir retrouvé la copie sur l'autre machine.")}</p>
+
+    <h3 style="margin:8px 0 6px">${dcT("Send a local server", "Envoyer un serveur local")}</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="tf-local">${localOpts}</select><span>→</span><select id="tf-machine">${machines}</select>
+      <button class="btn-mauve" id="tf-copy" type="button">${dcT("Copy", "Copier")}</button>
+      <button class="btn-red" id="tf-move" type="button">${dcT("Move (delete here)", "Déplacer (supprimer ici)")}</button>
+    </div>
+
+    ${remotes.length ? `<h3 style="margin:14px 0 6px">${dcT("Bring a remote server here", "Rapatrier un serveur distant")}</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="tf-remote">${remoteOpts}</select>
+      <button class="btn-mauve" id="tf-pull-copy" type="button">${dcT("Copy here", "Copier ici")}</button>
+      <button class="btn-red" id="tf-pull-move" type="button">${dcT("Move here (delete there)", "Déplacer ici (supprimer là-bas)")}</button>
+    </div>` : ""}
+
+    <h3 style="margin:14px 0 6px">${dcT("Backups to another machine", "Sauvegardes vers une autre machine")}</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="tf-bk-server">${localOpts}</select>
+      <select id="tf-bk-file"><option value="">${dcT("(choose a server)", "(choisissez un serveur)")}</option></select>
+      <span>→</span><select id="tf-bk-machine">${machines}</select>
+      <button class="btn-blue" id="tf-bk-send" type="button">${dcT("Send backup", "Envoyer la sauvegarde")}</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <label style="font-size:13px">${dcT("Automatic mirror: copy every new backup of", "Miroir automatique : copier chaque nouvelle sauvegarde de")}</label>
+      <select id="tf-mirror-server">${localOpts}</select><span>→</span>
+      <select id="tf-mirror-machine"><option value="">${dcT("(no mirror)", "(aucun miroir)")}</option>${machines}</select>
+      <button class="btn-ghost" id="tf-mirror-save" type="button">${dcT("Apply", "Appliquer")}</button>
+    </div>
+
+    <h3 style="margin:14px 0 6px">${dcT("Progress", "Suivi")}</h3>
+    <div id="tf-jobs"></div>
+  </div>`;
+}
+
+let transferPoll = null;
+function jobRow(j) {
+  const pct = j.total ? Math.min(100, Math.round((j.sent * 100) / j.total)) : 0;
+  const kind = { move: dcT("Move", "Déplacement"), copy: dcT("Copy", "Copie"), backup: dcT("Backup", "Sauvegarde"), restore: dcT("Restore", "Récupération") }[j.kind] || j.kind;
+  const mb = (n) => (n / 1048576).toFixed(n > 1e8 ? 0 : 1);
+  const bar = j.state === "running" ? `<div style="height:6px;background:var(--bg-sunken);border-radius:3px;margin-top:4px"><div style="height:6px;width:${pct}%;background:var(--accent);border-radius:3px"></div></div><span style="font-size:11px;color:var(--text-dim)">${mb(j.sent)} / ${mb(j.total)} Mo (${pct} %)</span>` : "";
+  const badge = j.state === "running" ? `<span class="badge badge-blue">${dcT("Running", "En cours")}</span>` : j.state === "done" ? `<span class="badge badge-green">${dcT("Done", "Terminé")}</span>` : `<span class="badge badge-red">${dcT("Error", "Erreur")}</span>`;
+  const retry = j.state === "error" ? ` <button class="btn-ghost btn-sm" data-tf-retry="${j.id}">${dcT("Resume", "Reprendre")}</button>` : "";
+  return `<tr><td>${kind}</td><td>${escapeHtml(j.title)} → ${escapeHtml(j.target)}${bar}${j.message ? `<div style="font-size:12px;color:${j.state === "error" ? "var(--red)" : "var(--text-dim)"};overflow-wrap:anywhere">${escapeHtml(j.message)}</div>` : ""}</td><td style="white-space:nowrap">${badge}${retry}</td></tr>`;
+}
+
+async function refreshJobs() {
+  const box = $("#tf-jobs");
+  if (!box) { clearInterval(transferPoll); transferPoll = null; return; }
+  const jobs = await api("/transfers", { quiet: true }).catch(() => []);
+  box.innerHTML = jobs.length ? `<table><tbody>${jobs.slice(0, 12).map(jobRow).join("")}</tbody></table>` : `<div style="color:var(--overlay0);font-size:12px">${dcT("No transfer yet.", "Aucun transfert pour l'instant.")}</div>`;
+  $$("[data-tf-retry]", box).forEach((b) => b.addEventListener("click", async () => {
+    await api(`/transfers/${b.dataset.tfRetry}/retry`, { method: "POST" });
+    refreshJobs();
+  }));
+  if (jobs.some((j) => j.state === "running") && !transferPoll) transferPoll = setInterval(refreshJobs, 1500);
+  if (!jobs.some((j) => j.state === "running") && transferPoll) { clearInterval(transferPoll); transferPoll = null; refreshIncoming(); }
+}
+
+async function refreshIncoming() {
+  const card = $("#incoming-card");
+  if (!card) return;
+  const list = await api("/incoming-backups", { quiet: true }).catch(() => []);
+  card.innerHTML = `<h2>${ico("archive")} ${dcT("Backups received from other machines", "Sauvegardes reçues d'autres machines")}</h2>` + (list.length
+    ? `<table><thead><tr><th>${dcT("From", "De")}</th><th>${dcT("File", "Fichier")}</th><th>${dcT("Size", "Taille")}</th><th>${dcT("Date", "Date")}</th><th></th></tr></thead><tbody>${list.map((b) => `<tr><td>${escapeHtml(b.source)}</td><td>${escapeHtml(b.name)}</td><td>${humanSize(b.size_bytes)}</td><td>${b.modified ? fmtDate(b.modified) : "—"}</td><td><button class="btn-red btn-sm" data-in-del="${escapeHtml(b.source)}/${escapeHtml(b.name)}">${dcT("Delete", "Supprimer")}</button></td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty-state">${dcT("Nothing received yet. Other machines can send their backups here (Transfers → Backups to another machine).", "Rien reçu pour l'instant. Les autres machines peuvent envoyer leurs sauvegardes ici (Transferts → Sauvegardes vers une autre machine).")}</div>`);
+  $$("[data-in-del]", card).forEach((b) => b.addEventListener("click", async () => {
+    if (!await confirmDialog(dcT("Delete this received backup?", "Supprimer cette sauvegarde reçue ?"))) return;
+    const [src, ...rest] = b.dataset.inDel.split("/");
+    await api(`/incoming-backups/${encodeURIComponent(src)}/${encodeURIComponent(rest.join("/"))}`, { method: "DELETE" });
+    refreshIncoming();
+  }));
+}
+
+function bindTransfers(hub) {
+  refreshIncoming();
+  refreshJobs();
+  const start = async (spec, confirmText) => {
+    if (confirmText && !await confirmDialog(confirmText)) return;
     try {
-      const result = await api(`/remote/${encodeURIComponent(label)}/deploy/${serverId}`, { method: "POST" });
-      $("#rm-deploy-result").textContent = result.server_id ? `Envoyé avec succès (id distant : ${result.server_id}).` : (result.error || "Terminé.");
-      toast("Serveur envoyé.", "success");
-    } catch (e) {
-      $("#rm-deploy-result").textContent = e.message || "Échec de l'envoi.";
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Envoyer";
-    }
-  });
+      await api("/transfers/start", { method: "POST", body: JSON.stringify(spec) });
+      toast(dcT("Transfer started.", "Transfert démarré."), "success");
+      refreshJobs();
+    } catch (e) { toast(e.message, "error"); }
+  };
+  const machine = () => $("#tf-machine")?.value;
+  $("#tf-copy")?.addEventListener("click", () => $("#tf-local").value && start({ op: "move_server", server_id: $("#tf-local").value, label: machine(), delete_source: false }));
+  $("#tf-move")?.addEventListener("click", () => $("#tf-local").value && start({ op: "move_server", server_id: $("#tf-local").value, label: machine(), delete_source: true },
+    dcT("Move this server? It is copied, checked on the other machine, then DELETED from this one.", "Déplacer ce serveur ? Il est copié, vérifié sur l'autre machine, puis SUPPRIMÉ de celle-ci.")));
+  const pull = (del) => { const [label, id] = $("#tf-remote").value.split("|"); return label && start({ op: "pull_server", label, remote_id: id, delete_source: del }, del ? dcT("Move here? The original will be DELETED from the other machine once the copy is verified.", "Déplacer ici ? L'original sera SUPPRIMÉ de l'autre machine une fois la copie vérifiée.") : null); };
+  $("#tf-pull-copy")?.addEventListener("click", () => pull(false));
+  $("#tf-pull-move")?.addEventListener("click", () => pull(true));
+  const loadBackups = async () => {
+    const sel = $("#tf-bk-file"), id = $("#tf-bk-server")?.value;
+    if (!sel || !id) return;
+    const list = await api(`/servers/${id}/backups`).catch(() => []);
+    sel.innerHTML = list.length ? list.map((b) => `<option value="${escapeHtml(b.name)}">${escapeHtml(b.name)} (${humanSize(b.size_bytes)})</option>`).join("") : `<option value="">${dcT("(no backup)", "(aucune sauvegarde)")}</option>`;
+  };
+  $("#tf-bk-server")?.addEventListener("change", loadBackups);
+  loadBackups();
+  $("#tf-bk-send")?.addEventListener("click", () => $("#tf-bk-file").value && start({ op: "send_backup", server_id: $("#tf-bk-server").value, name: $("#tf-bk-file").value, label: $("#tf-bk-machine").value }));
+  (async () => {
+    const mirrors = await api("/mirrors", { quiet: true }).catch(() => ({}));
+    const sync = () => { const m = mirrors[$("#tf-mirror-server")?.value]; if ($("#tf-mirror-machine")) $("#tf-mirror-machine").value = m || ""; };
+    $("#tf-mirror-server")?.addEventListener("change", sync);
+    sync();
+    $("#tf-mirror-save")?.addEventListener("click", async () => {
+      const id = $("#tf-mirror-server").value, target = $("#tf-mirror-machine").value || null;
+      await api(`/mirrors/${id}`, { method: "PUT", body: JSON.stringify({ target }) });
+      mirrors[id] = target;
+      toast(target ? dcT("Backups of this server are now copied to ", "Les sauvegardes de ce serveur sont maintenant copiées vers ") + target : dcT("Mirror disabled.", "Miroir désactivé."), "success");
+    });
+  })();
+  // Mise à jour d'une machine distante : vérification, confirmation, puis installation + redémarrage là-bas.
+  $$("[data-rm-update]").forEach((b) => b.addEventListener("click", async () => {
+    const label = b.dataset.rmUpdate;
+    b.disabled = true;
+    try {
+      const info = await api(`/remote/${encodeURIComponent(label)}/call`, { method: "POST", body: JSON.stringify({ action: "update_check" }) });
+      if (info.error) throw new Error(info.error);
+      if (!info.update_available) { toast(dcT(`“${label}” is up to date (v${info.current_version}).`, `« ${label} » est à jour (v${info.current_version}).`), "success"); return; }
+      if (!info.self_update_supported) { toast(`${label} : ${info.self_update_note || dcT("manual update required", "mise à jour manuelle requise")}`, "error"); return; }
+      if (!await confirmDialog(dcT(`Update “${label}” from v${info.current_version} to v${info.latest_version}? It restarts; its running servers stop cleanly and start again.`, `Mettre à jour « ${label} » de v${info.current_version} vers v${info.latest_version} ? Elle redémarre ; ses serveurs en marche s'arrêtent proprement puis repartent.`))) return;
+      const r = await api(`/remote/${encodeURIComponent(label)}/call`, { method: "POST", body: JSON.stringify({ action: "update_apply" }) });
+      if (r.error) throw new Error(r.error);
+      toast(dcT(`“${label}” is restarting on v${r.to}.`, `« ${label} » redémarre en v${r.to}.`), "success");
+    } catch (e) { toast(e.message, "error"); } finally { b.disabled = false; }
+  }));
 }
 
 // ───────────────────────── réseau : domaines, DNS, nginx ─────────────────────────
@@ -2603,11 +2990,9 @@ function bindAppearance() {
   $("#ap-reset", card).addEventListener("click", () => { Appearance.reset(); redraw(); });
 }
 
-async function renderSettings(keepDetect = false) {
+// Vue « Discord » (menu, à côté de Console, Fichiers...) : bot, statut, webhook, invitation, salons par serveur Minecraft.
+async function renderDiscord(keepDetect = false) {
   const content = $("#content");
-  const cfg = await api("/settings");
-  const s = currentServer();
-  const appearance = getConsoleAppearance();
   let discordCfg, discordStatus = { state: "disabled", detail: "" };
   try { discordCfg = await api("/discord/config"); discordStatus = await api("/discord/status"); } catch { discordCfg = { enabled: false, language: "fr", has_token: false, has_webhook: false, guild_id: "", channel_id: "", operator_user_ids: [], operator_role_ids: [], viewer_role_ids: [], console_view_role_ids: [], chat_role_ids: [], servers: {}, notify_started: true, notify_ready: true, notify_stopped: true, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   // Rôles/salons Discord détectés (menus plutôt que des identifiants à recopier) : rechargés si le bot est déjà configuré.
@@ -2615,67 +3000,9 @@ async function renderSettings(keepDetect = false) {
   if (!dcDetect.roles.length && discordCfg.has_token && discordCfg.guild_id) {
     try { const g = await api(`/discord/guild/${discordCfg.guild_id}`); dcDetect.roles = g.roles; dcDetect.channels = g.channels; } catch {}
   }
-  let ntfyCfg;
-  try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
   content.innerHTML = `
-    <h1>${ico("settings")} ${t('view.settings')}</h1>
-    ${appearanceCard()}
-    <div class="card">
-      <h2>${t('common.language')}</h2>
-      <div class="form-grid">
-        <div class="form-row">
-          <label>${t('settings.language')}</label>
-          <select id="st-lang">
-            <option value="fr" ${state.lang === "fr" ? "selected" : ""}>Français</option>
-            <option value="en" ${state.lang === "en" ? "selected" : ""}>English</option>
-            <option value="es" ${state.lang === "es" ? "selected" : ""}>Español</option>
-          </select>
-        </div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>Apparence de la console</h2>
-      <div class="form-grid">
-        <div class="form-row">
-          <label>Taille de police (${appearance.fontSize}px)</label>
-          <input id="ap-fontsize" type="range" min="10" max="20" step="0.5" value="${appearance.fontSize}">
-        </div>
-        <div class="form-row">
-          <label>Police</label>
-          <select id="ap-fontfamily">
-            <option value="Consolas, 'Courier New', monospace" ${appearance.fontFamily.startsWith("Consolas") ? "selected" : ""}>Consolas</option>
-            <option value="'Courier New', monospace" ${appearance.fontFamily.startsWith("'Courier New'") ? "selected" : ""}>Courier New</option>
-            <option value="'Cascadia Code', Consolas, monospace" ${appearance.fontFamily.startsWith("'Cascadia") ? "selected" : ""}>Cascadia Code</option>
-            <option value="'JetBrains Mono', Consolas, monospace" ${appearance.fontFamily.startsWith("'JetBrains") ? "selected" : ""}>JetBrains Mono</option>
-            <option value="monospace" ${appearance.fontFamily === "monospace" ? "selected" : ""}>Monospace système</option>
-          </select>
-        </div>
-      </div>
-      <p style="color:var(--overlay0);font-size:12px">S'applique immédiatement, à toutes les consoles (jeu et playit.gg). Enregistré sur cet appareil uniquement.</p>
-    </div>
-    <div class="card">
-      <h2>${ico("bell")} Notifications (ntfy)</h2>
-      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
-        Pousse des notifications vers <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy.sh</a> (ou une instance auto-hébergée) — pas besoin de bot, juste un nom de "topic" à vous. Installez l'appli ntfy et abonnez-vous au même topic pour recevoir les alertes sur votre téléphone.
-      </p>
-      <div class="form-grid">
-        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="nt-enabled" style="width:auto" ${ntfyCfg.enabled ? "checked" : ""}> Activer les notifications</label></div>
-        <div class="form-row"><label>Serveur ntfy</label><input id="nt-server" placeholder="https://ntfy.sh" value="${escapeHtml(ntfyCfg.server_url)}"></div>
-        <div class="form-row"><label>Topic</label><input id="nt-topic" placeholder="mon-mcmanager-abc123" value="${escapeHtml(ntfyCfg.topic)}"></div>
-        <div class="form-row"><label>Jeton d'authentification ${ntfyCfg.has_token ? '<span class="meta">(configuré)</span>' : '<span class="meta">(optionnel, pour un serveur protégé)</span>'}</label><input id="nt-token" type="password" placeholder="${ntfyCfg.has_token ? "Laisser vide pour conserver" : "Laisser vide si non protégé"}"></div>
-      </div>
-      <div class="form-grid" style="margin-top:6px">
-        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-crash" style="width:auto" ${ntfyCfg.notify_crash ? "checked" : ""}> Crash</label>
-        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-backup" style="width:auto" ${ntfyCfg.notify_backup ? "checked" : ""}> Sauvegarde terminée</label>
-        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-restart" style="width:auto" ${ntfyCfg.notify_scheduled_restart ? "checked" : ""}> Redémarrage programmé</label>
-        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-autostop" style="width:auto" ${ntfyCfg.notify_auto_stop ? "checked" : ""}> Arrêt automatique</label>
-        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-players" style="width:auto" ${ntfyCfg.notify_player_join_leave ? "checked" : ""}> Connexion/déconnexion joueur</label>
-      </div>
-      <div style="margin-top:10px;display:flex;gap:8px">
-        <button class="btn-green" id="nt-save">${t('common.save')}</button>
-        <button class="btn-ghost" id="nt-test">${ico("send")} Envoyer un test</button>
-      </div>
-    </div>
+    <h1>${ico("bot")} Discord</h1>
+    <div class="subtitle">${dcT("Bot, webhook, status and channels for your Minecraft servers.", "Bot, webhook, statut et salons pour vos serveurs Minecraft.")}</div>
     <div class="card">
       <h2>${ico("bot")} ${dcT("Discord bot", "Bot Discord")}</h2>
       <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
@@ -2754,6 +3081,170 @@ async function renderSettings(keepDetect = false) {
       <button class="btn-ghost" id="dc-test">${ico("send")} ${dcT("Send a test", "Envoyer un test")}</button>
       <span id="dc-msg" style="margin-left:10px;font-size:12px;color:var(--subtext1)"></span>
     </div>
+  `;
+  const dcPickerValue = (name) => {
+    const boxes = $$(`[data-picker="${name}"]`);
+    if (boxes.length) return boxes.filter((b) => b.checked).map((b) => b.value);
+    return ($("#" + name)?.value || "").split(/[\s,;]+/).filter(Boolean);
+  };
+  const discordBody = () => ({
+    enabled: $("#dc-enabled").checked,
+    language: $("#dc-lang").value,
+    bot_token: $("#dc-token").value,
+    webhook_url: $("#dc-webhook").value,
+    guild_id: $("#dc-guild").value,
+    channel_id: $("#dc-channel").value,
+    join_host: $("#dc-join-host").value.trim(),
+    operator_user_ids: ($("#dc-op-users").value || "").split(/[\s,;]+/).filter(Boolean),
+    operator_role_ids: dcPickerValue("dc-op-roles"),
+    viewer_role_ids: dcPickerValue("dc-view-roles"),
+    console_view_role_ids: dcPickerValue("dc-console-view-roles"),
+    chat_role_ids: dcPickerValue("dc-chat-roles"),
+    ...Object.fromEntries(["started", "ready", "stopped", "crash", "backup", "scheduled_restart", "auto_stop", "player_join_leave"].map((k) => ["notify_" + k, $("#dc-n-" + k).checked])),
+  });
+  const dcSave = () => api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
+  $("#dc-presence-apply").addEventListener("click", async () => {
+    try {
+      await api("/discord/presence", { method: "POST", body: JSON.stringify({ presence: $("#dc-presence").value, activity_type: $("#dc-activity-type").value, activity_text: $("#dc-activity-text").value }) });
+      toast(dcT("Bot status updated", "Statut du bot mis à jour"), "success");
+    } catch (e) { toast(e.message, "error"); }
+  });
+  $("#dc-save").addEventListener("click", async () => {
+    await dcSave();
+    toast(dcT("Discord settings saved.", "Réglages Discord enregistrés."), "success");
+    // Le bot se (re)connecte en quelques secondes : on relit l'état avant de réafficher.
+    setTimeout(renderDiscord, 2500);
+  });
+  $("#dc-detect").addEventListener("click", async () => {
+    $("#dc-msg").textContent = dcT("Detecting…", "Détection…");
+    try {
+      const typed = $("#dc-token").value;
+      const d = await api("/discord/detect", { method: "POST", body: JSON.stringify({ bot_token: typed }) });
+      dcDetect.guilds = d.guilds || [];
+      dcDetect.invite_url = d.invite_url || "";
+      const keep = discordBody();
+      // On enregistre le token saisi tout de suite : les menus de rôles/salons en ont besoin.
+      await dcSave();
+      const guildId = keep.guild_id && dcDetect.guilds.some((g) => g.id === keep.guild_id) ? keep.guild_id : (dcDetect.guilds[0] || {}).id;
+      if (guildId) {
+        const g = await api(`/discord/guild/${guildId}`);
+        dcDetect.roles = g.roles; dcDetect.channels = g.channels;
+        await api("/discord/config", { method: "POST", body: JSON.stringify({ ...keep, bot_token: "", guild_id: guildId }) });
+      }
+      toast(dcT(`${dcDetect.guilds.length} Discord server(s) found.`, `${dcDetect.guilds.length} serveur(s) Discord trouvé(s).`), dcDetect.guilds.length ? "success" : "error");
+      renderDiscord(true);
+    } catch { $("#dc-msg").textContent = ""; }
+  });
+  $("#dc-guild").addEventListener("change", async () => {
+    // Autre serveur Discord choisi : on enregistre puis on recharge ses rôles et salons.
+    try {
+      const gid = $("#dc-guild").value;
+      await api("/discord/config", { method: "POST", body: JSON.stringify({ ...discordBody(), bot_token: "", guild_id: gid, operator_role_ids: [], viewer_role_ids: [], console_view_role_ids: [], chat_role_ids: [], channel_id: "" }) });
+      const g = await api(`/discord/guild/${gid}`);
+      dcDetect.roles = g.roles; dcDetect.channels = g.channels;
+      renderDiscord(true);
+    } catch {}
+  });
+  $$("[data-dc-setup]").forEach((b) => b.addEventListener("click", async () => {
+    const id = b.dataset.dcSetup;
+    const row = b.closest("tr");
+    b.disabled = true;
+    try {
+      await dcSave(); // rôles généraux choisis ci-dessus pris en compte
+      await api(`/discord/servers/${id}/setup`, { method: "POST", body: JSON.stringify({
+        stream_console: row.querySelector('[data-dc="stream"]').checked,
+        bridge_chat: row.querySelector('[data-dc="chat"]').checked,
+        command_role_ids: dcPickerValue("dc-cmd-" + id),
+      }) });
+      toast(dcT("Discord channels ready.", "Salons Discord prêts."), "success");
+      renderDiscord(true);
+    } catch { b.disabled = false; }
+  }));
+  $$("[data-dc-remove]").forEach((b) => b.addEventListener("click", async () => {
+    const del = await confirmDialog(dcT("Also delete the category and channels on Discord?", "Supprimer aussi la catégorie et les salons sur Discord ?"), { confirmLabel: dcT("Delete on Discord", "Supprimer sur Discord"), cancelLabel: dcT("Only unlink", "Seulement délier") });
+    await api(`/discord/servers/${b.dataset.dcRemove}/setup?delete_channels=${del}`, { method: "DELETE" });
+    renderDiscord(true);
+  }));
+  $("#dc-test").addEventListener("click", async () => {
+    $("#dc-msg").textContent = dcT("Sending…", "Envoi…");
+    try {
+      await dcSave();
+      await api("/discord/test", { method: "POST" });
+      $("#dc-msg").textContent = "";
+      toast(dcT("Test message sent to Discord.", "Message de test envoyé sur Discord."), "success");
+    } catch (e) {
+      $("#dc-msg").textContent = "";
+    }
+  });
+
+}
+
+async function renderSettings(keepDetect = false) {
+  const content = $("#content");
+  const cfg = await api("/settings");
+  const s = currentServer();
+  const appearance = getConsoleAppearance();
+  let ntfyCfg;
+  try { ntfyCfg = await api("/ntfy/config"); } catch { ntfyCfg = { enabled: false, server_url: "", topic: "", has_token: false, notify_crash: true, notify_backup: true, notify_scheduled_restart: true, notify_auto_stop: true, notify_player_join_leave: false }; }
+  content.innerHTML = `
+    <h1>${ico("settings")} ${t('view.settings')}</h1>
+    ${appearanceCard()}
+    <div class="card">
+      <h2>${t('common.language')}</h2>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>${t('settings.language')}</label>
+          <select id="st-lang">
+            <option value="fr" ${state.lang === "fr" ? "selected" : ""}>Français</option>
+            <option value="en" ${state.lang === "en" ? "selected" : ""}>English</option>
+            <option value="es" ${state.lang === "es" ? "selected" : ""}>Español</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Apparence de la console</h2>
+      <div class="form-grid">
+        <div class="form-row">
+          <label>Taille de police (${appearance.fontSize}px)</label>
+          <input id="ap-fontsize" type="range" min="10" max="20" step="0.5" value="${appearance.fontSize}">
+        </div>
+        <div class="form-row">
+          <label>Police</label>
+          <select id="ap-fontfamily">
+            <option value="Consolas, 'Courier New', monospace" ${appearance.fontFamily.startsWith("Consolas") ? "selected" : ""}>Consolas</option>
+            <option value="'Courier New', monospace" ${appearance.fontFamily.startsWith("'Courier New'") ? "selected" : ""}>Courier New</option>
+            <option value="'Cascadia Code', Consolas, monospace" ${appearance.fontFamily.startsWith("'Cascadia") ? "selected" : ""}>Cascadia Code</option>
+            <option value="'JetBrains Mono', Consolas, monospace" ${appearance.fontFamily.startsWith("'JetBrains") ? "selected" : ""}>JetBrains Mono</option>
+            <option value="monospace" ${appearance.fontFamily === "monospace" ? "selected" : ""}>Monospace système</option>
+          </select>
+        </div>
+      </div>
+      <p style="color:var(--overlay0);font-size:12px">S'applique immédiatement, à toutes les consoles (jeu et playit.gg). Enregistré sur cet appareil uniquement.</p>
+    </div>
+    <div class="card">
+      <h2>${ico("bell")} Notifications (ntfy)</h2>
+      <p style="color:var(--overlay0);font-size:12px;margin-bottom:10px">
+        Pousse des notifications vers <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy.sh</a> (ou une instance auto-hébergée) — pas besoin de bot, juste un nom de "topic" à vous. Installez l'appli ntfy et abonnez-vous au même topic pour recevoir les alertes sur votre téléphone.
+      </p>
+      <div class="form-grid">
+        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="nt-enabled" style="width:auto" ${ntfyCfg.enabled ? "checked" : ""}> Activer les notifications</label></div>
+        <div class="form-row"><label>Serveur ntfy</label><input id="nt-server" placeholder="https://ntfy.sh" value="${escapeHtml(ntfyCfg.server_url)}"></div>
+        <div class="form-row"><label>Topic</label><input id="nt-topic" placeholder="mon-mcmanager-abc123" value="${escapeHtml(ntfyCfg.topic)}"></div>
+        <div class="form-row"><label>Jeton d'authentification ${ntfyCfg.has_token ? '<span class="meta">(configuré)</span>' : '<span class="meta">(optionnel, pour un serveur protégé)</span>'}</label><input id="nt-token" type="password" placeholder="${ntfyCfg.has_token ? "Laisser vide pour conserver" : "Laisser vide si non protégé"}"></div>
+      </div>
+      <div class="form-grid" style="margin-top:6px">
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-crash" style="width:auto" ${ntfyCfg.notify_crash ? "checked" : ""}> Crash</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-backup" style="width:auto" ${ntfyCfg.notify_backup ? "checked" : ""}> Sauvegarde terminée</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-restart" style="width:auto" ${ntfyCfg.notify_scheduled_restart ? "checked" : ""}> Redémarrage programmé</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-autostop" style="width:auto" ${ntfyCfg.notify_auto_stop ? "checked" : ""}> Arrêt automatique</label>
+        <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="nt-players" style="width:auto" ${ntfyCfg.notify_player_join_leave ? "checked" : ""}> Connexion/déconnexion joueur</label>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="btn-green" id="nt-save">${t('common.save')}</button>
+        <button class="btn-ghost" id="nt-test">${ico("send")} Envoyer un test</button>
+      </div>
+    </div>
     <div class="card">
       <h2>Général</h2>
       <div class="form-grid">
@@ -2761,6 +3252,8 @@ async function renderSettings(keepDetect = false) {
           <div style="display:flex;gap:8px"><input id="st-java" style="flex:1" value="${escapeHtml(cfg.java_path)}"><button class="btn-ghost" id="st-java-detect" type="button">${ico("search")} Détecter</button></div>
           <div id="st-java-found" style="font-size:12px;margin-top:4px"></div></div>
         <div class="form-row"><label>Dépôt GitHub pour les mises à jour (owner/repo)</label><input id="st-repo" value="${escapeHtml(cfg.update_repo)}"></div>
+        <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="st-resume" style="width:auto" ${cfg.resume_servers !== false ? "checked" : ""}> ${dcT("Restart servers that were running when MCManager stopped (update, restart, power cut)", "Relancer les serveurs qui tournaient quand MCManager s'est arrêté (mise à jour, redémarrage, coupure)")}</label>
+        <button class="btn-ghost btn-sm" id="st-restart" type="button" style="margin-top:8px">${ico("rotate-ccw")} ${dcT("Restart MCManager now", "Redémarrer MCManager maintenant")}</button></div>
         <div class="form-row"><label style="display:flex;align-items:center;gap:8px;margin-top:20px"><input type="checkbox" id="st-autocheck" style="width:auto" ${cfg.check_updates_on_start ? "checked" : ""}> Vérifier les mises à jour au démarrage</label></div>
       </div>
       <button class="btn-green" id="st-save">${t('common.save')}</button>
@@ -2847,101 +3340,6 @@ async function renderSettings(keepDetect = false) {
     }
   });
   bindAppearance();
-  const dcPickerValue = (name) => {
-    const boxes = $$(`[data-picker="${name}"]`);
-    if (boxes.length) return boxes.filter((b) => b.checked).map((b) => b.value);
-    return ($("#" + name)?.value || "").split(/[\s,;]+/).filter(Boolean);
-  };
-  const discordBody = () => ({
-    enabled: $("#dc-enabled").checked,
-    language: $("#dc-lang").value,
-    bot_token: $("#dc-token").value,
-    webhook_url: $("#dc-webhook").value,
-    guild_id: $("#dc-guild").value,
-    channel_id: $("#dc-channel").value,
-    join_host: $("#dc-join-host").value.trim(),
-    operator_user_ids: ($("#dc-op-users").value || "").split(/[\s,;]+/).filter(Boolean),
-    operator_role_ids: dcPickerValue("dc-op-roles"),
-    viewer_role_ids: dcPickerValue("dc-view-roles"),
-    console_view_role_ids: dcPickerValue("dc-console-view-roles"),
-    chat_role_ids: dcPickerValue("dc-chat-roles"),
-    ...Object.fromEntries(["started", "ready", "stopped", "crash", "backup", "scheduled_restart", "auto_stop", "player_join_leave"].map((k) => ["notify_" + k, $("#dc-n-" + k).checked])),
-  });
-  const dcSave = () => api("/discord/config", { method: "POST", body: JSON.stringify(discordBody()) });
-  $("#dc-presence-apply").addEventListener("click", async () => {
-    try {
-      await api("/discord/presence", { method: "POST", body: JSON.stringify({ presence: $("#dc-presence").value, activity_type: $("#dc-activity-type").value, activity_text: $("#dc-activity-text").value }) });
-      toast(dcT("Bot status updated", "Statut du bot mis à jour"), "success");
-    } catch (e) { toast(e.message, "error"); }
-  });
-  $("#dc-save").addEventListener("click", async () => {
-    await dcSave();
-    toast(dcT("Discord settings saved.", "Réglages Discord enregistrés."), "success");
-    // Le bot se (re)connecte en quelques secondes : on relit l'état avant de réafficher.
-    setTimeout(renderSettings, 2500);
-  });
-  $("#dc-detect").addEventListener("click", async () => {
-    $("#dc-msg").textContent = dcT("Detecting…", "Détection…");
-    try {
-      const typed = $("#dc-token").value;
-      const d = await api("/discord/detect", { method: "POST", body: JSON.stringify({ bot_token: typed }) });
-      dcDetect.guilds = d.guilds || [];
-      dcDetect.invite_url = d.invite_url || "";
-      const keep = discordBody();
-      // On enregistre le token saisi tout de suite : les menus de rôles/salons en ont besoin.
-      await dcSave();
-      const guildId = keep.guild_id && dcDetect.guilds.some((g) => g.id === keep.guild_id) ? keep.guild_id : (dcDetect.guilds[0] || {}).id;
-      if (guildId) {
-        const g = await api(`/discord/guild/${guildId}`);
-        dcDetect.roles = g.roles; dcDetect.channels = g.channels;
-        await api("/discord/config", { method: "POST", body: JSON.stringify({ ...keep, bot_token: "", guild_id: guildId }) });
-      }
-      toast(dcT(`${dcDetect.guilds.length} Discord server(s) found.`, `${dcDetect.guilds.length} serveur(s) Discord trouvé(s).`), dcDetect.guilds.length ? "success" : "error");
-      renderSettings(true);
-    } catch { $("#dc-msg").textContent = ""; }
-  });
-  $("#dc-guild").addEventListener("change", async () => {
-    // Autre serveur Discord choisi : on enregistre puis on recharge ses rôles et salons.
-    try {
-      const gid = $("#dc-guild").value;
-      await api("/discord/config", { method: "POST", body: JSON.stringify({ ...discordBody(), bot_token: "", guild_id: gid, operator_role_ids: [], viewer_role_ids: [], console_view_role_ids: [], chat_role_ids: [], channel_id: "" }) });
-      const g = await api(`/discord/guild/${gid}`);
-      dcDetect.roles = g.roles; dcDetect.channels = g.channels;
-      renderSettings(true);
-    } catch {}
-  });
-  $$("[data-dc-setup]").forEach((b) => b.addEventListener("click", async () => {
-    const id = b.dataset.dcSetup;
-    const row = b.closest("tr");
-    b.disabled = true;
-    try {
-      await dcSave(); // rôles généraux choisis ci-dessus pris en compte
-      await api(`/discord/servers/${id}/setup`, { method: "POST", body: JSON.stringify({
-        stream_console: row.querySelector('[data-dc="stream"]').checked,
-        bridge_chat: row.querySelector('[data-dc="chat"]').checked,
-        command_role_ids: dcPickerValue("dc-cmd-" + id),
-      }) });
-      toast(dcT("Discord channels ready.", "Salons Discord prêts."), "success");
-      renderSettings(true);
-    } catch { b.disabled = false; }
-  }));
-  $$("[data-dc-remove]").forEach((b) => b.addEventListener("click", async () => {
-    const del = await confirmDialog(dcT("Also delete the category and channels on Discord?", "Supprimer aussi la catégorie et les salons sur Discord ?"), { confirmLabel: dcT("Delete on Discord", "Supprimer sur Discord"), cancelLabel: dcT("Only unlink", "Seulement délier") });
-    await api(`/discord/servers/${b.dataset.dcRemove}/setup?delete_channels=${del}`, { method: "DELETE" });
-    renderSettings(true);
-  }));
-  $("#dc-test").addEventListener("click", async () => {
-    $("#dc-msg").textContent = dcT("Sending…", "Envoi…");
-    try {
-      await dcSave();
-      await api("/discord/test", { method: "POST" });
-      $("#dc-msg").textContent = "";
-      toast(dcT("Test message sent to Discord.", "Message de test envoyé sur Discord."), "success");
-    } catch (e) {
-      $("#dc-msg").textContent = "";
-    }
-  });
-
   $("#nt-test").addEventListener("click", async () => {
     try {
       await api("/ntfy/test", { method: "POST" });
@@ -2957,7 +3355,18 @@ async function renderSettings(keepDetect = false) {
       $("#ss-dynamic").disabled = !e.target.checked;
       if (!e.target.checked) $("#ss-dynamic").checked = false;
     });
-    bindJavaDetect("#ss-java-detect", "#ss-java", "#ss-java-found", s.mc_version);
+    bindJavaDetect("#ss-java-detect", "#ss-java", "#ss-java-found", isBedrock(s) ? null : s.mc_version);
+    if (isBedrock(s)) {
+      // Pas de mémoire JVM pour le serveur officiel (binaire natif) ni PocketMine (PHP) ; pas de drapeaux Aikar en Bedrock.
+      const row = (id) => $(id)?.closest(".form-row");
+      const noRam = s.loader !== "nukkit";
+      if (noRam) { row("#ss-xms")?.classList.add("hidden"); row("#ss-xmx")?.classList.add("hidden"); }
+      row("#ss-aikar")?.classList.add("hidden");
+      if (isOfficialBedrock(s)) row("#ss-java")?.classList.add("hidden");
+      else row("#ss-java").querySelector("label").textContent = s.loader === "pocketmine" ? dcT("PHP executable", "Exécutable PHP") : "Java";
+      row("#ss-extraargs").querySelector("label").textContent = dcT("Additional arguments", "Arguments additionnels");
+      const port = $("#ss-port")?.closest(".form-row")?.querySelector("label"); if (port) port.textContent = "Port (UDP)";
+    }
     $("#ss-java-test").addEventListener("click", async () => {
       const resultEl = $("#ss-java-result");
       resultEl.textContent = "Test en cours…";
@@ -3009,16 +3418,45 @@ async function renderSettings(keepDetect = false) {
   }
 
   bindJavaDetect("#st-java-detect", "#st-java", "#st-java-found", null);
+  $("#st-restart").addEventListener("click", async () => {
+    if (!await confirmDialog(dcT("Restart MCManager? Running servers are stopped cleanly and started again.", "Redémarrer MCManager ? Les serveurs en marche sont arrêtés proprement puis relancés."))) return;
+    const v = (await api("/version")).version;
+    await api("/update/restart", { method: "POST" });
+    waitForRestart(v);
+  });
   $("#st-save").addEventListener("click", async () => {
     const newCfg = {
       ...cfg,
       java_path: $("#st-java").value,
       update_repo: $("#st-repo").value,
       check_updates_on_start: $("#st-autocheck").checked,
+      resume_servers: $("#st-resume").checked,
     };
     await api("/settings", { method: "PUT", body: JSON.stringify(newCfg) });
     toast("Paramètres enregistrés.", "success");
   });
+}
+
+// ───────────────────────── redémarrage ─────────────────────────
+
+// Après une mise à jour ou un redémarrage demandé : voile d'attente, puis rechargement dès que MCManager répond de nouveau.
+function waitForRestart(oldVersion) {
+  const veil = document.createElement("div");
+  veil.style.cssText = "position:fixed;inset:0;z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:var(--bg);color:var(--text)";
+  veil.innerHTML = `<span class="ai-spin" style="width:22px;height:22px"></span><b>${dcT("MCManager is restarting…", "MCManager redémarre…")}</b><span style="color:var(--text-dim);max-width:420px;text-align:center">${dcT("Minecraft servers that were running stop cleanly and start again by themselves. This page reloads automatically.", "Les serveurs Minecraft qui tournaient s'arrêtent proprement puis repartent tout seuls. Cette page se recharge automatiquement.")}</span>`;
+  document.body.appendChild(veil);
+  let wentDown = false;
+  const started = Date.now();
+  const poll = async () => {
+    try {
+      const r = await fetch("/api/version", { cache: "no-store" });
+      const v = r.ok ? (await r.json()).version : null;
+      if (v && (wentDown || v !== oldVersion)) { location.reload(); return; }
+    } catch { wentDown = true; }
+    if (Date.now() - started > 240000) { veil.remove(); toast(dcT("MCManager did not come back in time: check the process.", "MCManager n'est pas revenu à temps : vérifiez le processus."), "error"); return; }
+    setTimeout(poll, 1500);
+  };
+  setTimeout(poll, 2500);
 }
 
 // ───────────────────────── update banner ─────────────────────────
@@ -3034,9 +3472,10 @@ async function checkUpdateBanner() {
         $("#update-text").textContent = `Mise à jour ${info.latest_version} disponible !`;
         $("#update-apply-btn").classList.remove("hidden");
         $("#update-apply-btn").onclick = async () => {
-          if (!await confirmDialog("Télécharger et installer la mise à jour ? Redémarrez MCManager ensuite.")) return;
+          if (!await confirmDialog(dcT("Download and install the update? MCManager will restart by itself: running Minecraft servers are stopped cleanly and started again.", "Télécharger et installer la mise à jour ? MCManager redémarre tout seul : les serveurs Minecraft en marche sont arrêtés proprement puis relancés."))) return;
+          const before = info.current_version;
           await api("/update/apply", { method: "POST" });
-          toast("Mise à jour installée. Redémarrez MCManager.", "success");
+          waitForRestart(before);
         };
       } else {
         $("#update-text").textContent = `Mise à jour ${info.latest_version} disponible — ${info.self_update_note || "mise à jour manuelle requise pour ce type d'installation."}`;

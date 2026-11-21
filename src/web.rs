@@ -121,10 +121,24 @@ pub async fn auth_from_env(state: &AppState, default_on: bool, host: &str) -> an
 }
 
 /// Binds and serves until Ctrl+C / SIGTERM, then clears the instance lock.
-pub async fn serve(app: Router, addr: SocketAddr, data_dir: PathBuf) -> anyhow::Result<()> {
+pub async fn serve(app: Router, addr: SocketAddr, state: AppState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| anyhow::anyhow!("impossible d'ecouter sur {addr} : {e}"))?;
+    // Les serveurs qui tournaient avant l'arrêt précédent (mise à jour, redémarrage...) repartent d'eux-mêmes.
+    crate::resume::spawn_resume(state.clone());
+    // HTTPS natif (certificat fourni ou auto-signé) : voir tls.rs.
+    if let Some(tls) = crate::tls::config_for(&state.data_dir, &crate::tls::TlsMode::from_env()).await? {
+        if let Some(port) = std::env::var("MCMANAGER_HTTP_REDIRECT_PORT").ok().and_then(|p| p.parse::<u16>().ok()) {
+            let redirect_addr = SocketAddr::new(addr.ip(), port);
+            match tokio::net::TcpListener::bind(redirect_addr).await {
+                Ok(l) => { tokio::spawn(crate::tls::serve_redirect(l, addr.port())); tracing::info!("Redirection http://{redirect_addr} -> https (port {})", addr.port()); }
+                Err(e) => tracing::warn!("redirection HTTP impossible sur {redirect_addr} : {e}"),
+            }
+        }
+        tracing::info!("HTTPS actif sur https://{addr}");
+        return crate::tls::serve_tls(app, listener, tls, shutdown_signal(state)).await;
+    }
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal(data_dir))
+        .with_graceful_shutdown(shutdown_signal(state))
         .await?;
     Ok(())
 }
@@ -133,10 +147,12 @@ pub async fn serve(app: Router, addr: SocketAddr, data_dir: PathBuf) -> anyhow::
 /// lock on the way out, so a normal restart doesn't require manually deleting
 /// `mcmanager.lock` every time - only an unclean crash (`kill -9`, power
 /// loss) still leaves it behind.
-pub async fn shutdown_signal(data_dir: PathBuf) {
+pub async fn shutdown_signal(state: AppState) {
     wait_for_stop_signal().await;
     tracing::info!("Arret demande, fermeture propre...");
-    let _ = tokio::fs::remove_file(data_dir.join("mcmanager.lock")).await;
+    // Arrêt propre des serveurs Minecraft (le monde est sauvegardé) ; ils reprendront au prochain démarrage.
+    crate::resume::graceful_shutdown(&state, crate::resume::STOP_TIMEOUT).await;
+    let _ = tokio::fs::remove_file(state.data_dir.join("mcmanager.lock")).await;
 }
 
 pub async fn wait_for_stop_signal() {

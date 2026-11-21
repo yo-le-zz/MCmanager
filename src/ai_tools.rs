@@ -302,6 +302,9 @@ pub async fn execute(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
             if !single_line(q, 100) {
                 return ToolOutcome::err("requête manquante ou invalide");
             }
+            if entry.loader.is_bedrock() {
+                return ToolOutcome::err("la recherche Modrinth ne concerne que Minecraft Java ; sur Bedrock, ajoutez des packs (.mcpack/.mcaddon) dans l'onglet Mods / Plugins");
+            }
             let kind = if entry.loader.addon_dir() == "plugins" { "plugin" } else { "mod" };
             match crate::modrinth::search(&ctx.state.http, q, kind, Some(entry.loader.modrinth_loader()), Some(&entry.mc_version), 8).await {
                 Ok(hits) => {
@@ -312,6 +315,9 @@ pub async fn execute(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
             }
         }
         "install_addon" => {
+            if entry.loader.is_bedrock() {
+                return ToolOutcome::err("l'installation Modrinth ne concerne que Minecraft Java ; sur Bedrock, ajoutez des packs dans l'onglet Mods / Plugins");
+            }
             let project = args["project_id"].as_str().unwrap_or("").trim();
             if !valid_project_id(project) {
                 return ToolOutcome::err("project_id invalide (lettres, chiffres, - et _ seulement)");

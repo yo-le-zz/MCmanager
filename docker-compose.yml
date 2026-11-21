@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "7777:7777"          # interface web + controle a distance
-      - "25565:25565"        # un serveur Minecraft ; ajoutez une ligne par serveur/port cree
+      - "25565:25565"        # un serveur Minecraft Java ; ajoutez une ligne par serveur/port cree
+      - "19132:19132/udp"    # un serveur Bedrock (UDP, pas TCP)
     volumes:
       - mcmanager-data:/data # serveurs, sauvegardes, comptes, cles : a sauvegarder
     environment:

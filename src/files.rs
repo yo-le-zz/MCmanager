@@ -101,13 +101,15 @@ pub async fn save_upload(root: &Path, rel_dir: &str, filename: &str, bytes: &[u8
 pub fn list_addons(server_folder: &Path, loader: Loader) -> Result<Vec<AddonInfo>> {
     let dir = server_folder.join(loader.addon_dir());
     let mut out = Vec::new();
+    // Serveur officiel Bedrock : pas de fichiers de plugin, mais des packs (voir bedrock_packs.rs).
+    let Some(ext) = loader.addon_extension() else { return Ok(out) };
     if !dir.exists() {
         return Ok(out);
     }
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if !(name.ends_with(".jar") || name.ends_with(".jar.disabled")) {
+        if !(name.ends_with(&format!(".{ext}")) || name.ends_with(&format!(".{ext}.disabled"))) {
             continue;
         }
         let meta = entry.metadata()?;
@@ -122,7 +124,16 @@ pub fn list_addons(server_folder: &Path, loader: Loader) -> Result<Vec<AddonInfo
     Ok(out)
 }
 
+/// Nom de fichier d'extension sans chemin : empêche `../` et les séparateurs.
+fn plain_file_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) || name == "." || name == ".." || name.contains("..") {
+        anyhow::bail!("nom de fichier invalide");
+    }
+    Ok(())
+}
+
 pub fn toggle_addon(server_folder: &Path, loader: Loader, file_name: &str) -> Result<()> {
+    plain_file_name(file_name)?;
     let dir = server_folder.join(loader.addon_dir());
     let path = dir.join(file_name);
     if !path.exists() {
@@ -138,6 +149,7 @@ pub fn toggle_addon(server_folder: &Path, loader: Loader, file_name: &str) -> Re
 }
 
 pub fn delete_addon(server_folder: &Path, loader: Loader, file_name: &str) -> Result<()> {
+    plain_file_name(file_name)?;
     let dir = server_folder.join(loader.addon_dir());
     std::fs::remove_file(dir.join(file_name)).context("suppression impossible")?;
     Ok(())
@@ -209,10 +221,21 @@ pub const MAX_ZIP_ENTRIES: usize = 200_000;
 pub const MAX_ZIP_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 pub fn import_zip_limited(root: &Path, rel_dir: &str, zip_bytes: &[u8], max_entries: usize, max_bytes: u64) -> Result<usize> {
+    import_zip_reader(root, rel_dir, std::io::Cursor::new(zip_bytes), max_entries, max_bytes)
+}
+
+/// Extrait une archive qui se trouve déjà sur disque, sans la charger en mémoire (transferts de gros mondes).
+pub fn import_zip_file(root: &Path, rel_dir: &str, zip_path: &Path) -> Result<usize> {
+    let f = std::fs::File::open(zip_path).context("archive introuvable")?;
+    import_zip_reader(root, rel_dir, std::io::BufReader::new(f), MAX_ZIP_ENTRIES, MAX_ZIP_BYTES)
+}
+
+pub fn import_zip_reader<R: std::io::Read + std::io::Seek>(root: &Path, rel_dir: &str, reader: R, max_entries: usize, max_bytes: u64) -> Result<usize> {
     use std::io::Read;
+    // Le dossier racine est choisi par l'appelant (pas par l'archive) : on le crée avant de résoudre les chemins.
+    std::fs::create_dir_all(root)?;
     let dest_root = safe_join(root, rel_dir)?;
     std::fs::create_dir_all(&dest_root)?;
-    let reader = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(reader).context("archive .zip invalide")?;
     let mut extracted = 0usize;
     if archive.len() > max_entries {

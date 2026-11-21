@@ -643,7 +643,7 @@ async fn login(State(auth): State<Arc<AuthState>>, peer: Option<ConnectInfo<Sock
     let cookie = format!(
         "{COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
         SESSION_ABSOLUTE.num_seconds(),
-        if auth.secure_cookie { "; Secure" } else { "" }
+        if auth.secure_cookie || crate::tls::is_active() { "; Secure" } else { "" }
     );
     let mut resp = Json(json!({ "ok": true, "username": user.username, "admin": user.admin })).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {

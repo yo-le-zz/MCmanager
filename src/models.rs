@@ -5,6 +5,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Loader {
+    // ── Java Edition ──
     Vanilla,
     Paper,
     Purpur,
@@ -13,9 +14,31 @@ pub enum Loader {
     Quilt,
     Forge,
     Neoforge,
+    // ── Bedrock Edition (ajoutés en 1.1.3 ; les anciens serveurs.json restent lisibles tels quels) ──
+    /// Serveur dédié officiel Mojang (BDS), version stable.
+    Bedrock,
+    /// Serveur dédié officiel Mojang, version preview (bêta).
+    Bedrockpreview,
+    /// PocketMine-MP : serveur communautaire en PHP, avec plugins (.phar). Tourne aussi sur ARM (Raspberry Pi).
+    Pocketmine,
+    /// Nukkit (CloudburstMC) : serveur communautaire en Java, avec plugins (.jar). Tourne aussi sur ARM.
+    Nukkit,
+}
+
+/// Comment le serveur est lancé.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runtime {
+    /// `java -jar` (mémoire réglable, drapeaux JVM).
+    Java,
+    /// Binaire natif (serveur officiel Bedrock).
+    Native,
+    /// Interpréteur PHP (PocketMine-MP).
+    Php,
 }
 
 impl Loader {
+    pub const ALL_BEDROCK: [Loader; 4] = [Loader::Bedrock, Loader::Bedrockpreview, Loader::Pocketmine, Loader::Nukkit];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Loader::Vanilla => "vanilla",
@@ -26,20 +49,62 @@ impl Loader {
             Loader::Quilt => "quilt",
             Loader::Forge => "forge",
             Loader::Neoforge => "neoforge",
+            Loader::Bedrock => "bedrock",
+            Loader::Bedrockpreview => "bedrockpreview",
+            Loader::Pocketmine => "pocketmine",
+            Loader::Nukkit => "nukkit",
         }
+    }
+
+    /// Édition de Minecraft : `"java"` ou `"bedrock"`.
+    pub fn edition(&self) -> &'static str {
+        if self.is_bedrock() { "bedrock" } else { "java" }
+    }
+
+    pub fn is_bedrock(&self) -> bool {
+        matches!(self, Loader::Bedrock | Loader::Bedrockpreview | Loader::Pocketmine | Loader::Nukkit)
+    }
+
+    /// Serveur dédié officiel de Mojang (binaire natif, packs de comportement/ressources, pas de plugins).
+    pub fn is_official_bedrock(&self) -> bool {
+        matches!(self, Loader::Bedrock | Loader::Bedrockpreview)
+    }
+
+    pub fn runtime(&self) -> Runtime {
+        match self {
+            Loader::Bedrock | Loader::Bedrockpreview => Runtime::Native,
+            Loader::Pocketmine => Runtime::Php,
+            _ => Runtime::Java,
+        }
+    }
+
+    /// Port par défaut : 25565 (TCP) en Java, 19132 (UDP) en Bedrock.
+    pub fn default_port(&self) -> u16 {
+        if self.is_bedrock() { 19132 } else { 25565 }
     }
 
     /// Where third-party addons live for this loader: "plugins" for Bukkit-family
-    /// servers, "mods" for Fabric/Quilt/Forge/NeoForge.
+    /// servers, "mods" for Fabric/Quilt/Forge/NeoForge, "behavior_packs" for the
+    /// official Bedrock server (resource packs sit in "resource_packs").
     pub fn addon_dir(&self) -> &'static str {
         match self {
             Loader::Vanilla => "mods", // vanilla has no addons, default harmless
-            Loader::Paper | Loader::Purpur | Loader::Spigot => "plugins",
+            Loader::Paper | Loader::Purpur | Loader::Spigot | Loader::Pocketmine | Loader::Nukkit => "plugins",
             Loader::Fabric | Loader::Quilt | Loader::Forge | Loader::Neoforge => "mods",
+            Loader::Bedrock | Loader::Bedrockpreview => "behavior_packs",
         }
     }
 
-    /// Matches Modrinth's `project_type` + `loaders` facet vocabulary.
+    /// Extension des fichiers d'extension reconnus pour ce serveur (plugins/mods) ; `None` = dossiers (packs Bedrock).
+    pub fn addon_extension(&self) -> Option<&'static str> {
+        match self {
+            Loader::Pocketmine => Some("phar"),
+            Loader::Bedrock | Loader::Bedrockpreview => None,
+            _ => Some("jar"),
+        }
+    }
+
+    /// Matches Modrinth's `project_type` + `loaders` facet vocabulary (Java uniquement ; vide pour Bedrock).
     pub fn modrinth_loader(&self) -> &'static str {
         match self {
             Loader::Vanilla => "minecraft",
@@ -50,11 +115,12 @@ impl Loader {
             Loader::Quilt => "quilt",
             Loader::Forge => "forge",
             Loader::Neoforge => "neoforge",
+            Loader::Bedrock | Loader::Bedrockpreview | Loader::Pocketmine | Loader::Nukkit => "",
         }
     }
 
     pub fn is_plugin_based(&self) -> bool {
-        matches!(self, Loader::Paper | Loader::Purpur | Loader::Spigot)
+        matches!(self, Loader::Paper | Loader::Purpur | Loader::Spigot | Loader::Pocketmine | Loader::Nukkit)
     }
 
     pub fn is_modded(&self) -> bool {
@@ -199,6 +265,26 @@ pub struct AppConfig {
     pub update_repo: String, // "owner/repo" used for self-update checks
     pub check_updates_on_start: bool,
     pub data_dir: String,
+    /// Relancer au démarrage les serveurs qui tournaient quand MCManager s'est arrêté (mise à jour, redémarrage, coupure).
+    #[serde(default = "default_true")]
+    pub resume_servers: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[cfg(test)]
+impl ServerEntry {
+    /// Entrée minimale pour les tests.
+    pub fn test_entry(id: Uuid, name: &str, folder: &std::path::Path) -> Self {
+        ServerEntry {
+            id, name: name.into(), loader: Loader::Paper, mc_version: "1.21.4".into(), loader_version: None, folder: folder.to_string_lossy().to_string(),
+            jar_name: String::new(), java_path: "java".into(), xms_mb: 512, xmx_mb: 1024, port: 25565, extra_args: vec![], eula_accepted: true, auto_backup_minutes: None,
+            backup_retention: None, auto_restart: false, auto_restart_delay_secs: 5, scheduled_restart_minutes: None, stop_when_empty_minutes: None, dynamic_server: false,
+            aikar_flags: false, managed_addons: vec![], created_at: chrono::Utc::now(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

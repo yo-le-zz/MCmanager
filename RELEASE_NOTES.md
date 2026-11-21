@@ -1,3 +1,19 @@
+# MCManager v1.1.3 — Bedrock, serveurs toujours allumés, transferts entre machines
+
+## Nouveautés
+- **Minecraft Bedrock** : serveur officiel (x86_64), Preview, **PocketMine-MP** et **Nukkit** (ARM compris) ; packs, add-ons et mondes `.mcworld`, liste d'autorisation, sauvegarde à chaud ([docs/BEDROCK.md](docs/BEDROCK.md)).
+- **Reprise des serveurs** : ils redémarrent seuls avec MCManager, y compris après une mise à jour ; service de démarrage en une commande (`--install-service`).
+- **Transferts entre machines** reprenables et vérifiés (SHA-256) : copier, déplacer, rapatrier, miroir des sauvegardes ; mise à jour d'une machine distante.
+- **Modèles de serveur** : recréer un serveur sans rien télécharger.
+- **HTTPS natif** et **migration automatique** des anciennes données (avec copie de sécurité).
+- **Discord** est maintenant une entrée du menu, plus un réglage.
+
+## À savoir
+- Le serveur Bedrock officiel n'existe que pour x86_64 (Linux, Windows) : sur Raspberry Pi, utilisez PocketMine-MP ou Nukkit.
+- playit.gg : MCManager ne fait que lancer l'agent ; pour Bedrock, créez un tunnel **UDP** dans votre compte playit (voir [docs/PLAYIT.md](docs/PLAYIT.md), non testé avec un vrai compte).
+- Non exécuté avant la publication : workflows GitHub, Docker, builds macOS / Windows / ARM, téléchargements Bedrock réels, mise à jour distante réelle (voir le CHANGELOG).
+
+
 # MCManager v1.1.2 — Stabilisation : Discord, double authentification, alertes, mobile
 
 ## Nouveautés

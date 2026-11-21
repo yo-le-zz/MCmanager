@@ -192,6 +192,8 @@ pub struct KnownServer {
     pub port: u16,
     /// Machine qui l'héberge, vue depuis ici (127.0.0.1 pour un serveur local).
     pub backend_host: String,
+    /// Serveur Bedrock : protocole UDP, et pas d'enregistrement SRV (Bedrock ne les lit pas).
+    pub bedrock: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -220,6 +222,21 @@ pub fn generate(cfg: &NetworkConfig, servers: &[KnownServer]) -> Generated {
     for (id, sd) in entries {
         let Some(server) = servers.iter().find(|s| &s.id == id) else { continue };
         dns.push_str(&format!("; {} (serveur Minecraft)\n{}.  300  IN  {record_type}  {ip}\n", server.name.replace(['\n', '\r'], " "), sd.domain));
+        if server.bedrock {
+            // Bedrock : UDP, pas de SRV. Les joueurs saisissent l'adresse ET le port.
+            if sd.mode == "proxy" {
+                any_proxy = true;
+                stream.push_str(&format!(
+                    "# {name} (Bedrock, UDP) : {domain} -> {host}:{port}\nserver {{\n    listen {public} udp;\n    proxy_pass {host}:{port};\n    proxy_responses 1;\n    proxy_timeout 20s;\n}}\n\n",
+                    name = server.name.replace(['\n', '\r'], " "), domain = sd.domain, host = server.backend_host, port = server.port, public = sd.public_port
+                ));
+                notes.push(format!("{} : Bedrock n'utilise pas les SRV. Les joueurs saisissent l'adresse « {} » et le port {} (UDP). Ouvrez le port {} en UDP sur le pare-feu et la box.", sd.domain, sd.domain, sd.public_port, sd.public_port));
+            } else {
+                notes.push(format!("{} : Bedrock n'utilise pas les SRV. Les joueurs saisissent l'adresse « {} » et le port {} (UDP). Ouvrez/redirigez le port {} en UDP vers la machine.", sd.domain, sd.domain, server.port, server.port));
+            }
+            dns.push('\n');
+            continue;
+        }
         if sd.mode == "proxy" {
             any_proxy = true;
             // Le port que les joueurs utilisent : si ce n'est pas 25565, un SRV le leur évite de le saisir.
@@ -301,7 +318,7 @@ mod tests {
     use super::*;
 
     fn srv(id: Uuid, name: &str, port: u16) -> KnownServer {
-        KnownServer { id, name: name.into(), port, backend_host: "127.0.0.1".into() }
+        KnownServer { id, name: name.into(), port, backend_host: "127.0.0.1".into(), bedrock: false }
     }
 
     #[test]
@@ -373,7 +390,7 @@ mod tests {
         let a = Uuid::new_v4();
         let mut cfg = NetworkConfig::default();
         cfg.servers.insert(a, ServerDomain { domain: "play.exemple.fr".into(), public_port: 25570, mode: "proxy".into() });
-        let server = KnownServer { id: a, name: "Survie distant".into(), port: 25565, backend_host: "192.168.1.50".into() };
+        let server = KnownServer { id: a, name: "Survie distant".into(), port: 25565, backend_host: "192.168.1.50".into(), bedrock: false };
         let g = generate(&cfg, &[server]);
         assert!(g.nginx_stream.contains("listen 25570;"));
         assert!(g.nginx_stream.contains("proxy_pass 192.168.1.50:25565;"));
@@ -402,5 +419,23 @@ mod tests {
         cfg.servers.insert(a, ServerDomain { domain: "play.exemple.fr".into(), public_port: 25570, mode: "proxy".into() });
         let g = generate(&cfg, &[srv(a, "Survie\nserver { listen 1; }", 25565)]);
         assert!(!g.nginx_stream.contains("\nserver { listen 1; }"), "un nom de serveur ne doit pas injecter de directive");
+    }
+
+    #[test]
+    fn bedrock_servers_get_udp_and_no_srv() {
+        let id = Uuid::new_v4();
+        let mut cfg = NetworkConfig::default();
+        cfg.public_ip = "203.0.113.7".into();
+        let mut server = srv(id, "Bedrock", 19140);
+        server.bedrock = true;
+        cfg.servers.insert(id, ServerDomain { domain: "mcpe.exemple.fr".into(), public_port: 19132, mode: "srv".into() });
+        let g = generate(&cfg, &[server.clone()]);
+        assert!(g.dns.contains("mcpe.exemple.fr.  300  IN  A  203.0.113.7") && !g.dns.contains("SRV"), "Bedrock ignore les SRV : {}", g.dns);
+        assert!(g.notes.iter().any(|n| n.contains("UDP") && n.contains("19140")));
+        assert!(g.nginx_stream.is_empty());
+        cfg.servers.get_mut(&id).unwrap().mode = "proxy".into();
+        let g = generate(&cfg, &[server]);
+        assert!(g.nginx_stream.contains("listen 19132 udp;") && g.nginx_stream.contains("proxy_pass 127.0.0.1:19140;"), "{}", g.nginx_stream);
+        assert!(!g.dns.contains("SRV"));
     }
 }

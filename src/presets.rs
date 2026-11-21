@@ -77,5 +77,21 @@ pub fn all() -> Vec<PresetItem> {
             modrinth_slug: "spark".into(),
             loaders: vec!["paper".into(), "purpur".into(), "spigot".into(), "fabric".into(), "quilt".into(), "forge".into(), "neoforge".into()],
         },
+        PresetItem {
+            key: "geyser".into(),
+            label: "Geyser (joueurs Bedrock sur un serveur Java)".into(),
+            description: "Laisse les joueurs Minecraft Bedrock (mobile, console, Windows) rejoindre ce serveur Java. Port UDP 19132 a ouvrir. A associer a Floodgate.".into(),
+            category: "Bedrock".into(),
+            modrinth_slug: "geyser".into(),
+            loaders: vec!["paper".into(), "purpur".into(), "spigot".into(), "fabric".into(), "quilt".into(), "neoforge".into()],
+        },
+        PresetItem {
+            key: "floodgate".into(),
+            label: "Floodgate (connexion Bedrock sans compte Java)".into(),
+            description: "Complement de Geyser : les joueurs Bedrock se connectent avec leur compte Xbox, sans compte Java.".into(),
+            category: "Bedrock".into(),
+            modrinth_slug: "floodgate".into(),
+            loaders: vec!["paper".into(), "purpur".into(), "spigot".into(), "fabric".into(), "quilt".into(), "neoforge".into()],
+        },
     ]
 }

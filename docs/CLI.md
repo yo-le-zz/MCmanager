@@ -12,6 +12,7 @@ mcmanager cli status <id>       statut (CPU/RAM/joueurs) d'un serveur
 mcmanager cli start <id>        demarre un serveur
 mcmanager cli stop <id>         arrete un serveur proprement
 mcmanager cli create --name N --loader paper --version 1.21.11 [--port P]
+mcmanager cli create --name N --loader bedrock --version 1.21.50.07   (bedrock|bedrockpreview|pocketmine|nukkit ; port UDP 19132 par défaut)
 mcmanager --version
 mcmanager --help
 ```
@@ -44,3 +45,12 @@ MCMANAGER_PORT=7777 mcmanager cli list
 ```
 
 (L'image Docker ne contient que `mcmanager-server`, pas `mcmanager cli` : utilisez l'interface web ou un jeton avec `curl -H "Authorization: Bearer $(cat /data/api_token)"`.)
+
+## Service de démarrage (`mcmanager-server`, depuis la 1.1.3)
+
+```
+mcmanager-server --install-service      crée et démarre le service de l'utilisateur courant (systemd utilisateur, launchd, tâche planifiée)
+mcmanager-server --service-status       état du service
+mcmanager-server --uninstall-service    retire le service
+```
+Voir [SERVER.md](SERVER.md).

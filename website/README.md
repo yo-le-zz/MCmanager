@@ -1,22 +1,16 @@
 # website/ — mcmanager.pages.dev
 
-Site vitrine statique pour MCManager, basé sur la maquette générée avec
-Stitch (voir le zip fourni : `DESIGN.md` pour le système de design,
-`code.html` pour la maquette d'origine — `index.html` ici en est
-l'adaptation avec des liens et commandes réels).
+Site vitrine statique de MCManager, dans l'esprit visuel de l'application (graphite, accent indigo, icônes Lucide, thème clair
+automatique selon le système). **Aucune ressource externe** : polices (`assets/fonts/`, Inter et JetBrains Mono, mêmes fichiers que
+l'application), icônes (extraites de `web/assets/icons.svg` et incluses dans la page) et captures sont servies par le site lui-même.
+Aucune étape de build, aucun framework.
 
 ## Déploiement (Cloudflare Pages)
 
-Aucune étape de build : c'est du HTML statique (Tailwind chargé depuis son
-CDN, comme dans la maquette d'origine).
-
-1. Sur [pages.cloudflare.com](https://pages.cloudflare.com), créer un
-   projet Pages pointant sur ce dossier `website/` (soit en connectant le
-   dépôt GitHub avec *Build output directory* = `website`, soit via
-   `wrangler pages deploy website`).
-2. Nom du projet : `mcmanager` (donne `mcmanager.pages.dev`), ou associer
-   un domaine personnalisé dans les réglages du projet.
-3. Aucune variable d'environnement ni commande de build nécessaire.
+1. Sur [pages.cloudflare.com](https://pages.cloudflare.com), créer un projet Pages pointant sur ce dossier `website/` (en connectant le
+   dépôt GitHub avec *Build output directory* = `website`, ou via `wrangler pages deploy website`).
+2. Nom du projet : `mcmanager` (donne `mcmanager.pages.dev`), ou associer un domaine personnalisé.
+3. Aucune variable d'environnement ni commande de build.
 
 ## Contenu
 
@@ -24,6 +18,9 @@ CDN, comme dans la maquette d'origine).
 - `assets/logo.svg`, `assets/icon-256.png`, `assets/favicon-32.png` —
   repris directement de `web/assets/` (même icône que l'application, pour
   la cohérence de marque).
+- `assets/shot-*.webp` — captures du **vrai** programme (données de démonstration), régénérées par
+  `python3 scripts/make-site-shots.py --binary … --firefox … --geckodriver …` (voir `docs/BUILD.md`).
+- `assets/fonts/` — Inter et JetBrains Mono, copiés de `web/assets/fonts/`.
 - `install.sh` — servi à `mcmanager.pages.dev/install.sh`, référencé par
   la commande `curl -fsSL mcmanager.pages.dev/install.sh | bash` affichée
   sur le site (carte Linux).

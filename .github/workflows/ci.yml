@@ -7,6 +7,8 @@ on:
     branches: [main, master]
   pull_request: {}
   workflow_dispatch: {}
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -61,7 +63,35 @@ jobs:
           key: browser-${{ hashFiles('Cargo.lock') }}
       - run: cargo build --bins
       - run: pip install selenium
-      - run: python3 scripts/browser-test.py --binary target/debug/mcmanager --firefox "$(which firefox)" --geckodriver "$(which geckodriver)"
+      - run: python3 scripts/browser-test.py --binary target/debug/mcmanager --server target/debug/mcmanager-server --firefox "$(which firefox)" --geckodriver "$(which geckodriver)"
+
+  # Vrais processus : deux instances jumelées, transferts par le tunnel chiffré, HTTPS, migration d'anciennes données,
+  # reprise des serveurs après redémarrage et arrêt propre (scripts/two-process-test.py).
+  processes:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: processes-${{ hashFiles('Cargo.lock') }}
+      - run: cargo build --bins
+      - run: python3 scripts/two-process-test.py --server target/debug/mcmanager-server --desktop target/debug/mcmanager
+
+  # Image Docker : démarrage, santé, connexion, persistance, arrêt propre. Longue (construction) : à la demande,
+  # chaque semaine et sur les étiquettes de version, pas à chaque push.
+  docker:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - run: scripts/docker-test.sh
 
   ui-and-scripts:
     runs-on: ubuntu-22.04
@@ -72,5 +102,6 @@ jobs:
           node-version: 22
       - run: for f in web/*.js; do node --check "$f"; done
       - run: node scripts/test-ui.js
-      - run: bash -n build.sh && bash -n scripts/install.sh && bash -n scripts/make-macos-app.sh
+      - run: bash -n build.sh && bash -n scripts/install.sh && bash -n scripts/make-macos-app.sh && bash -n scripts/docker-test.sh
+      - run: python3 -m py_compile scripts/two-process-test.py scripts/browser-test.py scripts/make-site-shots.py
       - run: diff scripts/install.sh website/install.sh && diff scripts/install.ps1 website/install.ps1

@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     maybe_open_browser(&host, port);
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
-    web::serve(app, addr, app_state.data_dir.clone()).await
+    web::serve(app, addr, app_state.clone()).await
 }
 
 /// Opens the default browser to the web UI once the server is about to
@@ -50,7 +50,8 @@ fn maybe_open_browser(host: &str, port: u16) {
     // A "0.0.0.0" bind means "listen on every interface" - not something a
     // browser can open directly, so target loopback instead in that case.
     let browse_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
-    let url = format!("http://{browse_host}:{port}");
+    let scheme = if mcmanager::tls::TlsMode::from_env() == mcmanager::tls::TlsMode::Off { "http" } else { "https" };
+    let url = format!("{scheme}://{browse_host}:{port}");
     tokio::spawn(async move {
         // Give the listener a moment to actually be up before opening the tab.
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;

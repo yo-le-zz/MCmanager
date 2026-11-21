@@ -76,14 +76,14 @@ pub fn classify(method: &Method, path: &str) -> Need {
             "" if *method == Method::DELETE => return Need::Admin,
             "" => Level::Manage,
             "status" | "history" | "ws" if read => Level::View,
-            "addons" | "managed-addons" | "backups" | "backups/progress" | "schematics" if read => Level::View,
+            "addons" | "managed-addons" | "backups" | "backups/progress" | "schematics" | "bedrock/packs" | "bedrock/worlds" | "bedrock/allowlist" if read => Level::View,
             "command" | "console/clear" | "debug/crash-diagnostic" => Level::Console,
             "start" | "stop" | "kill" => Level::Control,
             _ => Level::Manage,
         };
         return Need::Server(id, level);
     }
-    let public_read = *method == Method::GET && (p == "/api/version" || p == "/api/presets" || p.starts_with("/api/loaders/") || p.starts_with("/api/marketplace/"));
+    let public_read = *method == Method::GET && (p == "/api/version" || p == "/api/presets" || p.starts_with("/api/bedrock/") || p.starts_with("/api/loaders/") || p.starts_with("/api/marketplace/"));
     if public_read {
         return Need::Anyone;
     }
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(c(Method::POST, "/api/servers"), Need::Admin);
         assert_eq!(c(Method::POST, "/api/servers/import"), Need::Admin);
         assert_eq!(c(Method::POST, "/api/servers/import-zip"), Need::Admin);
-        for p in ["/api/settings", "/api/ai/chat", "/api/ai/chat/stream", "/api/ai/approve", "/api/ai/config", "/api/discord/config", "/api/network", "/api/ntfy/config", "/api/playit/start", "/api/playit/ws", "/api/remote/hub", "/api/remote/targets", "/api/update/apply", "/api/update/check", "/api/server/info", "/api/audit", "/api/inconnue", "/api/servers/pas-un-uuid/status"] {
+        for p in ["/api/settings", "/api/ai/chat", "/api/ai/chat/stream", "/api/update/restart", "/api/ai/approve", "/api/ai/config", "/api/discord/config", "/api/network", "/api/ntfy/config", "/api/playit/start", "/api/playit/ws", "/api/remote/hub", "/api/remote/targets", "/api/update/apply", "/api/update/check", "/api/server/info", "/api/audit", "/api/inconnue", "/api/servers/pas-un-uuid/status"] {
             assert_eq!(c(Method::GET, p), Need::Admin, "{p}");
             assert_eq!(c(Method::POST, p), Need::Admin, "{p}");
         }

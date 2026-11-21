@@ -18,6 +18,13 @@ Résumé de ce que MCManager protège et comment. Détails par fonction dans les
 L'archive de la release est comparée à l'empreinte SHA-256 publiée dans `SHA256SUMS` **avant** de toucher à l'installation ; téléchargement limité à 200 Mo ;
 retour arrière si le remplacement échoue en cours de route. Les installations par paquet (`.deb`, `.rpm`, Homebrew) et `MCManager.app` ne se mettent pas à jour seules.
 
+## HTTPS et transferts (1.1.3)
+- **HTTPS natif** : certificat PEM ou auto-signé, redirection HTTP, cookie `Secure` ([SERVER.md](SERVER.md)).
+- **Transferts entre machines** : flux vérifié par **SHA-256** de bout en bout, sur la connexion de jumelage chiffrée et authentifiée ; un serveur n'est supprimé de la machine d'origine
+  qu'après avoir été importé et retrouvé à destination ([TRANSFERS.md](TRANSFERS.md)). Les sauvegardes reçues sont rangées par machine d'origine.
+- **Migration** : copie de sécurité avant toute modification des données ([MIGRATION.md](MIGRATION.md)).
+- **Bedrock** : manifestes de packs et noms de fichiers validés, extractions de packs/mondes soumises aux mêmes limites que les imports de zip.
+
 ## Imports et fichiers
 Les extractions de zip refusent les chemins sortant du dossier (zip-slip) et sont plafonnées : 200 000 fichiers, 64 Go décompressés réellement écrits (protection contre les archives piégées).
 

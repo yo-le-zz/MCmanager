@@ -33,22 +33,23 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 /// Takes over `port` for server `id` until a real join attempt wakes it up
-/// (or the process is otherwise torn down). Runs both the Java (TCP) and,
-/// if `bedrock_port` is given, Bedrock (UDP) listeners concurrently; either
-/// one waking the server cancels the other.
-pub async fn run(state: AppState, id: Uuid, motd: String, java_port: u16, bedrock_port: Option<u16>) -> Result<()> {
+/// (or the process is otherwise torn down). Runs the Java (TCP) listener when
+/// `java_port` is given and the Bedrock (UDP) listener when `bedrock_port` is
+/// given, concurrently; either one waking the server cancels the other.
+/// A native Bedrock server only has the UDP side (`java_port: None`).
+pub async fn run(state: AppState, id: Uuid, motd: String, java_port: Option<u16>, bedrock_port: Option<u16>) -> Result<()> {
     let woken = Arc::new(tokio::sync::Notify::new());
 
-    let java_task = {
+    let java_task = java_port.map(|port| {
         let state = state.clone();
         let motd = motd.clone();
         let woken = woken.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_java_listener(state, id, motd, java_port, woken).await {
+            if let Err(e) = run_java_listener(state, id, motd, port, woken).await {
                 tracing::warn!("[serveur dynamique] listener Java arrete: {e}");
             }
         })
-    };
+    });
 
     let bedrock_task = bedrock_port.map(|port| {
         let state = state.clone();
@@ -61,7 +62,9 @@ pub async fn run(state: AppState, id: Uuid, motd: String, java_port: u16, bedroc
     });
 
     woken.notified().await;
-    java_task.abort();
+    if let Some(t) = java_task {
+        t.abort();
+    }
     if let Some(t) = bedrock_task {
         t.abort();
     }
@@ -173,7 +176,7 @@ async fn run_bedrock_listener(state: AppState, id: Uuid, motd: String, port: u16
         }
         match buf[0] {
             UNCONNECTED_PING => {
-                if let Some(pong) = build_unconnected_pong(&buf[..n], &motd) {
+                if let Some(pong) = build_unconnected_pong(&buf[..n], &motd, port) {
                     let _ = socket.send_to(&pong, from).await;
                 }
             }
@@ -191,14 +194,15 @@ async fn run_bedrock_listener(state: AppState, id: Uuid, motd: String, port: u16
     }
 }
 
-fn build_unconnected_pong(ping_packet: &[u8], motd: &str) -> Option<Vec<u8>> {
+fn build_unconnected_pong(ping_packet: &[u8], motd: &str, port: u16) -> Option<Vec<u8>> {
     // Unconnected Ping: [1 id][8 time][16 magic][8 client guid]
     if ping_packet.len() < 33 || ping_packet[9..25] != RAKNET_MAGIC {
         return None;
     }
     let time = &ping_packet[1..9];
     let server_guid: u64 = 0x4d434d67_4d43676du64; // arbitrary fixed "MCMgMCgm"-ish server GUID, fine for a ping responder
-    let motd_line = format!("MCPE;{motd};0;0.0.0;0;10;{server_guid};MCManager;Survival;1;19132;19133;");
+    let port_v6 = port.saturating_add(1);
+    let motd_line = format!("MCPE;{motd};0;0.0.0;0;10;{server_guid};MCManager;Survival;1;{port};{port_v6};");
 
     let mut out = Vec::with_capacity(35 + motd_line.len());
     out.push(UNCONNECTED_PONG);
@@ -346,16 +350,60 @@ mod tests {
         ping.extend_from_slice(&12345u64.to_be_bytes()); // time
         ping.extend_from_slice(&RAKNET_MAGIC);
         ping.extend_from_slice(&0u64.to_be_bytes()); // client guid
-        let pong = build_unconnected_pong(&ping, "Test MOTD").expect("should build a pong");
+        let pong = build_unconnected_pong(&ping, "Test MOTD", 19140).expect("should build a pong");
         assert_eq!(pong[0], UNCONNECTED_PONG);
         assert_eq!(&pong[1..9], &12345u64.to_be_bytes());
         assert!(String::from_utf8_lossy(&pong).contains("Test MOTD"));
     }
 
     #[test]
+    fn unconnected_pong_announces_the_real_port() {
+        let mut ping = vec![UNCONNECTED_PING];
+        ping.extend_from_slice(&1u64.to_be_bytes());
+        ping.extend_from_slice(&RAKNET_MAGIC);
+        ping.extend_from_slice(&0u64.to_be_bytes());
+        let pong = build_unconnected_pong(&ping, "x", 19140).unwrap();
+        assert!(String::from_utf8_lossy(&pong).contains(";1;19140;19141;"));
+    }
+
+    /// Un serveur Bedrock en veille : écoute UDP sur le vrai port, répond au ping de la liste de serveurs
+    /// sans réveiller, puis un début de vraie connexion (Open Connection Request 1) déclenche le réveil.
+    #[tokio::test]
+    async fn bedrock_sleeper_answers_ping_then_wakes_on_join() {
+        let dir = std::env::temp_dir().join(format!("mcm-sleeper-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = crate::state::build_state_for_test(&dir).await;
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let woken = Arc::new(tokio::sync::Notify::new());
+        let task = {
+            let (state, woken) = (state.clone(), woken.clone());
+            tokio::spawn(async move { let _ = run_bedrock_listener(state, Uuid::new_v4(), "Veille".into(), port, woken).await; })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut ping = vec![UNCONNECTED_PING];
+        ping.extend_from_slice(&7u64.to_be_bytes());
+        ping.extend_from_slice(&RAKNET_MAGIC);
+        ping.extend_from_slice(&0u64.to_be_bytes());
+        client.send_to(&ping, ("127.0.0.1", port)).await.unwrap();
+        let mut buf = [0u8; 1500];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf)).await.expect("pong attendu").unwrap();
+        assert_eq!(buf[0], UNCONNECTED_PONG);
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("Veille"));
+        assert!(!task.is_finished(), "un simple ping de liste ne doit pas réveiller le serveur");
+        client.send_to(&[OPEN_CONNECTION_REQUEST_1, 0, 0], ("127.0.0.1", port)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.expect("l'écoute doit s'arrêter au réveil").unwrap();
+        // Le port UDP est libéré pour le vrai serveur.
+        assert!(std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok(), "le port UDP doit être libre après le réveil");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn unconnected_pong_rejects_bad_magic() {
         let bad_ping = vec![UNCONNECTED_PING; 40]; // wrong magic bytes
-        assert!(build_unconnected_pong(&bad_ping, "x").is_none());
+        assert!(build_unconnected_pong(&bad_ping, "x", 19132).is_none());
     }
 
     /// End-to-end: binds a real listener, connects a client socket, sends

@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::extract::{Multipart, Path as AxPath, Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -15,13 +15,14 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 use crate::state::{save_config, save_servers, AppState, BackupProgress};
-use crate::{ai, ai_agent, alerts, ai_tools, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
+use crate::{ai, ai_agent, alerts, bedrock, bedrock_dl, bedrock_packs, migrate, resume, templates, transfer, ai_tools, backup, debug, discord, discord_bridge, downloader, network, files, history, modrinth, ntfy, playit, presets, process, remote, stats, updater, ws};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/version", get(get_version))
         .route("/api/update/check", get(update_check))
         .route("/api/update/apply", post(update_apply))
+        .route("/api/update/restart", post(restart_manager))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/loaders/:loader/versions", get(loader_versions))
         .route("/api/loaders/:loader/builds", get(loader_builds))
@@ -64,6 +65,31 @@ pub fn router(state: AppState) -> Router {
         .route("/api/ai/config", get(get_ai_config).post(save_ai_config))
         .route("/api/ai/models", get(list_ai_models))
         .route("/api/java/detect", get(detect_java))
+        .route("/api/migration", get(migration_status))
+        .route("/api/bedrock/properties-schema", get(bedrock_schema))
+        .route("/api/servers/:id/bedrock/packs", get(bedrock_packs_list))
+        .route("/api/servers/:id/bedrock/packs/upload", post(bedrock_packs_upload))
+        .route("/api/servers/:id/bedrock/packs/:uuid/activate", post(bedrock_pack_activate))
+        .route("/api/servers/:id/bedrock/packs/:uuid", delete(bedrock_pack_delete))
+        .route("/api/servers/:id/bedrock/worlds", get(bedrock_worlds_list))
+        .route("/api/servers/:id/bedrock/worlds/import", post(bedrock_world_import))
+        .route("/api/servers/:id/bedrock/worlds/:name/activate", post(bedrock_world_activate))
+        .route("/api/servers/:id/bedrock/worlds/:name", delete(bedrock_world_delete))
+        .route("/api/servers/:id/bedrock/allowlist", get(bedrock_allowlist_get).post(bedrock_allowlist_add))
+        .route("/api/servers/:id/bedrock/allowlist/:name", delete(bedrock_allowlist_remove))
+        .route("/api/servers/:id/bedrock/permissions", post(bedrock_permission_set))
+        .route("/api/servers/:id/bedrock/properties", put(bedrock_properties_save))
+        .route("/api/servers/:id/bedrock/update", post(bedrock_update))
+        .route("/api/templates", get(list_templates).post(create_template))
+        .route("/api/templates/:id", delete(delete_template))
+        .route("/api/templates/:id/create", post(create_from_template))
+        .route("/api/transfers", get(list_transfers))
+        .route("/api/transfers/start", post(start_transfer))
+        .route("/api/transfers/:id/retry", post(retry_transfer))
+        .route("/api/incoming-backups", get(list_incoming_backups))
+        .route("/api/incoming-backups/:source/:name", delete(delete_incoming_backup))
+        .route("/api/mirrors", get(get_mirrors))
+        .route("/api/mirrors/:server_id", put(set_mirror))
         .route("/api/alerts", get(get_alerts))
         .route("/api/ai/chat", post(ai_chat))
         .route("/api/ai/chat/stream", post(ai_chat_stream))
@@ -122,7 +148,24 @@ async fn update_apply(State(state): State<AppState>) -> AppResult<Json<serde_jso
     let info = updater::check_for_update(&state.http, &repo).await?;
     let url = info.download_url.ok_or_else(|| anyhow::anyhow!("aucun binaire disponible pour cette plateforme"))?;
     updater::apply_update(&state.http, &url).await?;
-    Ok(Json(json!({ "ok": true, "message": "Mise a jour appliquee. Redemarrez MCManager." })))
+    // Redémarrage automatique : les serveurs Minecraft sont arrêtés proprement puis relancés par la nouvelle version.
+    schedule_restart(&state);
+    Ok(Json(json!({ "ok": true, "restarting": true, "message": "Mise a jour appliquee. MCManager redemarre ; les serveurs qui tournaient seront relances." })))
+}
+
+/// Redémarre MCManager dans un instant (le temps de répondre à la requête en cours).
+fn schedule_restart(state: &AppState) {
+    let st = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        resume::restart_process(&st).await;
+    });
+}
+
+/// Redémarrage manuel : arrêt propre des serveurs, relance de MCManager, reprise des serveurs.
+async fn restart_manager(State(state): State<AppState>) -> Json<serde_json::Value> {
+    schedule_restart(&state);
+    Json(json!({ "ok": true, "restarting": true }))
 }
 
 async fn get_settings(State(state): State<AppState>) -> Json<AppConfig> {
@@ -169,6 +212,10 @@ fn parse_loader(s: &str) -> AppResult<Loader> {
         "quilt" => Loader::Quilt,
         "forge" => Loader::Forge,
         "neoforge" => Loader::Neoforge,
+        "bedrock" => Loader::Bedrock,
+        "bedrockpreview" => Loader::Bedrockpreview,
+        "pocketmine" => Loader::Pocketmine,
+        "nukkit" => Loader::Nukkit,
         other => return Err(AppError(anyhow::anyhow!("loader inconnu: {other}"))),
     })
 }
@@ -214,7 +261,7 @@ async fn get_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> 
 async fn create_server(State(state): State<AppState>, Json(req): Json<CreateServerRequest>) -> AppResult<Json<ServerEntry>> {
     let id = Uuid::new_v4();
     let folder = state.data_dir.join("servers").join(id.to_string());
-    let java_path = state.config.read().await.java_path.clone();
+    let mut java_path = state.config.read().await.java_path.clone();
 
     let result = downloader::setup_server(
         &state.http,
@@ -224,6 +271,12 @@ async fn create_server(State(state): State<AppState>, Json(req): Json<CreateServ
         &folder,
         &java_path,
     ).await?;
+    // « java_path » est le programme qui lance le serveur : PHP pour PocketMine-MP, rien pour le serveur officiel Bedrock.
+    match req.loader.runtime() {
+        crate::models::Runtime::Native => java_path = String::new(),
+        crate::models::Runtime::Php => java_path = result.runtime_path.clone().unwrap_or_else(|| "php".to_string()),
+        crate::models::Runtime::Java => {}
+    }
 
     let entry = ServerEntry {
         id,
@@ -251,13 +304,19 @@ async fn create_server(State(state): State<AppState>, Json(req): Json<CreateServ
         created_at: chrono::Utc::now(),
     };
 
-    if entry.eula_accepted {
-        tokio::fs::write(folder.join("eula.txt"), "eula=true\n").await.ok();
-    }
-    // Reasonable default server.properties so a beginner gets a working server immediately.
     let props_path = folder.join("server.properties");
-    if !props_path.exists() {
-        tokio::fs::write(&props_path, format!("server-port={}\nmotd=Serveur cree avec MCManager\nonline-mode=true\n", entry.port)).await.ok();
+    if entry.loader.is_bedrock() {
+        // Bedrock : pas d'eula.txt ; on part du server.properties livré avec le serveur et on y met le nom et le port (UDP).
+        let base = tokio::fs::read_to_string(&props_path).await.unwrap_or_default();
+        tokio::fs::write(&props_path, bedrock::apply_defaults(&base, entry.loader, &entry.name, entry.port)).await.ok();
+    } else {
+        if entry.eula_accepted {
+            tokio::fs::write(folder.join("eula.txt"), "eula=true\n").await.ok();
+        }
+        // Reasonable default server.properties so a beginner gets a working server immediately.
+        if !props_path.exists() {
+            tokio::fs::write(&props_path, format!("server-port={}\nmotd=Serveur cree avec MCManager\nonline-mode=true\n", entry.port)).await.ok();
+        }
     }
 
     {
@@ -293,6 +352,15 @@ async fn read_port_from_properties(folder: &Path) -> Option<u16> {
         .and_then(|v| v.trim().parse().ok())
 }
 
+/// Programme qui lance ce type de serveur : Java (réglage global), PHP, ou rien (binaire natif Bedrock).
+async fn runtime_for(state: &AppState, loader: Loader) -> String {
+    match loader.runtime() {
+        crate::models::Runtime::Native => String::new(),
+        crate::models::Runtime::Php => "php".to_string(),
+        crate::models::Runtime::Java => state.config.read().await.java_path.clone(),
+    }
+}
+
 async fn read_eula_accepted(folder: &Path) -> bool {
     match tokio::fs::read_to_string(folder.join("eula.txt")).await {
         Ok(content) => content.lines().any(|l| l.trim() == "eula=true"),
@@ -307,6 +375,9 @@ async fn import_server(State(state): State<AppState>, Json(req): Json<ImportServ
     }
     let jar_name = match req.jar_name {
         Some(j) => j,
+        None if req.loader.is_bedrock() => bedrock_dl::detect_launch_file(&folder, req.loader).ok_or_else(|| {
+            anyhow::anyhow!("aucun fichier de lancement Bedrock trouve dans ce dossier (bedrock_server, PocketMine-MP.phar ou nukkit.jar selon le type choisi)")
+        })?,
         None => detect_jar(&folder).await.ok_or_else(|| {
             anyhow::anyhow!("aucun .jar de serveur trouve dans ce dossier - precisez le nom du fichier manuellement")
         })?,
@@ -315,8 +386,8 @@ async fn import_server(State(state): State<AppState>, Json(req): Json<ImportServ
         return Err(AppError(anyhow::anyhow!("le fichier {jar_name} n'existe pas dans ce dossier")));
     }
 
-    let java_path = state.config.read().await.java_path.clone();
-    let port = read_port_from_properties(&folder).await.unwrap_or(25565);
+    let java_path = runtime_for(&state, req.loader).await;
+    let port = read_port_from_properties(&folder).await.unwrap_or(req.loader.default_port());
     let eula_accepted = read_eula_accepted(&folder).await;
     let id = Uuid::new_v4();
 
@@ -393,7 +464,10 @@ async fn import_server_zip(State(state): State<AppState>, mut multipart: Multipa
 
     // Archives zippées « à la main » : tout est souvent dans UN dossier racine.
     // Si aucun .jar n'est à la racine mais qu'un seul sous-dossier existe, on le remonte d'un niveau.
-    if detect_jar(&folder).await.is_none() {
+    let launch = |f: PathBuf| async move {
+        if loader.is_bedrock() { bedrock_dl::detect_launch_file(&f, loader) } else { detect_jar(&f).await }
+    };
+    if launch(folder.clone()).await.is_none() {
         let mut subdirs = Vec::new();
         if let Ok(mut rd) = tokio::fs::read_dir(&folder).await {
             while let Ok(Some(e)) = rd.next_entry().await {
@@ -402,7 +476,7 @@ async fn import_server_zip(State(state): State<AppState>, mut multipart: Multipa
                 }
             }
         }
-        if subdirs.len() == 1 && detect_jar(&subdirs[0]).await.is_some() {
+        if subdirs.len() == 1 && launch(subdirs[0].clone()).await.is_some() {
             let inner = subdirs.remove(0);
             if let Ok(mut rd) = tokio::fs::read_dir(&inner).await {
                 while let Ok(Some(e)) = rd.next_entry().await {
@@ -412,13 +486,13 @@ async fn import_server_zip(State(state): State<AppState>, mut multipart: Multipa
             let _ = tokio::fs::remove_dir(&inner).await;
         }
     }
-    let Some(jar_name) = detect_jar(&folder).await else {
+    let Some(jar_name) = launch(folder.clone()).await else {
         let _ = tokio::fs::remove_dir_all(&folder).await;
-        return Err(AppError(anyhow::anyhow!("aucun .jar de serveur trouvé dans cette archive (server.jar, paper-*.jar, fabric-server-launch.jar...)")));
+        return Err(AppError(anyhow::anyhow!("aucun fichier de lancement de serveur trouvé dans cette archive (server.jar, paper-*.jar, fabric-server-launch.jar... ou bedrock_server, PocketMine-MP.phar, nukkit.jar pour Bedrock)")));
     };
 
-    let java_path = state.config.read().await.java_path.clone();
-    let port = read_port_from_properties(&folder).await.unwrap_or(25565);
+    let java_path = runtime_for(&state, loader).await;
+    let port = read_port_from_properties(&folder).await.unwrap_or(loader.default_port());
     let eula_accepted = read_eula_accepted(&folder).await;
     let entry = ServerEntry {
         id, name, loader, mc_version, loader_version: None,
@@ -493,6 +567,362 @@ async fn test_java(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, body
     })))
 }
 
+/// État de la migration des données (version du schéma, sauvegardes de migration, serveurs écartés).
+async fn migration_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(migrate::status(&state.data_dir))
+}
+
+// ───────────────────────── Bedrock : packs, mondes, accès, réglages ─────────────────────────
+
+/// Serveur Bedrock local identifié, ou une erreur claire (Java, distant, introuvable).
+async fn bedrock_server(state: &AppState, id: Uuid) -> anyhow::Result<ServerEntry> {
+    let entry = state.servers.read().await.get(&id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
+    if !entry.loader.is_bedrock() {
+        anyhow::bail!("cette fonction ne concerne que les serveurs Bedrock");
+    }
+    Ok(entry)
+}
+
+async fn bedrock_level(entry: &ServerEntry) -> String {
+    bedrock::level_name(&tokio::fs::read_to_string(PathBuf::from(&entry.folder).join("server.properties")).await.unwrap_or_default())
+}
+
+async fn is_running(state: &AppState, id: Uuid) -> bool {
+    state.runtime.read().await.get(&id).map(|r| r.running).unwrap_or(false)
+}
+
+#[derive(Deserialize)]
+struct SchemaQuery {
+    loader: String,
+}
+
+/// Catalogue des réglages `server.properties` d'un type de serveur Bedrock (champs, bornes, textes FR/EN).
+async fn bedrock_schema(Query(q): Query<SchemaQuery>) -> AppResult<Json<serde_json::Value>> {
+    let loader = parse_loader(&q.loader)?;
+    Ok(Json(json!({ "loader": loader.as_str(), "edition": loader.edition(), "properties": bedrock::props_for(loader) })))
+}
+
+async fn bedrock_packs_list(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let (folder, level) = (PathBuf::from(&entry.folder), bedrock_level(&entry).await);
+    Ok(Json(bedrock_packs::summary(&folder, &level)))
+}
+
+/// Lit un envoi multipart : fichier (écrit dans un fichier temporaire, pas en mémoire) + champs texte.
+async fn read_upload(mut multipart: Multipart, max_bytes: u64) -> anyhow::Result<(PathBuf, String, std::collections::HashMap<String, String>)> {
+    use tokio::io::AsyncWriteExt;
+    let tmp = std::env::temp_dir().join(format!("mcmanager-upload-{}", Uuid::new_v4()));
+    let (mut file_name, mut fields, mut got) = (String::new(), std::collections::HashMap::new(), false);
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| anyhow::anyhow!("envoi invalide: {e}"))? {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            file_name = field.file_name().unwrap_or("").to_string();
+            let mut out = tokio::fs::File::create(&tmp).await?;
+            let mut total = 0u64;
+            while let Some(chunk) = field.chunk().await.map_err(|e| anyhow::anyhow!("lecture interrompue: {e}"))? {
+                total += chunk.len() as u64;
+                if total > max_bytes {
+                    drop(out);
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    anyhow::bail!("fichier trop volumineux (maximum {} Mo)", max_bytes / 1_048_576);
+                }
+                out.write_all(&chunk).await?;
+            }
+            got = true;
+        } else {
+            fields.insert(name, field.text().await.unwrap_or_default());
+        }
+    }
+    if !got {
+        anyhow::bail!("aucun fichier reçu");
+    }
+    Ok((tmp, file_name, fields))
+}
+
+async fn bedrock_packs_upload(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, multipart: Multipart) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    if !entry.loader.is_official_bedrock() {
+        return Err(AppError(anyhow::anyhow!("les packs concernent le serveur officiel : pour PocketMine-MP et Nukkit, déposez des plugins dans l'onglet Mods / Plugins")));
+    }
+    let (tmp, name, fields) = read_upload(multipart, 1024 * 1024 * 1024).await?;
+    let lower = name.to_lowercase();
+    if !(lower.ends_with(".mcpack") || lower.ends_with(".mcaddon") || lower.ends_with(".zip")) {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(AppError(anyhow::anyhow!("format non pris en charge : envoyez un .mcpack, un .mcaddon ou un .zip")));
+    }
+    let activate = fields.get("activate").map(|v| v != "false").unwrap_or(true);
+    let (folder, level) = (PathBuf::from(&entry.folder), bedrock_level(&entry).await);
+    let t2 = tmp.clone();
+    let res = tokio::task::spawn_blocking(move || bedrock_packs::install_archive(&folder, &level, &t2, activate)).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"));
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let installed = res??;
+    let running = is_running(&state, id).await;
+    Ok(Json(json!({ "ok": true, "installed": installed, "restart_needed": running })))
+}
+
+#[derive(Deserialize)]
+struct ActivateBody {
+    on: bool,
+}
+
+async fn bedrock_pack_activate(State(state): State<AppState>, AxPath((id, uuid)): AxPath<(Uuid, String)>, Json(b): Json<ActivateBody>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let (folder, level) = (PathBuf::from(&entry.folder), bedrock_level(&entry).await);
+    tokio::task::spawn_blocking(move || bedrock_packs::set_active(&folder, &level, &uuid.to_ascii_lowercase(), b.on)).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    Ok(Json(json!({ "ok": true, "restart_needed": is_running(&state, id).await })))
+}
+
+async fn bedrock_pack_delete(State(state): State<AppState>, AxPath((id, uuid)): AxPath<(Uuid, String)>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let folder = PathBuf::from(&entry.folder);
+    let removed = tokio::task::spawn_blocking(move || bedrock_packs::remove_pack(&folder, &uuid.to_ascii_lowercase())).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    Ok(Json(json!({ "ok": removed, "restart_needed": is_running(&state, id).await })))
+}
+
+async fn bedrock_worlds_list(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let (folder, level) = (PathBuf::from(&entry.folder), bedrock_level(&entry).await);
+    Ok(Json(json!({ "level": level, "worlds": bedrock_packs::list_worlds(&folder, &level) })))
+}
+
+async fn bedrock_world_import(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, multipart: Multipart) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    if !entry.loader.is_official_bedrock() {
+        return Err(AppError(anyhow::anyhow!("import de .mcworld : serveur officiel Bedrock seulement")));
+    }
+    let (tmp, file_name, fields) = read_upload(multipart, 16 * 1024 * 1024 * 1024).await?;
+    let overwrite = fields.get("overwrite").map(|v| v == "true").unwrap_or(false);
+    let fallback = std::path::Path::new(&file_name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let folder = PathBuf::from(&entry.folder);
+    let (t2, f2) = (tmp.clone(), folder.clone());
+    let res = tokio::task::spawn_blocking(move || bedrock_packs::import_world(&f2, &t2, &fallback, overwrite)).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"));
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let name = res??;
+    if fields.get("activate").map(|v| v == "true").unwrap_or(false) {
+        set_level_name(&folder, &name).await?;
+    }
+    Ok(Json(json!({ "ok": true, "world": name })))
+}
+
+async fn set_level_name(folder: &Path, name: &str) -> anyhow::Result<()> {
+    let p = folder.join("server.properties");
+    let cur = tokio::fs::read_to_string(&p).await.unwrap_or_default();
+    tokio::fs::write(&p, ai_tools::set_property(&cur, "level-name", name)).await?;
+    Ok(())
+}
+
+async fn bedrock_world_activate(State(state): State<AppState>, AxPath((id, name)): AxPath<(Uuid, String)>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    if !bedrock_packs::valid_world_name(&name) || !PathBuf::from(&entry.folder).join("worlds").join(&name).is_dir() {
+        return Err(AppError(anyhow::anyhow!("monde introuvable")));
+    }
+    set_level_name(&PathBuf::from(&entry.folder), &name).await?;
+    Ok(Json(json!({ "ok": true, "restart_needed": is_running(&state, id).await })))
+}
+
+async fn bedrock_world_delete(State(state): State<AppState>, AxPath((id, name)): AxPath<(Uuid, String)>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let level = bedrock_level(&entry).await;
+    let folder = PathBuf::from(&entry.folder);
+    if is_running(&state, id).await {
+        return Err(AppError(anyhow::anyhow!("arretez le serveur avant de supprimer un monde")));
+    }
+    let ok = tokio::task::spawn_blocking(move || bedrock_packs::remove_world(&folder, &name, &level)).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    Ok(Json(json!({ "ok": ok })))
+}
+
+async fn bedrock_allowlist_get(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let folder = PathBuf::from(&entry.folder);
+    Ok(Json(json!({ "allowlist": bedrock::read_allowlist(&folder), "permissions": bedrock::read_permissions(&folder), "running": is_running(&state, id).await, "official": entry.loader.is_official_bedrock() })))
+}
+
+#[derive(Deserialize)]
+struct AllowBody {
+    name: String,
+    #[serde(default)]
+    xuid: Option<String>,
+}
+
+/// Prévient le serveur qu'un fichier d'accès a changé (`allowlist reload` / `permission reload`) s'il tourne.
+async fn bedrock_reload(state: &AppState, id: Uuid, command: &str) {
+    if is_running(state, id).await {
+        let _ = process::send_command(state, id, command).await;
+    }
+}
+
+async fn bedrock_allowlist_add(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(b): Json<AllowBody>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let folder = PathBuf::from(&entry.folder);
+    let (name, xuid) = (b.name, b.xuid);
+    let added = tokio::task::spawn_blocking(move || bedrock::allowlist_add(&folder, &name, xuid.as_deref())).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    bedrock_reload(&state, id, "allowlist reload").await;
+    Ok(Json(json!({ "ok": true, "added": added })))
+}
+
+async fn bedrock_allowlist_remove(State(state): State<AppState>, AxPath((id, name)): AxPath<(Uuid, String)>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let folder = PathBuf::from(&entry.folder);
+    let removed = tokio::task::spawn_blocking(move || bedrock::allowlist_remove(&folder, &name)).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    bedrock_reload(&state, id, "allowlist reload").await;
+    Ok(Json(json!({ "ok": removed })))
+}
+
+#[derive(Deserialize)]
+struct PermBody {
+    xuid: String,
+    /// `visitor` | `member` | `operator` ; `none` retire l'entrée.
+    level: String,
+}
+
+async fn bedrock_permission_set(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(b): Json<PermBody>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let folder = PathBuf::from(&entry.folder);
+    tokio::task::spawn_blocking(move || if b.level == "none" { bedrock::remove_permission(&folder, &b.xuid).map(|_| ()) } else { bedrock::set_permission(&folder, &b.xuid, &b.level) }).await.map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
+    bedrock_reload(&state, id, "permission reload").await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct BedrockPropsBody {
+    changes: std::collections::HashMap<String, String>,
+}
+
+/// Enregistre des réglages après validation (types, bornes, valeurs permises) ; commentaires et clés inconnues conservés.
+async fn bedrock_properties_save(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(b): Json<BedrockPropsBody>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    let path = PathBuf::from(&entry.folder).join("server.properties");
+    let mut text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let mut keys: Vec<_> = b.changes.keys().cloned().collect();
+    keys.sort();
+    for k in keys {
+        let v = bedrock::validate_property(entry.loader, &k, &b.changes[&k])?;
+        text = ai_tools::set_property(&text, &k, &v);
+    }
+    tokio::fs::write(&path, text).await?;
+    // Le port du serveur suit server-port : le tableau de bord et Discord affichent le bon.
+    let port = read_port_from_properties(&PathBuf::from(&entry.folder)).await;
+    if let Some(p) = port {
+        if let Some(e) = state.servers.write().await.get_mut(&id) {
+            e.port = p;
+        }
+        save_servers(&state).await?;
+    }
+    Ok(Json(json!({ "ok": true, "restart_needed": is_running(&state, id).await })))
+}
+
+#[derive(Deserialize)]
+struct BedrockUpdateBody {
+    version: String,
+}
+
+/// Installe une autre version du serveur officiel par-dessus (réglages, accès et mondes conservés), serveur arrêté.
+async fn bedrock_update(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(b): Json<BedrockUpdateBody>) -> AppResult<Json<serde_json::Value>> {
+    let entry = bedrock_server(&state, id).await?;
+    if !entry.loader.is_official_bedrock() {
+        return Err(AppError(anyhow::anyhow!("mise à jour de version : serveur officiel Bedrock seulement")));
+    }
+    if is_running(&state, id).await {
+        return Err(AppError(anyhow::anyhow!("arretez le serveur avant de changer de version")));
+    }
+    // Sauvegarde de sécurité avant de toucher aux fichiers (le monde n'est pas modifié, mais un échec en cours de route le serait peut-être).
+    let folder = PathBuf::from(&entry.folder);
+    let (data_dir, f2) = (state.data_dir.clone(), folder.clone());
+    let _ = tokio::task::spawn_blocking(move || backup::create_backup(&data_dir, &id, &f2)).await;
+    bedrock_dl::install_official(&state.http, entry.loader == Loader::Bedrockpreview, &b.version, &folder).await?;
+    if let Some(e) = state.servers.write().await.get_mut(&id) {
+        e.mc_version = b.version.clone();
+    }
+    save_servers(&state).await?;
+    Ok(Json(json!({ "ok": true, "version": b.version })))
+}
+
+// ───────────────────────── modèles de serveur ─────────────────────────
+
+async fn list_templates(State(state): State<AppState>) -> Json<Vec<templates::TemplateMeta>> {
+    Json(templates::list(&state.data_dir).await)
+}
+
+#[derive(Deserialize)]
+struct CreateTemplateBody {
+    server_id: Uuid,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    include_world: bool,
+}
+
+async fn create_template(State(state): State<AppState>, Json(b): Json<CreateTemplateBody>) -> AppResult<Json<templates::TemplateMeta>> {
+    Ok(Json(templates::create_from_server(&state, b.server_id, &b.name, &b.description, b.include_world).await?))
+}
+
+async fn delete_template(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "ok": templates::delete(&state.data_dir, id).await? })))
+}
+
+#[derive(Deserialize)]
+struct FromTemplateBody {
+    name: String,
+    #[serde(default)]
+    port: Option<u16>,
+}
+
+async fn create_from_template(State(state): State<AppState>, AxPath(id): AxPath<Uuid>, Json(b): Json<FromTemplateBody>) -> AppResult<Json<ServerEntry>> {
+    Ok(Json(templates::instantiate(&state, id, &b.name, b.port).await?))
+}
+
+// ───────────────────────── transferts entre machines ─────────────────────────
+
+async fn list_transfers() -> Json<Vec<transfer::Job>> {
+    Json(transfer::list_jobs())
+}
+
+/// Démarre un transfert (déplacer/copier un serveur, envoyer/récupérer une sauvegarde) et renvoie tout de suite l'identifiant de suivi.
+async fn start_transfer(State(state): State<AppState>, Json(spec): Json<transfer::Spec>) -> AppResult<Json<serde_json::Value>> {
+    let job = transfer::new_job(&state, &spec).await;
+    tokio::spawn(transfer::run_job(state.clone(), job.clone(), spec));
+    Ok(Json(json!({ "ok": true, "job": job })))
+}
+
+/// Reprend un transfert en erreur là où il s'était arrêté.
+async fn retry_transfer(State(state): State<AppState>, AxPath(id): AxPath<String>) -> AppResult<Json<serde_json::Value>> {
+    let spec = transfer::retry_spec(&id).ok_or_else(|| anyhow::anyhow!("seul un transfert en erreur peut etre repris"))?;
+    tokio::spawn(transfer::run_job(state.clone(), id.clone(), spec));
+    Ok(Json(json!({ "ok": true, "job": id })))
+}
+
+async fn list_incoming_backups(State(state): State<AppState>) -> Json<Vec<transfer::IncomingBackup>> {
+    Json(transfer::list_incoming(&state.data_dir))
+}
+
+async fn delete_incoming_backup(State(state): State<AppState>, AxPath((source, name)): AxPath<(String, String)>) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(json!({ "ok": transfer::delete_incoming(&state.data_dir, &source, &name)? })))
+}
+
+async fn get_mirrors(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!(transfer::load_mirrors(&state.data_dir).await))
+}
+
+#[derive(Deserialize)]
+struct MirrorBody {
+    target: Option<String>,
+}
+
+/// Machine vers laquelle chaque nouvelle sauvegarde de ce serveur est copiée automatiquement (`null` = aucune).
+async fn set_mirror(State(state): State<AppState>, AxPath(server_id): AxPath<Uuid>, Json(b): Json<MirrorBody>) -> AppResult<Json<serde_json::Value>> {
+    if !state.servers.read().await.contains_key(&server_id) {
+        return Err(AppError(anyhow::anyhow!("serveur introuvable")));
+    }
+    if let Some(t) = b.target.as_deref().filter(|t| !t.is_empty()) {
+        if crate::hub::target_by_label(&state, t).await.is_none() {
+            return Err(AppError(anyhow::anyhow!("machine distante inconnue")));
+        }
+    }
+    transfer::set_mirror(&state.data_dir, server_id, b.target).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// Alertes du tableau de bord (disque, sauvegardes, EULA, bot Discord) : voir `alerts.rs`.
 async fn get_alerts(State(state): State<AppState>) -> Json<Vec<alerts::Alert>> {
     Json(alerts::evaluate(&alerts::gather(&state).await))
@@ -513,11 +943,17 @@ async fn detect_java(Query(q): Query<DetectJavaQuery>) -> AppResult<Json<serde_j
 }
 
 async fn delete_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
+    let warnings = remove_server(&state, id).await?;
+    Ok(Json(json!({ "ok": true, "warnings": warnings })))
+}
+
+/// Supprime un serveur (entrée, dossier, sauvegardes). Refuse s'il tourne. Partagé avec les transferts (« déplacer »).
+pub(crate) async fn remove_server(state: &AppState, id: Uuid) -> anyhow::Result<Vec<String>> {
     {
         let runtime = state.runtime.read().await;
         if let Some(rt) = runtime.get(&id) {
             if rt.running {
-                return Err(AppError(anyhow::anyhow!("arretez le serveur avant de le supprimer")));
+                anyhow::bail!("arretez le serveur avant de le supprimer");
             }
         }
     }
@@ -525,9 +961,11 @@ async fn delete_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) 
         let mut servers = state.servers.write().await;
         servers.remove(&id).ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?
     };
-    save_servers(&state).await?;
+    save_servers(state).await?;
     state.runtime.write().await.remove(&id);
     state.backup_progress.write().await.remove(&id);
+    resume::remove(state, id).await;
+    let _ = transfer::set_mirror(&state.data_dir, id, None).await;
 
     let mut warnings = Vec::new();
     let folder = PathBuf::from(&entry.folder);
@@ -542,7 +980,7 @@ async fn delete_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) 
             warnings.push(format!("sauvegardes non supprimees ({e})"));
         }
     }
-    Ok(Json(json!({ "ok": true, "warnings": warnings })))
+    Ok(warnings)
 }
 
 async fn start_server(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<serde_json::Value>> {
@@ -589,7 +1027,7 @@ async fn server_status(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) 
     };
     let (cpu, mem) = pid.map(stats::process_stats).unwrap_or((0.0, 0.0));
     let (players_online, players_max, motd) = if running {
-        stats::ping_server(entry.port).await.unwrap_or((None, None, None))
+        stats::ping_entry(&entry).await.unwrap_or((None, None, None))
     } else {
         (None, None, None)
     };
@@ -868,10 +1306,28 @@ pub(crate) async fn start_backup(state: &AppState, id: Uuid) -> anyhow::Result<u
 
     let state2 = state.clone();
     let data_dir = state.data_dir.clone();
+    let hot_bedrock = entry.loader.is_official_bedrock() && state.runtime.read().await.get(&id).map(|r| r.running).unwrap_or(false);
     tokio::spawn(async move {
         let folder2 = folder.clone();
         let done2 = done.clone();
-        let result = tokio::task::spawn_blocking(move || backup::create_backup_tracked(&data_dir, &id, &folder2, done2)).await;
+        // Serveur officiel Bedrock en marche : `save hold` fige l'écriture, on copie les longueurs exactes, puis `save resume`.
+        let limits = if hot_bedrock {
+            match bedrock::save_hold(&state2, id).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::error!("Sauvegarde Bedrock de {id} impossible : {e}");
+                    bedrock::save_resume(&state2, id).await;
+                    state2.backup_progress.write().await.remove(&id);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let result = tokio::task::spawn_blocking(move || backup::create_backup_limited(&data_dir, &id, &folder2, done2, limits.as_ref())).await;
+        if hot_bedrock {
+            bedrock::save_resume(&state2, id).await;
+        }
         state2.backup_progress.write().await.remove(&id);
         match result {
             Ok(Ok(name)) => {
@@ -1402,13 +1858,13 @@ async fn get_audit(State(state): State<AppState>, Query(q): Query<crate::audit::
 async fn known_servers(state: &AppState) -> Vec<(network::KnownServer, Option<String>)> {
     let mut out = Vec::new();
     for (id, s) in state.servers.read().await.iter() {
-        out.push((network::KnownServer { id: *id, name: s.name.clone(), port: s.port, backend_host: "127.0.0.1".into() }, None));
+        out.push((network::KnownServer { id: *id, name: s.name.clone(), port: s.port, backend_host: "127.0.0.1".into(), bedrock: s.loader.is_bedrock() }, None));
     }
     for st in crate::hub::status_snapshot(state).await {
         let host = st.host.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or_else(|| st.host.clone());
         for sv in &st.servers {
             if let (Some(id), Some(port)) = (sv["id"].as_str().and_then(|x| Uuid::parse_str(x).ok()), sv["port"].as_u64()) {
-                out.push((network::KnownServer { id, name: sv["name"].as_str().unwrap_or("?").to_string(), port: port as u16, backend_host: host.clone() }, Some(st.label.clone())));
+                out.push((network::KnownServer { id, name: sv["name"].as_str().unwrap_or("?").to_string(), port: port as u16, backend_host: host.clone(), bedrock: sv["loader"].as_str().map(|l| l.starts_with("bedrock") || l == "pocketmine" || l == "nukkit").unwrap_or(false) }, Some(st.label.clone())));
             }
         }
     }
@@ -1778,37 +2234,12 @@ async fn remote_call(State(state): State<AppState>, AxPath(label): AxPath<String
     Ok(Json(result))
 }
 
-/// "Envoyer ce serveur vers une instance distante" - zips the local
-/// server and ships it to the remote instance through the chunked blob
-/// store, then registers it there with `import_server`. Since v1.0.8 the
-/// archive is no longer base64-embedded in one giant request: it streams in
-/// 2 MB encrypted chunks (still buffered in memory, capped at 512 MB).
+/// Ancienne route « envoyer ce serveur » : démarre désormais une copie en flux, reprenable et vérifiée (voir `transfer.rs`).
 async fn remote_deploy(State(state): State<AppState>, AxPath((label, server_id)): AxPath<(String, Uuid)>) -> AppResult<Json<serde_json::Value>> {
-    let entry = state.servers.read().await.get(&server_id).cloned().ok_or_else(|| anyhow::anyhow!("serveur introuvable"))?;
-    let root = PathBuf::from(&entry.folder);
-    let zip_path = tokio::task::spawn_blocking(move || files::export_zip(&root, "")).await
-        .map_err(|e| anyhow::anyhow!("erreur interne: {e}"))??;
-    let zip_bytes = tokio::fs::read(&zip_path).await?;
-    tokio::fs::remove_file(&zip_path).await.ok();
-    if zip_bytes.len() > remote::TUNNEL_BODY_MAX {
-        return Err(anyhow::anyhow!("archive trop volumineuse pour le transfert ({} Mo, maximum {} Mo) - utilisez rsync/scp pour ce serveur", zip_bytes.len() / (1024 * 1024), remote::TUNNEL_BODY_MAX / (1024 * 1024)).into());
-    }
-
-    let identity = crate::hub::identity(&state).await?;
-    let target = crate::hub::target_by_label(&state, &label).await.ok_or_else(|| anyhow::anyhow!("instance distante \"{label}\" inconnue"))?;
-    let zip_ref = remote::client_blob_upload(&state.http, &identity, &target, &zip_bytes).await?;
-
-    let action = json!({
-        "action": "import_server",
-        "name": entry.name,
-        "loader": entry.loader,
-        "mc_version": entry.mc_version,
-        "port": entry.port,
-        "zip_ref": zip_ref,
-    });
-    let result = remote::client_call_timeout(&state.http, &identity, &target, action, std::time::Duration::from_secs(300)).await?;
-    crate::hub::refresh_target(&state, &target).await;
-    Ok(Json(result))
+    let spec = transfer::Spec::MoveServer { server_id, label, delete_source: false };
+    let job = transfer::new_job(&state, &spec).await;
+    tokio::spawn(transfer::run_job(state.clone(), job.clone(), spec));
+    Ok(Json(json!({ "ok": true, "job": job })))
 }
 
 async fn check_addon_updates(State(state): State<AppState>, AxPath(id): AxPath<Uuid>) -> AppResult<Json<Vec<serde_json::Value>>> {

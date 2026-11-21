@@ -42,6 +42,15 @@ python3 scripts/browser-test.py --binary target/debug/mcmanager --firefox "$(whi
 ```
 Il tourne aussi dans `ci.yml` (job `browser`), où Firefox et geckodriver sont préinstallés.
 
+Depuis la 1.1.3 il couvre aussi l'assistant Java / Bedrock, les modèles, Packs & mondes, la liste d'autorisation, les propriétés Bedrock et la carte Transferts.
+Pour ce dernier cas, ajoutez `--server target/debug/mcmanager-server` : une seconde machine est lancée et jumelée. Sans cette option, les transferts ne sont pas testés.
+
+### Tests avec de vrais processus, Docker, captures du site
+- `python3 scripts/two-process-test.py --server target/debug/mcmanager-server --desktop target/debug/mcmanager` (bibliothèque standard seulement) : deux instances jumelées,
+  transfert reprenable, HTTPS, reprise des serveurs, migration. Aucun Docker.
+- `scripts/docker-test.sh` : construit l'image et vérifie le conteneur (job `docker` de `ci.yml`). *Jamais exécuté avant la publication (pas de Docker dans l'environnement de développement).*
+- `python3 scripts/make-site-shots.py --binary … --firefox … --geckodriver …` : régénère les captures du site (`website/assets/shot-*.webp`) depuis le vrai programme, avec de faux serveurs de démonstration.
+
 ### Docker
 `docker build -t mcmanager .` construit l'image du mode serveur (Dockerfile à la racine, build multi-étapes,
 Java 21 + 17 dans l'image finale). `docker compose up -d` la lance avec un volume de données.

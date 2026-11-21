@@ -23,6 +23,20 @@ pub fn process_stats(pid: u32) -> (f32, f32) {
 /// with a longer timeout: a server that just started can accept the TCP
 /// connection before its status handler is fully ready, which used to read
 /// as "offline" for a few seconds after start with a single fixed 800ms try.
+/// État d'un serveur Minecraft, quelle que soit l'édition : ping Java (TCP) ou RakNet (UDP) pour Bedrock.
+/// Même forme que [`ping_server`] : (joueurs en ligne, maximum, message d'accueil).
+pub async fn ping_entry(entry: &crate::models::ServerEntry) -> Result<(Option<u32>, Option<u32>, Option<String>)> {
+    if entry.loader.is_bedrock() {
+        for ms in [500u64, 1500] {
+            if let Ok(st) = crate::bedrock::query("127.0.0.1", entry.port, std::time::Duration::from_millis(ms)).await {
+                return Ok((st.online, st.max, Some(st.motd)));
+            }
+        }
+        return Ok((None, None, None));
+    }
+    ping_server(entry.port).await
+}
+
 pub async fn ping_server(port: u16) -> Result<(Option<u32>, Option<u32>, Option<String>)> {
     for (attempt, timeout_ms) in [400u64, 1200].into_iter().enumerate() {
         match try_ping(port, timeout_ms).await {

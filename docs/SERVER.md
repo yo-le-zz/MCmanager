@@ -62,6 +62,39 @@ laisse 90 s aux serveurs Minecraft pour sauvegarder le monde à l'arrêt.
 > Ses données étaient dans le dossier de l'utilisateur qui le lançait ; copiez-les
 > dans `/var/lib/mcmanager` (`chown -R mcmanager:mcmanager`) pour les reprendre.
 
+### Service de démarrage sans paquet (depuis la 1.1.3)
+
+```bash
+mcmanager-server --install-service     # crée le service de l'utilisateur courant, le démarre
+mcmanager-server --service-status      # l'interroge
+mcmanager-server --uninstall-service   # le retire
+```
+
+Sans droits administrateur : unité **systemd utilisateur** (Linux), agent **launchd** (macOS, démarre à l'ouverture de session),
+tâche planifiée à l'ouverture de session (Windows). Sous Linux, pour démarrer **sans ouvrir de session** : `sudo loginctl enable-linger $USER`.
+Les fichiers générés sont testés ; l'exécution réelle des commandes système (systemd, launchd, schtasks) n'a pas été exécutée avant la publication,
+et `mcmanager-server` n'a jamais été lancé sous Windows.
+
+## Serveurs Minecraft toujours allumés (reprise, depuis la 1.1.3)
+
+Fermer la page web n'arrête rien : les serveurs sont des processus de MCManager. MCManager tient la liste des serveurs voulus « en marche »
+dans `running-servers.json` (elle survit à un plantage ou une coupure de courant). Au démarrage, ils repartent l'un après l'autre
+(Réglages → **Relancer les serveurs au démarrage**, activé par défaut). À l'arrêt de MCManager (Ctrl+C, SIGTERM, mise à jour), chaque serveur reçoit un `stop`
+propre. Après une mise à jour, MCManager se relance seul (`POST /api/update/restart` ; code de sortie 75 sous systemd / Docker) et les serveurs repartent.
+
+## HTTPS natif (depuis la 1.1.3)
+
+Sans reverse proxy :
+- `MCMANAGER_TLS_CERT=/chemin/fullchain.pem` + `MCMANAGER_TLS_KEY=/chemin/privkey.pem` : votre certificat (Let's Encrypt par exemple), au format PEM ;
+- ou `MCMANAGER_TLS=self-signed` : un certificat auto-signé est créé et renouvelé dans `<données>/tls/` (le navigateur avertit la première fois ; `MCMANAGER_TLS_NAMES` ajoute des noms) ;
+- `MCMANAGER_HTTP_REDIRECT_PORT=80` : un petit serveur HTTP redirige vers HTTPS.
+
+Quand TLS est actif, le cookie de session reçoit l'attribut `Secure`. Testé avec une vraie poignée de main TLS et deux processus réels.
+
+## Données : migration automatique
+
+Voir [MIGRATION.md](MIGRATION.md). Transferts entre machines, miroir de sauvegardes, modèles : [TRANSFERS.md](TRANSFERS.md).
+
 ## Docker
 
 ```bash
@@ -234,6 +267,10 @@ actif sur le port web.
 | `MCMANAGER_ADMIN_USER` / `_PASSWORD` | — | compte administrateur créé s'il n'y a aucun compte |
 | `MCMANAGER_TRUST_PROXY` | non | `1` : lit l'adresse client dans `X-Forwarded-For` (reverse proxy) |
 | `MCMANAGER_COOKIE_SECURE` | non | `1` : cookie de session `Secure` (HTTPS) |
+| `MCMANAGER_TLS_CERT` / `MCMANAGER_TLS_KEY` | — | HTTPS natif avec votre certificat PEM |
+| `MCMANAGER_TLS` | — | `self-signed` : certificat auto-signé généré dans `<données>/tls/` |
+| `MCMANAGER_TLS_NAMES` | — | noms supplémentaires du certificat auto-signé |
+| `MCMANAGER_HTTP_REDIRECT_PORT` | — | port HTTP (ex. 80) qui redirige vers HTTPS |
 | `MCMANAGER_TOKEN` | — | jeton d'API pour `mcmanager cli` (sinon lu dans `<data>/api_token`) |
 
 ## Autres systèmes

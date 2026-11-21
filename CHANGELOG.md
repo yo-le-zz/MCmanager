@@ -3,9 +3,37 @@
 Toutes les versions notables de MCManager sont documentées ici.
 Format inspiré de [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/).
 
+## [1.1.3] - 2026-11-21 (Bedrock, reprise des serveurs, transferts entre machines, modèles, HTTPS, migration)
+### Minecraft Bedrock Edition
+- **Quatre serveurs Bedrock** : officiel Mojang (binaire natif, x86_64 Linux/Windows), officiel **Preview**, **PocketMine-MP** (PHP, tourne sur ARM) et **Nukkit** (Java, tourne sur ARM). Choix de l'édition dans l'assistant de création ; port UDP 19132 par défaut.
+- **Packs & mondes** : `.mcpack`, `.mcaddon`, packs imbriqués, activation par monde avec leurs dépendances, import / export / activation de mondes `.mcworld`.
+- **Liste d'autorisation** et **permissions** (`allowlist.json`, `permissions.json`), appliquées à chaud quand le serveur tourne ; **propriétés** avec catalogue validé (35 réglages).
+- **Sauvegarde à chaud** (`save hold` / `save query` / `save resume`) : le monde n'est jamais copié en cours d'écriture. Joueurs connectés détectés dans la console ; ping **RakNet (UDP)** pour l'état et la latence.
+- Changement de version avec sauvegarde de sécurité ; menu adapté (pas de Marketplace ni de Schematics) ; Discord : `/mc join` donne adresse et port Bedrock ; nginx : bloc `stream … udp`.
+- Presets **Geyser / Floodgate** pour faire rejoindre des joueurs Bedrock sur un serveur Java.
+### Serveurs toujours allumés
+- **Reprise des serveurs** : la liste des serveurs lancés est conservée (`running-servers.json`) ; au démarrage de MCManager ils repartent seuls (réglage « relancer les serveurs », activé par défaut). Arrêt propre sur SIGTERM / Ctrl+C / mise à jour, et **redémarrage automatique après une mise à jour** (code 75 sous systemd / Docker).
+- **Service de démarrage** : `mcmanager-server --install-service | --uninstall-service | --service-status` (systemd utilisateur, launchd, tâche planifiée Windows).
+### Plusieurs machines
+- **Transferts reprenables** (flux de 2 Mo, SHA-256, reprise après coupure) : copier / déplacer un serveur, le rapatrier, envoyer ou récupérer des sauvegardes, **miroir automatique** des sauvegardes, sauvegardes reçues. Carte « Transferts » du Contrôle à distance.
+- **Mise à jour d'une machine distante** depuis l'interface.
+- **Modèles de serveur** : enregistrer la configuration d'un serveur (réglages, `server.properties`, plugins / mods, éventuellement le monde) et en créer d'autres sans rien télécharger.
+### Sécurité et données
+- **HTTPS natif** (`MCMANAGER_TLS_CERT` / `MCMANAGER_TLS_KEY`, ou `MCMANAGER_TLS=self-signed`), redirection HTTP (`MCMANAGER_HTTP_REDIRECT_PORT`), cookie `Secure`.
+- **Migration des anciennes données** : `schema.json`, copie dans `migration-backups/`, chargement serveur par serveur (un serveur illisible va dans `servers.rejected.json` sans bloquer les autres), idempotente.
+- Sauvegardes écrites en `.part` puis renommées (plus de zip partiel dans la liste) ; extraction et export de zip en flux ; fichiers de plugins validés.
+### Interface
+- **Discord a sa place dans le menu** (groupe « Serveur actif », à côté de Console et Fichiers) et n'est plus dans les Réglages.
+- Corrections trouvées par le test navigateur : le menu Bedrock ne masquait plus Marketplace / Schematics après un rafraîchissement de la liste ; l'assistant laissait une erreur muette quand la liste des versions était injoignable (message dans la liste, plus de promesse rejetée) ; libellé « BEDROCK · BEDROCK » en double sur la carte ; tailles « 0.0 Mo » pour les petits fichiers ; toast « Erreur 404 » parasite dans le Contrôle à distance de l'application de bureau.
+### Fiabilité et tests
+- 197 tests Rust, 8 tests d'interface, test **navigateur** étendu (assistant Java / Bedrock, Packs & mondes, liste d'autorisation, propriétés, modèles, transferts avec une machine jumelée), test **deux processus réels** (`scripts/two-process-test.py`) qui a trouvé et fait corriger les sauvegardes partielles listées, test Docker (`scripts/docker-test.sh`) et jobs CI correspondants.
+- Captures du site générées depuis le vrai programme (`scripts/make-site-shots.py`).
+### Non exécuté (construit et testé autant que possible sans la vraie cible)
+- Workflows GitHub (`release.yml`, `ci.yml`), test Docker, compilations macOS / Windows / ARM, téléchargements réels Bedrock (Mojang, Bedrock-OSS, PocketMine, binaires PHP, Nukkit), mise à jour distante réelle, installation réelle du service de démarrage, `mcmanager-server` sous Windows.
+
 ## [1.1.2] - 2026-11-14 (stabilisation : Discord, double authentification, alertes, mobile, tests navigateur)
 ### Discord
-- **Statut du bot modifiable** dans Réglages → Discord : présence (en ligne, absent, ne pas déranger, invisible) et activité (joue à, regarde, écoute, participe à, statut personnalisé), texte avec `{online}` et `{servers}`. Appliqué **à chaud** (opcode 3 de la passerelle, sans reconnexion), rafraîchi chaque minute, repris à la reconnexion.
+- **Statut du bot modifiable** dans le menu **Discord** (dans Réglages jusqu'à la 1.1.2) : présence (en ligne, absent, ne pas déranger, invisible) et activité (joue à, regarde, écoute, participe à, statut personnalisé), texte avec `{online}` et `{servers}`. Appliqué **à chaud** (opcode 3 de la passerelle, sans reconnexion), rafraîchi chaque minute, repris à la reconnexion.
 - **Rejoindre** : lien « Inviter le bot » calculé localement dès que le token est enregistré (sans appel réseau) ; nouvelle commande **`/mc join`** (`/mc rejoindre`) qui donne l'adresse à coller dans Minecraft (adresse publique configurable, port, version, état).
 - Le webhook (sans bot) reste une option de la même section. Docs FR/EN mises à jour.
 ### Sécurité

@@ -96,7 +96,7 @@ pub async fn gather(state: &AppState) -> Snapshot {
     let mut servers = Vec::new();
     for e in entries {
         let last_backup = crate::backup::list_backups(&state.data_dir, &e.id).ok().and_then(|l| l.iter().map(|b| b.created_at).max());
-        servers.push(ServerFacts { id: e.id, name: e.name.clone(), eula_accepted: e.eula_accepted, auto_backup: e.auto_backup_minutes.is_some(), last_backup });
+        servers.push(ServerFacts { id: e.id, name: e.name.clone(), eula_accepted: e.eula_accepted || e.loader.is_bedrock(), auto_backup: e.auto_backup_minutes.is_some(), last_backup });
     }
     servers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let dir = state.data_dir.clone();

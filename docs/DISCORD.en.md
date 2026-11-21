@@ -10,7 +10,7 @@ Notifications, `/mc` commands and, **for each Minecraft server, a dedicated Disc
 | `console` | **live** console output; authorized roles **type commands** there |
 | `chat` | in-game chat **⇄** Discord (both directions) |
 
-Settings: **Settings → 🤖 Discord bot**. The bot connects *out* to Discord: no port to open, no domain needed. It runs inside the
+Menu: **Discord** (in the “Active server” group, next to Console and Files). The bot connects *out* to Discord: no port to open, no domain needed. It runs inside the
 MCManager process (`mcmanager` or `mcmanager-server`) and stays idle until enabled.
 
 ## Setup
@@ -58,7 +58,7 @@ Declared in English, **shown in French** to French Discord clients; replies foll
 | `/mc restart server` | **operators** | restart |
 | `/mc command server text` | **operators** | console command |
 
-## Bot status, invitation and address (Settings → Discord)
+## Bot status, invitation and address (Discord menu entry)
 - **Bot status**: presence (*online*, *idle*, *do not disturb*, *invisible*) and activity (*playing*, *watching*, *listening*, *competing in*, or a custom status).
   The text accepts `{online}` (running servers) and `{servers}` (number of servers), refreshed every minute — e.g. "{online}/{servers} servers online".
   **Apply status** takes effect **immediately**, without reconnecting the bot.

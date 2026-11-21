@@ -38,7 +38,7 @@ elle-même le `PATH` avec les dossiers Homebrew.
 par défaut ; macOS peut demander l'autorisation d'accéder à *Documents* ou *Bureau* si vous placez un serveur dans ces dossiers.
 
 ## Mode serveur (`mcmanager-server`) avec launchd
-Le service permanent automatique repose sur systemd (Linux). Sur un Mac qui sert de machine de jeu, créez
+Depuis la 1.1.3, `mcmanager-server --install-service` crée cet agent launchd pour vous (sans droits administrateur ; il démarre à l'ouverture de session). Cette génération est testée, son exécution réelle sur un Mac ne l'a pas été. Pour le faire à la main, créez
 `~/Library/LaunchAgents/io.github.yo-le-zz.mcmanager-server.plist` :
 
 ```xml

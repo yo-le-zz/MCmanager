@@ -116,3 +116,27 @@ Toutes ces routes sont réservées aux administrateurs.
 ## Java (v1.1.1)
 - `GET /java/detect?mc_version=1.21.4` (administrateurs) : installations Java trouvées (`{installs:[{path, version, major, compatible}], required_major}`).
   `mc_version` est facultatif ; sans lui, `compatible` vaut `null` et `required_major` aussi.
+
+## Bedrock (v1.1.3)
+Voir [BEDROCK.md](BEDROCK.md). Lire les packs, les mondes et la liste d'autorisation demande le droit `view` sur le serveur ; tout le reste demande `manage`. Le catalogue de réglages est public en lecture.
+- `GET /api/bedrock/properties-schema?loader=…` : catalogue des réglages `server.properties` (types, bornes, valeurs).
+- `GET /api/servers/:id/bedrock/packs`, `POST …/packs/upload` (multipart : `file`, `activate`), `POST …/packs/:uuid/activate` (`{"on": true}`), `DELETE …/packs/:uuid`.
+- `GET /api/servers/:id/bedrock/worlds`, `POST …/worlds/import` (multipart : `file`, `activate`, `overwrite`), `POST …/worlds/:name/activate`, `DELETE …/worlds/:name`.
+- `GET|POST /api/servers/:id/bedrock/allowlist`, `DELETE …/allowlist/:name`, `POST …/permissions`.
+- `PUT /api/servers/:id/bedrock/properties` : enregistre les propriétés après validation.
+- `POST /api/servers/:id/bedrock/update` (`{"version": "…"}`) : change la version (sauvegarde de sécurité d'abord).
+
+## Transferts, miroirs, modèles (v1.1.3)
+Voir [TRANSFERS.md](TRANSFERS.md).
+- `GET /api/transfers` ; `POST /api/transfers/start` avec `{"op": "move_server", "server_id", "label", "delete_source"}`,
+  `{"op": "pull_server", "label", "remote_id", "delete_source"}`, `{"op": "send_backup", "server_id", "name", "label"}` ou
+  `{"op": "pull_backup", "label", "source", "name", "server_id"}` ; `POST /api/transfers/:id/retry`.
+- `GET /api/incoming-backups`, `DELETE /api/incoming-backups/:source/:name`.
+- `GET /api/mirrors`, `PUT /api/mirrors/:server_id` (`{"target": "étiquette" | null}`).
+- `GET|POST /api/templates` (`{"server_id", "name", "description", "include_world"}`), `DELETE /api/templates/:id`, `POST /api/templates/:id/create` (`{"name", "port"}`).
+- Mise à jour d'une machine distante : `POST /api/remote/:label/call` avec `{"action": "update_check"}` puis `{"action": "update_apply"}`.
+
+## Divers (v1.1.3)
+- `GET /api/migration` : état de la migration des données ([MIGRATION.md](MIGRATION.md)).
+- `POST /api/update/restart` : arrête proprement les serveurs et relance MCManager (code 75 sous systemd / Docker) ; la reprise remet les serveurs en marche.
+

@@ -53,7 +53,7 @@ Usage:
   mcmanager cli status <id>       statut (CPU/RAM/joueurs) d'un serveur
   mcmanager cli start <id>        demarre un serveur
   mcmanager cli stop <id>         arrete un serveur proprement
-  mcmanager cli create --name N --loader paper --version 1.21.11 [--port P]
+  mcmanager cli create --name N --loader paper|bedrock|pocketmine|nukkit --version V [--port P]
   mcmanager --version             affiche la version
   mcmanager --help                affiche cette aide
 
@@ -173,19 +173,21 @@ async fn cli_create(client: &reqwest::Client, base: &str, args: &[String]) -> Re
     let mut name = None;
     let mut loader = None;
     let mut version = None;
-    let mut port: u16 = 25565;
+    let mut port: Option<u16> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--name" => { name = args.get(i + 1).cloned(); i += 2; }
             "--loader" => { loader = args.get(i + 1).cloned(); i += 2; }
             "--version" => { version = args.get(i + 1).cloned(); i += 2; }
-            "--port" => { port = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(25565); i += 2; }
+            "--port" => { port = Some(args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(25565)); i += 2; }
             _ => { i += 1; }
         }
     }
     let name = name.ok_or("--name est requis")?;
-    let loader = loader.ok_or("--loader est requis (vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge)")?;
+    let loader = loader.ok_or("--loader est requis (vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge|bedrock|bedrockpreview|pocketmine|nukkit)")?;
+    // Bedrock : port UDP 19132 par défaut ; Java : 25565.
+    let port = port.unwrap_or(if matches!(loader.as_str(), "bedrock" | "bedrockpreview" | "pocketmine" | "nukkit") { 19132 } else { 25565 });
     let version = version.ok_or("--version est requis (ex: 1.21.11)")?;
 
     println!("Creation de '{name}' ({loader} {version})... cela peut prendre une minute (telechargement).");

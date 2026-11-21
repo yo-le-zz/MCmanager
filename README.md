@@ -41,7 +41,11 @@ Réécriture complète en Rust (backend Axum) de l'ancienne version Python/Tkint
 - **Ouverture automatique du navigateur** au lancement (désactivable via `MCMANAGER_NO_BROWSER=1`, utilisé automatiquement par les services systemd/Nix).
 - **Plateformes** : Linux x86_64 **et ARM64** (Raspberry Pi 4/5 : `.deb`, `.rpm`, archive portable, Docker multi-arch), **macOS** Intel (`.dmg`, macOS 11+, Apple Silicon via Rosetta 2 ; voir [docs/MACOS.md](docs/MACOS.md)) et Windows x86_64 **et ARM64** (installateur `.exe` / zip portable). Les binaires Linux sont compilés sur Ubuntu 22.04 (glibc 2.35 : Debian 12, Raspberry Pi OS Bookworm, RHEL 9 et plus récents). Le workflow GitHub compile tout, `./build.sh` fait de même en local.
 - **Double authentification (TOTP)**, **alertes** sur le tableau de bord (disque, sauvegardes, EULA, bot Discord) et **menu mobile** pour le téléphone.
-- **Bot Discord** : statut et activité modifiables à chaud, lien d'invitation, commande `/mc rejoindre` (voir [docs/DISCORD.md](docs/DISCORD.md)).
+- **Bot Discord** : statut et activité modifiables à chaud, lien d'invitation, commande `/mc rejoindre` (voir [docs/DISCORD.md](docs/DISCORD.md)). Depuis la 1.1.3, **Discord est une entrée du menu** (groupe « Serveur actif »).
+- **Minecraft Bedrock (1.1.3)** : serveur officiel (x86_64), Preview, **PocketMine-MP** et **Nukkit** (ARM compris) ; packs, add-ons et mondes `.mcworld`, liste d'autorisation, sauvegarde à chaud, ping UDP ([docs/BEDROCK.md](docs/BEDROCK.md)).
+- **Serveurs toujours allumés (1.1.3)** : ils repartent seuls avec MCManager, y compris après une mise à jour ; `mcmanager-server --install-service` crée le service de démarrage (systemd utilisateur, launchd, tâche planifiée).
+- **Plusieurs machines (1.1.3)** : transferts reprenables et vérifiés (SHA-256), copie / déplacement d'un serveur, miroir automatique des sauvegardes, mise à jour d'une machine distante, **modèles de serveur** ([docs/TRANSFERS.md](docs/TRANSFERS.md)).
+- **HTTPS natif et migration automatique (1.1.3)** : certificat PEM ou auto-signé sans reverse proxy ; anciennes données migrées avec copie de sécurité ([docs/MIGRATION.md](docs/MIGRATION.md)).
 - **Java détecté automatiquement** : bouton « Détecter » dans les réglages (JAVA_HOME, Homebrew, `/usr/lib/jvm`, `Program Files`...), avec la version requise par votre version de Minecraft.
 
 ### Mise à jour automatique selon le type d'installation
@@ -137,9 +141,12 @@ Voir [docs/BUILD.md](docs/BUILD.md) pour le détail des prérequis par plateform
 - [docs/SERVER.md](docs/SERVER.md) — `mcmanager-server` : mode serveur, Docker, multi-utilisateurs, serveurs distants
 - [docs/MACOS.md](docs/MACOS.md) — installer et utiliser MCManager sur macOS
 - [docs/ASSISTANT.md](docs/ASSISTANT.md) — assistant : outils, modes, sécurité
-- [docs/SECURITY.md](docs/SECURITY.md) — comptes, double authentification (TOTP), mise à jour, imports
+- [docs/SECURITY.md](docs/SECURITY.md) — comptes, double authentification (TOTP), HTTPS, transferts, mise à jour, imports
 - [docs/DISCORD.md](docs/DISCORD.md) · [docs/DOMAINS.md](docs/DOMAINS.md) — bot Discord, domaines et reverse proxy
-- [docs/PLAYIT.md](docs/PLAYIT.md) — tutoriel détaillé playit.gg
+- [docs/PLAYIT.md](docs/PLAYIT.md) — tutoriel détaillé playit.gg (Java et Bedrock)
+- [docs/BEDROCK.md](docs/BEDROCK.md) — serveurs Minecraft Bedrock
+- [docs/TRANSFERS.md](docs/TRANSFERS.md) — transferts entre machines, miroir de sauvegardes, modèles
+- [docs/MIGRATION.md](docs/MIGRATION.md) — migration des données d'une version antérieure
 - L'onglet **Docs & tutos** de l'application contient aussi un guide intégré.
 
 ## 🧩 Architecture (pour contribuer)
@@ -159,6 +166,15 @@ src/
   backup.rs      sauvegardes zip
   files.rs       navigateur/éditeur de fichiers, gestion mods/plugins
   playit.rs      intégration playit.gg
+  bedrock.rs     serveurs Bedrock : journal, ping RakNet (UDP), réglages, allowlist, sauvegarde à chaud
+  bedrock_dl.rs  téléchargement et installation des serveurs Bedrock (Mojang, PocketMine, PHP, Nukkit)
+  bedrock_packs.rs  packs, add-ons (.mcpack, .mcaddon) et mondes (.mcworld)
+  resume.rs      reprise des serveurs après arrêt ou mise à jour (manifeste, arrêt propre, redémarrage)
+  transfer.rs    transferts reprenables entre machines, miroir de sauvegardes
+  templates.rs   modèles de serveur
+  tls.rs         HTTPS natif (certificat PEM ou auto-signé, redirection HTTP)
+  service.rs     --install-service : systemd utilisateur, launchd, tâche planifiée
+  migrate.rs     migration des données (schema.json, copie de sécurité, serveurs rejetés)
   presets.rs     préréglages "un clic" (dont le trousseau performance)
   debug.rs       diagnostic automatique de crash (test des addons un par un)
   stats.rs       CPU/RAM + ping Minecraft (joueurs en ligne)
@@ -192,8 +208,7 @@ métier n'est dupliquée entre les deux.
 Le code est volontairement modulaire pour être facilement étendu : chaque
 fonctionnalité (marketplace, presets, playit...) vit dans son propre module et
 peut être enrichie sans toucher au reste. Idées pour la suite : RCON natif,
-tableaux de bord multi-machines, plugin système pour étendre l'API, thèmes UI,
-support Bedrock (via geyser), etc. Les contributions sont bienvenues.
+tableaux de bord multi-machines, plugin système pour étendre l'API, etc. Les contributions sont bienvenues.
 
 ## 📄 Licence
 

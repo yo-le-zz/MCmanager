@@ -24,29 +24,19 @@ pub async fn start_server(state: &AppState, id: Uuid) -> Result<()> {
     }
 
     let folder = PathBuf::from(&entry.folder);
-    if entry.eula_accepted {
+    // L'EULA est un fichier propre à Java ; Bedrock n'en a pas.
+    if entry.eula_accepted && !entry.loader.is_bedrock() {
         tokio::fs::write(folder.join("eula.txt"), "eula=true\n").await.ok();
     }
 
-    let mut cmd = Command::new(&entry.java_path);
-    cmd.arg(format!("-Xms{}M", entry.xms_mb))
-        .arg(format!("-Xmx{}M", entry.xmx_mb));
-    if entry.aikar_flags {
-        for arg in aikar_flags() {
-            cmd.arg(arg);
-        }
-    }
-    for arg in &entry.extra_args {
-        cmd.arg(arg);
-    }
-    cmd.arg("-jar").arg(&entry.jar_name).arg("nogui");
+    let (mut cmd, hint) = build_command(&entry, &folder);
     cmd.current_dir(&folder);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(false);
 
-    let mut child = cmd.spawn().context("impossible de demarrer Java (verifiez le chemin Java dans les parametres)")?;
+    let mut child = cmd.spawn().with_context(|| hint.clone())?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -81,7 +71,60 @@ pub async fn start_server(state: &AppState, id: Uuid) -> Result<()> {
     spawn_watcher(state.clone(), id);
     spawn_idle_watcher(state.clone(), id);
 
+    // Ce serveur doit repartir tout seul si MCManager s'arrête (mise à jour, redémarrage, coupure de courant).
+    crate::resume::add(state, id).await;
+
     Ok(())
+}
+
+/// Commande de lancement selon le type de serveur : `java -jar` (Java, Nukkit), binaire natif (Bedrock officiel)
+/// ou PHP (PocketMine-MP). Renvoie aussi le message d'aide à afficher si le lancement échoue.
+pub fn build_command(entry: &crate::models::ServerEntry, folder: &std::path::Path) -> (Command, String) {
+    use crate::models::Runtime;
+    match entry.loader.runtime() {
+        Runtime::Native => {
+            let exe = folder.join(&entry.jar_name);
+            #[cfg(unix)]
+            {
+                // Une archive extraite peut avoir perdu le bit exécutable (import, modèle, transfert).
+                let _ = crate::bedrock_dl::make_executable(&exe);
+            }
+            let mut cmd = Command::new(&exe);
+            // Linux : le serveur officiel charge ses bibliothèques depuis son propre dossier.
+            cmd.env("LD_LIBRARY_PATH", folder);
+            for arg in &entry.extra_args {
+                cmd.arg(arg);
+            }
+            (cmd, format!("impossible de lancer {} (le serveur Bedrock officiel n'existe que pour x86_64 sous Linux et Windows)", entry.jar_name))
+        }
+        Runtime::Php => {
+            let php = if entry.java_path.trim().is_empty() { "php" } else { entry.java_path.as_str() };
+            let mut cmd = Command::new(php);
+            cmd.arg(&entry.jar_name).arg("--no-wizard").arg("--disable-ansi");
+            for arg in &entry.extra_args {
+                cmd.arg(arg);
+            }
+            (cmd, "impossible de lancer PHP (PocketMine-MP exige PHP 8 avec l'extension pmmpthread : réinstallez le serveur pour télécharger le PHP officiel)".to_string())
+        }
+        Runtime::Java => {
+            let mut cmd = Command::new(&entry.java_path);
+            cmd.arg(format!("-Xms{}M", entry.xms_mb)).arg(format!("-Xmx{}M", entry.xmx_mb));
+            if entry.aikar_flags {
+                for arg in aikar_flags() {
+                    cmd.arg(arg);
+                }
+            }
+            for arg in &entry.extra_args {
+                cmd.arg(arg);
+            }
+            cmd.arg("-jar").arg(&entry.jar_name);
+            // Nukkit n'a pas l'option « nogui » de Minecraft Java.
+            if !entry.loader.is_bedrock() {
+                cmd.arg("nogui");
+            }
+            (cmd, "impossible de demarrer Java (verifiez le chemin Java dans les parametres)".to_string())
+        }
+    }
 }
 
 /// Sensible default JVM flags for a smoother-running Paper/Purpur/Spigot
@@ -113,15 +156,16 @@ fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(state: AppStat
     tokio::spawn(async move {
         let mut lines = BufReader::new(reader).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            // "Done (3.2s)! For help, type "help"" : le serveur accepte les joueurs.
-            if line.contains("Done (") && line.contains("For help") {
+            // Java : « Done (3.2s)! For help, type "help" » ; Bedrock officiel : « Server started. »
+            if crate::bedrock::is_ready_line(&line) {
                 let st = state.clone();
                 tokio::spawn(async move {
                     let name = st.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
                     crate::discord::notify(&st, crate::discord::Event::Ready, Some(id), &name, "Le serveur est prêt : les joueurs peuvent se connecter.", "The server is ready: players can connect.").await;
                 });
             }
-            if let Some((player, joined)) = parse_join_leave(&line) {
+            let parsed = parse_join_leave(&line).or_else(|| crate::bedrock::parse_player_event(&line).map(|(n, j, _)| (n, j)));
+            if let Some((player, joined)) = parsed {
                 let state = state.clone();
                 tokio::spawn(async move {
                     let name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
@@ -193,6 +237,13 @@ fn spawn_watcher(state: AppState, id: Uuid) {
 
             let Some(intentional) = exited else { continue };
             crate::history::record_boot_end(&state.data_dir, id, !intentional).await;
+
+            // Arrêt voulu : on ne le relancera pas au prochain démarrage de MCManager. Plantage sans redémarrage
+            // automatique : idem (pas de relance surprise d'un serveur qui plantait). Sans effet pendant l'arrêt de MCManager.
+            let keeps_running_intent = !intentional && state.servers.read().await.get(&id).map(|e| e.auto_restart).unwrap_or(false);
+            if !keeps_running_intent {
+                crate::resume::remove(&state, id).await;
+            }
 
             if intentional {
                 let name = state.servers.read().await.get(&id).map(|e| e.name.clone()).unwrap_or_default();
@@ -339,7 +390,7 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
 
             // Auto-stop when empty.
             if let Some(minutes) = entry.stop_when_empty_minutes {
-                match crate::stats::ping_server(entry.port).await {
+                match crate::stats::ping_entry(&entry).await {
                     Ok((Some(0), _, _)) => {
                         let since = *empty_since.get_or_insert_with(chrono::Utc::now);
                         let idle_minutes = chrono::Utc::now().signed_duration_since(since).num_minutes();
@@ -367,9 +418,15 @@ fn spawn_idle_watcher(state: AppState, id: Uuid) {
                                         break;
                                     }
                                 }
-                                let bedrock_port = has_geyser(&entry).then_some(19132);
+                                // Un serveur Bedrock (natif, PocketMine, Nukkit) n'écoute qu'en UDP sur son port ; un serveur Java
+                                // écoute en TCP, plus en UDP sur 19132 s'il a Geyser.
+                                let (java_port, bedrock_port) = if entry.loader.is_bedrock() {
+                                    (None, Some(entry.port))
+                                } else {
+                                    (Some(entry.port), has_geyser(&entry).then_some(19132))
+                                };
                                 let motd = format!("§b💤 {} - en veille, rejoignez pour la reveiller", entry.name);
-                                tokio::spawn(crate::sleeper::run(state.clone(), id, motd, entry.port, bedrock_port));
+                                tokio::spawn(crate::sleeper::run(state.clone(), id, motd, java_port, bedrock_port));
                             }
                             break;
                         }

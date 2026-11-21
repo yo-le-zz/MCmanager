@@ -696,8 +696,8 @@ pub(crate) async fn player_counts(state: &AppState, server: &ServerInfo) -> Opti
         let v = crate::remote::client_call_checked(&state.http, &identity, &target, json!({ "action": "status", "server_id": server.id }), Duration::from_secs(10)).await.ok()?;
         return Some((v["players"]["online"].as_u64()? as u32, v["players"]["max"].as_u64()? as u32));
     }
-    let port = state.servers.read().await.get(&server.id)?.port;
-    let (online, max, _) = crate::stats::ping_server(port).await.ok()?;
+    let entry = state.servers.read().await.get(&server.id)?.clone();
+    let (online, max, _) = crate::stats::ping_entry(&entry).await.ok()?;
     Some((online?, max?))
 }
 
@@ -815,6 +815,13 @@ async fn join_message(state: &AppState, cfg: &DiscordConfig, server: &ServerInfo
     let entry = state.servers.read().await.get(&server.id).cloned();
     let Some(entry) = entry else { return pick(l, "❌ Serveur introuvable.", "❌ Server not found.").to_string() };
     let loader = entry.loader.as_str();
+    // Bedrock : l'adresse et le port se saisissent séparément (Jouer → Serveurs → Ajouter un serveur) ; port UDP, pas de SRV.
+    if entry.loader.is_bedrock() {
+        let host = if cfg.join_host.trim().is_empty() { pick(l, "(adresse publique non configurée : demandez-la à un administrateur)", "(public address not configured: ask an administrator)").to_string() } else { format!("`{}`", cfg.join_host.trim()) };
+        let st = if server.running { pick(l, "🟢 en ligne", "🟢 online") } else { pick(l, "⚫ arrêté (demandez à un opérateur de le démarrer)", "⚫ stopped (ask an operator to start it)") };
+        return pick(l, "🎮 **{n}** (Bedrock) — {s}\nAdresse : {h}\nPort : `{p}`\nVersion : {v}\nMinecraft Bedrock → Jouer → Serveurs → Ajouter un serveur → saisissez l'adresse et le port.", "🎮 **{n}** (Bedrock) — {s}\nAddress: {h}\nPort: `{p}`\nVersion: {v}\nMinecraft Bedrock → Play → Servers → Add Server → enter the address and port.")
+            .replace("{n}", &server.label()).replace("{s}", st).replace("{h}", &host).replace("{p}", &entry.port.to_string()).replace("{v}", &format!("{} ({loader})", entry.mc_version));
+    }
     let state_line = if server.running { pick(l, "🟢 en ligne", "🟢 online") } else { pick(l, "⚫ arrêté (demandez à un opérateur de le démarrer)", "⚫ stopped (ask an operator to start it)") };
     if cfg.join_host.trim().is_empty() {
         return pick(l, "🎮 **{n}** — {s}\nVersion : Minecraft {v} ({loader}), port **{p}**.\nL'adresse publique n'est pas configurée : demandez-la à un administrateur.", "🎮 **{n}** — {s}\nVersion: Minecraft {v} ({loader}), port **{p}**.\nThe public address is not configured: ask an administrator.")

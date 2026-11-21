@@ -47,6 +47,17 @@ impl Default for ServerRuntime {
 }
 
 impl ServerRuntime {
+    /// Numéro de la dernière ligne de console reçue (croît sans jamais revenir en arrière).
+    pub fn seq(&self) -> u64 {
+        self.seq as u64
+    }
+
+    /// Lignes reçues après le numéro `seq` (dans la limite de l'historique conservé).
+    pub fn lines_after(&self, seq: u64) -> Vec<String> {
+        let n = (self.seq as u64).saturating_sub(seq) as usize;
+        self.backlog[self.backlog.len().saturating_sub(n)..].to_vec()
+    }
+
     pub fn push_line(&mut self, line: String) {
         self.seq += 1;
         self.backlog.push(line.clone());
@@ -88,6 +99,8 @@ pub struct AppStateInner {
     /// Servers living on other paired MCManager instances, shown in this
     /// instance's dashboard like local ones (see `hub.rs`).
     pub hub: crate::hub::RemoteHub,
+    /// Vrai pendant l'arrêt de MCManager : les arrêts de serveurs ne modifient plus le manifeste de reprise (voir `resume.rs`).
+    pub shutting_down: std::sync::atomic::AtomicBool,
 }
 
 /// Live progress of a running backup, polled by the UI. `done` is shared
@@ -112,10 +125,17 @@ pub async fn build_state() -> anyhow::Result<AppState> {
     let data_dir = resolve_data_dir();
     tokio::fs::create_dir_all(&data_dir).await.ok();
     tokio::fs::create_dir_all(data_dir.join("servers")).await.ok();
+    // Après un redémarrage demandé par l'ancienne instance (mise à jour) : on attend qu'elle ait fini de s'arrêter.
+    crate::resume::wait_for_previous_instance();
     acquire_instance_lock(&data_dir)?;
 
+    // Données d'une version antérieure : copie de sécurité, complétion des champs, écartement des entrées illisibles.
+    match crate::migrate::run(&data_dir).await {
+        Ok(r) => r.notes.iter().for_each(|n| tracing::info!("[migration] {n}")),
+        Err(e) => tracing::warn!("[migration] échec (les données restent lues telles quelles) : {e:#}"),
+    }
     let servers: HashMap<Uuid, ServerEntry> = match tokio::fs::read_to_string(registry_path(&data_dir)).await {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Ok(s) => crate::migrate::parse_servers(&s, &data_dir).0,
         Err(_) => HashMap::new(),
     };
 
@@ -125,7 +145,7 @@ pub async fn build_state() -> anyhow::Result<AppState> {
     };
 
     let http = reqwest::Client::builder()
-        .user_agent("mcmanager/1.0.0 (+https://github.com/yo-le-zz/MCmanager)")
+        .user_agent(concat!("mcmanager/", env!("CARGO_PKG_VERSION"), " (+https://github.com/yo-le-zz/MCmanager)"))
         .build()?;
 
     let (playit_tx, _rx) = broadcast::channel(512);
@@ -141,6 +161,7 @@ pub async fn build_state() -> anyhow::Result<AppState> {
         playit_backlog: RwLock::new(Vec::new()),
         backup_progress: RwLock::new(HashMap::new()),
         hub: Default::default(),
+        shutting_down: Default::default(),
     });
 
     Ok(state)
@@ -170,6 +191,7 @@ pub async fn build_state_for_test(data_dir: &std::path::Path) -> AppState {
         playit_backlog: RwLock::new(Vec::new()),
         backup_progress: RwLock::new(HashMap::new()),
         hub: Default::default(),
+        shutting_down: Default::default(),
     })
 }
 
@@ -180,6 +202,7 @@ fn default_config(data_dir: &PathBuf) -> AppConfig {
         update_repo: "yo-le-zz/MCmanager".to_string(),
         check_updates_on_start: true,
         data_dir: data_dir.to_string_lossy().to_string(),
+        resume_servers: true,
     }
 }
 

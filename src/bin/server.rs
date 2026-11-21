@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use mcmanager::models::Loader;
 use mcmanager::remote::{RemoteIdentity, RemoteRuntime};
-use mcmanager::{auth, debug, downloader, modrinth, process, remote, state, updater, web};
+use mcmanager::{auth, debug, downloader, modrinth, process, remote, resume, state, updater, web};
 use uuid::Uuid;
 
 /// Everything the REPL needs for the remote-control feature, held across
@@ -55,6 +55,20 @@ async fn main() -> anyhow::Result<()> {
     // daemon is running (it only touches users.json, which the daemon re-reads
     // by itself) - e.g. `docker exec mcmanager mcmanager-server user passwd admin`.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Service de démarrage automatique : systemd (Linux), launchd (macOS), tâche planifiée (Windows).
+    if let Some(cmd) = argv.first().map(|a| a.as_str()).filter(|a| matches!(*a, "--install-service" | "--uninstall-service" | "--service-status")) {
+        let exe = std::env::current_exe()?;
+        let msg = match cmd {
+            "--install-service" => mcmanager::service::install(&exe).await,
+            "--uninstall-service" => mcmanager::service::uninstall().await,
+            _ => mcmanager::service::status().await,
+        };
+        match msg {
+            Ok(m) => println!("{m}"),
+            Err(e) => { eprintln!("Erreur : {e:#}"); std::process::exit(1); }
+        }
+        return Ok(());
+    }
     if argv.first().map(|a| a.as_str()) == Some("user") {
         let data_dir = state::resolve_data_dir();
         tokio::fs::create_dir_all(&data_dir).await.ok();
@@ -131,12 +145,15 @@ async fn main() -> anyhow::Result<()> {
     } else if args.iter().any(|a| a == "--daemon") {
         run_daemon(&app_state, &mut remote_repl, &args).await
     } else {
+        resume::spawn_resume(app_state.clone());
         run_interactive(&app_state, &mut remote_repl).await
     };
 
     if let Some(task) = remote_repl.server_task.take() {
         task.abort();
     }
+    // Quelle que soit la façon de quitter : arrêt propre des serveurs, qui reprendront au prochain démarrage.
+    resume::graceful_shutdown(&app_state, resume::STOP_TIMEOUT).await;
     let _ = tokio::fs::remove_file(lock_data_dir.join("mcmanager.lock")).await;
     result
 }
@@ -149,6 +166,7 @@ async fn run_daemon(state: &state::AppState, remote_repl: &mut RemoteRepl, args:
     if args.iter().any(|a| a == "--no-web") {
         println!("Mode daemon sans interface web - en attente (Ctrl+C ou SIGTERM pour arreter proprement).");
         web::spawn_background_tasks(state.clone());
+        resume::spawn_resume(state.clone());
         web::wait_for_stop_signal().await;
         println!("Arret demande, fermeture propre...");
         return Ok(());
@@ -175,7 +193,7 @@ async fn run_daemon(state: &state::AppState, remote_repl: &mut RemoteRepl, args:
 
     println!("Interface web : http://{host}:{port}  (empreinte de cette instance : {})", rt.fingerprint());
     println!("Controle a distance : actif sur ce meme port - 'remote pairing-code' (ou l'onglet Controle a distance) pour jumeler une machine.");
-    web::serve(app, addr, state.data_dir.clone()).await
+    web::serve(app, addr, state.clone()).await
 }
 
 async fn run_interactive(state: &state::AppState, remote_repl: &mut RemoteRepl) -> anyhow::Result<()> {
@@ -448,17 +466,24 @@ async fn cmd_create(state: &state::AppState, args: &[&str]) -> anyhow::Result<()
         }
     }
     let name = name.ok_or_else(|| anyhow::anyhow!("--name est requis"))?;
-    let loader_str = loader_str.ok_or_else(|| anyhow::anyhow!("--loader est requis (vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge)"))?;
+    let loader_str = loader_str.ok_or_else(|| anyhow::anyhow!("--loader est requis (Java : vanilla|paper|purpur|spigot|fabric|quilt|forge|neoforge ; Bedrock : bedrock|bedrockpreview|pocketmine|nukkit)"))?;
     let mc_version = version.ok_or_else(|| anyhow::anyhow!("--version est requis (ex: 1.21.11)"))?;
     let loader: Loader = serde_json::from_value(serde_json::Value::String(loader_str.clone()))
         .map_err(|_| anyhow::anyhow!("loader inconnu : {loader_str}"))?;
 
     let id = Uuid::new_v4();
     let folder = state.data_dir.join("servers").join(id.to_string());
-    let java_path = state.config.read().await.java_path.clone();
+    let mut java_path = state.config.read().await.java_path.clone();
+    // Bedrock : port UDP par défaut 19132 (sauf --port), et « java_path » devient le programme de lancement (PHP) ou rien.
+    let port = if loader.is_bedrock() && port == 25565 { loader.default_port() } else { port };
 
     println!("Creation de '{name}' ({loader_str} {mc_version})... cela peut prendre une minute (telechargement).");
     let result = downloader::setup_server(&state.http, loader, &mc_version, None, &folder, &java_path).await?;
+    match loader.runtime() {
+        mcmanager::models::Runtime::Native => java_path = String::new(),
+        mcmanager::models::Runtime::Php => java_path = result.runtime_path.clone().unwrap_or_else(|| "php".into()),
+        mcmanager::models::Runtime::Java => {}
+    }
 
     let entry = mcmanager::models::ServerEntry {
         id, name, loader, mc_version,
@@ -480,10 +505,15 @@ async fn cmd_create(state: &state::AppState, args: &[&str]) -> anyhow::Result<()
         dynamic_server: false,
         created_at: chrono::Utc::now(),
     };
-    tokio::fs::write(folder.join("eula.txt"), "eula=true\n").await.ok();
     let props_path = folder.join("server.properties");
-    if !props_path.exists() {
-        tokio::fs::write(&props_path, format!("server-port={}\nmotd=Serveur cree avec MCManager\nonline-mode=true\n", entry.port)).await.ok();
+    if loader.is_bedrock() {
+        let base = tokio::fs::read_to_string(&props_path).await.unwrap_or_default();
+        tokio::fs::write(&props_path, mcmanager::bedrock::apply_defaults(&base, loader, &entry.name, entry.port)).await.ok();
+    } else {
+        tokio::fs::write(folder.join("eula.txt"), "eula=true\n").await.ok();
+        if !props_path.exists() {
+            tokio::fs::write(&props_path, format!("server-port={}\nmotd=Serveur cree avec MCManager\nonline-mode=true\n", entry.port)).await.ok();
+        }
     }
     state.servers.write().await.insert(id, entry);
     state::save_servers(state).await?;

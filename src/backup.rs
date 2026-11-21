@@ -9,7 +9,7 @@ use zip::write::FileOptions;
 
 use crate::models::BackupInfo;
 
-fn backups_dir(data_dir: &Path, server_id: &uuid::Uuid) -> PathBuf {
+pub fn backups_dir(data_dir: &Path, server_id: &uuid::Uuid) -> PathBuf {
     data_dir.join("backups").join(server_id.to_string())
 }
 
@@ -29,11 +29,36 @@ pub fn create_backup_tracked(
     server_folder: &Path,
     progress: Arc<AtomicU64>,
 ) -> Result<String> {
+    create_backup_limited(data_dir, server_id, server_folder, progress, None)
+}
+
+/// Comme `create_backup_tracked`, avec des longueurs exactes à copier pour certains fichiers de `worlds/`.
+/// Sert à la sauvegarde « à chaud » d'un serveur Bedrock : après `save hold`, les fichiers de la base continuent de
+/// grossir et il faut s'arrêter à la longueur annoncée par `save query` pour obtenir une copie cohérente.
+pub fn create_backup_limited(
+    data_dir: &Path,
+    server_id: &uuid::Uuid,
+    server_folder: &Path,
+    progress: Arc<AtomicU64>,
+    limits: Option<&std::collections::HashMap<String, u64>>,
+) -> Result<String> {
     let dir = backups_dir(data_dir, server_id);
     std::fs::create_dir_all(&dir)?;
     let name = format!("backup-{}.zip", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
     let dest = dir.join(&name);
-    let file = File::create(&dest)?;
+    // L'archive est écrite sous « .part » puis renommée une fois complète : une sauvegarde en cours ou interrompue
+    // n'apparaît jamais dans la liste (elle ne peut être ni restaurée, ni envoyée à une autre machine à moitié écrite).
+    let part = dir.join(format!("{name}.part"));
+    struct PartGuard(PathBuf, bool);
+    impl Drop for PartGuard {
+        fn drop(&mut self) {
+            if !self.1 {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+    }
+    let mut guard = PartGuard(part.clone(), false);
+    let file = File::create(&part)?;
     let mut zip = zip::ZipWriter::new(file);
     let options: FileOptions = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -57,12 +82,18 @@ pub fn create_backup_tracked(
         } else {
             // Copie en flux : un monde Minecraft peut peser plusieurs Go, on ne le charge jamais en mémoire.
             let mut f = File::open(path)?;
-            let big = f.metadata().map(|m| m.len() >= u32::MAX as u64).unwrap_or(false);
-            zip.start_file(rel_str, options.large_file(big))?;
-            std::io::copy(&mut f, &mut zip)?;
+            let limit = limits.and_then(|m| rel_str.strip_prefix("worlds/").and_then(|r| m.get(r))).copied();
+            let len = limit.unwrap_or_else(|| f.metadata().map(|m| m.len()).unwrap_or(0));
+            zip.start_file(rel_str, options.large_file(len >= u32::MAX as u64))?;
+            match limit {
+                Some(n) => std::io::copy(&mut std::io::Read::take(&mut f, n), &mut zip)?,
+                None => std::io::copy(&mut f, &mut zip)?,
+            };
         }
     }
     zip.finish()?;
+    std::fs::rename(&part, &dest)?;
+    guard.1 = true;
     Ok(name)
 }
 
@@ -75,8 +106,8 @@ pub fn list_backups(data_dir: &Path, server_id: &uuid::Uuid) -> Result<Vec<Backu
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let meta = entry.metadata()?;
-        if !meta.is_file() {
-            continue;
+        if !meta.is_file() || !entry.file_name().to_string_lossy().ends_with(".zip") {
+            continue; // « .part » = sauvegarde en cours d'écriture
         }
         let created: chrono::DateTime<chrono::Utc> = meta.modified().ok()
             .map(chrono::DateTime::<chrono::Utc>::from)
@@ -171,10 +202,40 @@ pub async fn after_backup_created(state: &crate::state::AppState, id: uuid::Uuid
         }
     }
 
+    // Copie automatique vers une autre machine si un miroir est configuré pour ce serveur (en arrière-plan).
+    crate::transfer::mirror_backup(state, id, backup_name).await;
+
     crate::discord::notify(state, crate::discord::Event::Backup, Some(id), &entry.name, &format!("Nouvelle sauvegarde créée : `{backup_name}`."), &format!("New backup created: `{backup_name}`.")).await;
     crate::ntfy::notify(
         &state.http, &state.data_dir, crate::ntfy::Event::Backup,
         &format!("💾 {} : sauvegarde terminee", entry.name),
         &format!("Nouvelle sauvegarde creee : {backup_name}."),
     ).await;
+}
+
+#[cfg(test)]
+mod partial_tests {
+    use super::*;
+
+    #[test]
+    fn backup_is_listed_only_when_complete_and_failures_leave_nothing() {
+        let d = std::env::temp_dir().join(format!("mcm-bk-{}", uuid::Uuid::new_v4()));
+        let folder = d.join("srv");
+        std::fs::create_dir_all(folder.join("world")).unwrap();
+        std::fs::write(folder.join("world/level.dat"), "L").unwrap();
+        let id = uuid::Uuid::new_v4();
+        let name = create_backup_tracked(&d, &id, &folder, Arc::new(AtomicU64::new(0))).unwrap();
+        let dir = backups_dir(&d, &id);
+        assert!(dir.join(&name).is_file() && !dir.join(format!("{name}.part")).exists(), "pas de fichier .part après une sauvegarde réussie");
+        // Un « .part » abandonné (arrêt brutal) n'apparaît pas dans la liste.
+        std::fs::write(dir.join("backup-20200101-000000.zip.part"), "incomplet").unwrap();
+        let list = list_backups(&d, &id).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, name);
+        // Dossier source illisible : l'erreur ne laisse aucun fichier partiel.
+        let err = create_backup_tracked(&d, &id, &d.join("absent"), Arc::new(AtomicU64::new(0)));
+        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.ends_with(".part") && !n.starts_with("backup-2020")).collect();
+        assert!(after.is_empty(), "{after:?} ({err:?})");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
